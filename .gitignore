@@ -1,0 +1,15 @@
+# build artifacts
+/bin/
+/build/
+/goddns
+
+# rpm staging (SPECS/ stays tracked)
+/packaging/rpm/BUILD/
+/packaging/rpm/BUILDROOT/
+/packaging/rpm/RPMS/
+/packaging/rpm/SRPMS/
+/packaging/rpm/SOURCES/
+
+checksums.txt
+*.deb
+*.rpm
