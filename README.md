@@ -242,6 +242,19 @@ plus the one-time delegation in the parent: `internal IN NS sdns.myip.gr.`
 Hosts added to the proxy table at runtime are picked up by the hot
 reload, certs included — no restart.
 
+**Adding proxy hosts to an existing DDNS zone** (no second zone): proxied
+names can live straight in the `ddns.` zone you already run — and since
+goddns owns that zone, it can create the DNS record itself, no
+`rndc freeze`/named.conf involved:
+
+    goddns token add -fqdn idrac.ddns.myip.gr -zone ddns.myip.gr
+    curl "https://<goddns-host>:8245/update/<token>/<goddns-public-ip>"
+
+then add the `[proxy."idrac.ddns.myip.gr"]` block. First-time
+`proxy_enabled = true` needs one restart; everything after that is hot.
+For acme certs in that zone, widen the policy once:
+`grant acme-update. wildcard *.ddns.myip.gr. TXT;`
+
 What you get per request: host-based routing, per-host client allowlist
 (403), per-host per-IP rate limiting (429), an nginx-style access log line
 (`proxy-access host peer "GET /" 200 11B 5ms`), upstream errors logged and
