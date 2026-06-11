@@ -179,8 +179,9 @@ Responses follow DynDNS2 conventions: `good <ip>`, `nochg <ip>`, `badauth`,
 `nohost`. `nochg` skips the DNS write entirely, so a 1-minute cron causes no
 zone churn.
 
-MikroTik: import `configs/mikrotik-ddns.rsc`, paste your token, schedule
-every 1–3 min.
+MikroTik: import `configs/mikrotik-ddns-minimal.rsc` — a one-shot import
+that creates both the script and the 3-minute scheduler (edit the URL
+first). `configs/mikrotik-ddns.rsc` is the verbose variant with logging.
 
 **The URL is the credential.** A bare GET with a valid token performs an
 update with the caller's source IP — that is the point of DDNS, but it also
