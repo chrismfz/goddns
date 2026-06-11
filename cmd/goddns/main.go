@@ -4,6 +4,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -93,7 +94,8 @@ func cmdToken(args []string) {
 		}
 		fmt.Printf("Created %s (zone %s, ttl %d)\n", rec.FQDN, rec.Zone, rec.TTL)
 		fmt.Printf("Token (store it now, shown once):\n  %s\n\n", tok)
-		fmt.Printf("Test:\n  curl \"https://<this-host>:8245/update/%s\"\n", tok)
+		fmt.Printf("Test:\n  curl \"https://%s%s/update/%s\"\n", serverHost(cfg), listenPort(cfg), tok)
+		fmt.Printf("\nNote: the URL IS the credential. Anything that fetches it (chat link\npreviews, URL scanners) triggers an update — never paste it into chats.\n")
 	case "list":
 		recs, err := st.List()
 		if err != nil {
@@ -118,6 +120,28 @@ func cmdToken(args []string) {
 		usage()
 		os.Exit(2)
 	}
+}
+
+// serverHost picks the best name for example URLs: the ACME domain when
+// configured (that's the name on the cert), otherwise the machine hostname.
+func serverHost(cfg *config.Config) string {
+	if cfg.ACMEDomain != "" {
+		return cfg.ACMEDomain
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "<this-host>"
+}
+
+// listenPort renders the ":port" suffix of the configured listen address
+// (empty for :443 so example URLs stay clean).
+func listenPort(cfg *config.Config) string {
+	_, port, err := net.SplitHostPort(cfg.Listen)
+	if err != nil || port == "" || port == "443" {
+		return ""
+	}
+	return ":" + port
 }
 
 func fatal(format string, a ...any) {

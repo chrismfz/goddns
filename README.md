@@ -7,6 +7,9 @@ a bearer token to exactly one FQDN, and pushes a signed dynamic UPDATE to
 X-Forwarded-For regression in 11.136.0.20 — without touching the CFM
 DNAT/WAF stack.
 
+> **New here? Start with [QUICKSTART.md](QUICKSTART.md)** — your own DynDNS
+> from zero in ~10 minutes, self-issued TLS included, no certbot needed.
+
 ## Why this exists
 
 cPanel's `/cpanelwebcall/` DDNS records the client IP. After 11.136.0.20,
@@ -178,6 +181,13 @@ zone churn.
 
 MikroTik: import `configs/mikrotik-ddns.rsc`, paste your token, schedule
 every 1–3 min.
+
+**The URL is the credential.** A bare GET with a valid token performs an
+update with the caller's source IP — that is the point of DDNS, but it also
+means anything that fetches the URL flips your record. Chat apps
+(Slack/Discord/Telegram/Teams) auto-fetch pasted links from their preview
+bots, and some AV/browser products scan clipboard URLs. Never paste a full
+update URL anywhere; if one leaks, `goddns token del` + `add` immediately.
 
 ## Troubleshooting
 
