@@ -27,6 +27,7 @@ type Config struct {
 	Listen         string `toml:"listen"`          // e.g. ":8245" or "84.54.49.3:8245"
 	DBPath         string `toml:"db_path"`         // SQLite token store
 	ReloadInterval int    `toml:"reload_interval"` // config re-check period, seconds
+	LogFile        string `toml:"log_file"`        // dedicated log file; empty = stderr/journald. Hot-swappable.
 
 	// TLS
 	TLSMode  string `toml:"tls_mode"`  // "files" or "acme"

@@ -171,6 +171,8 @@ deb: build ## Δημιουργεί .deb
 	@install -m0755 "$(BIN)" "$(PKGROOT)/usr/bin/goddns"
 	@install -m0640 "$(CONFIG_DIR)/goddns.service" "$(PKGROOT)/lib/systemd/system/goddns.service"
 	@install -m0640 "$(CONFIG_DIR)/goddns.conf"    "$(PKGROOT)/etc/goddns/goddns.conf"
+	@mkdir -p "$(PKGROOT)/etc/logrotate.d"
+	@install -m0644 "$(CONFIG_DIR)/goddns.logrotate" "$(PKGROOT)/etc/logrotate.d/goddns"
 
 	@rsync -a --delete "$(CONFIG_DIR)/" "$(PKGROOT)/usr/share/goddns/configs/"
 	@rsync -a --delete "$(SCRIPTS_DIR)/" "$(PKGROOT)/usr/share/goddns/scripts/"
@@ -191,6 +193,8 @@ stage-pkgroot: build
 	@mkdir -p $(PKGROOT)/etc/goddns
 	@chmod 0750 $(PKGROOT)/etc/goddns
 	@[ -f $(PKGROOT)/etc/goddns/goddns.conf ] || install -m0640 $(CONFIG_DIR)/goddns.conf $(PKGROOT)/etc/goddns/goddns.conf
+	@mkdir -p $(PKGROOT)/etc/logrotate.d
+	@install -m0644 $(CONFIG_DIR)/goddns.logrotate $(PKGROOT)/etc/logrotate.d/goddns
 
 	# === ship ALL example configs ===
 	@mkdir -p $(PKGROOT)/usr/share/goddns/configs

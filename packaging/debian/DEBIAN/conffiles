@@ -1,1 +1,2 @@
 /etc/goddns/goddns.conf
+/etc/logrotate.d/goddns

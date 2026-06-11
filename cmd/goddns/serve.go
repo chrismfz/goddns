@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,6 +39,43 @@ type tlsSource struct {
 	manage  func(context.Context, []string) error // nil in files mode
 }
 
+// logSink redirects the standard logger to a dedicated file (log_file in
+// the config) and supports hot-swapping the path on reload. Empty path =
+// stderr (journald under systemd). Rotation is handled by the shipped
+// logrotate config with copytruncate, so no reopen signal is needed.
+var logSink struct {
+	mu   sync.Mutex
+	f    *os.File
+	path string
+}
+
+func setLogOutput(path string) error {
+	logSink.mu.Lock()
+	defer logSink.mu.Unlock()
+	if path == logSink.path {
+		return nil
+	}
+	if path == "" {
+		log.SetOutput(os.Stderr)
+		if logSink.f != nil {
+			logSink.f.Close()
+			logSink.f = nil
+		}
+		logSink.path = ""
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	if err != nil {
+		return err
+	}
+	log.SetOutput(f)
+	if logSink.f != nil {
+		logSink.f.Close()
+	}
+	logSink.f, logSink.path = f, path
+	return nil
+}
+
 func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	cfgPath := fs.String("config", defaultConf, "config file")
@@ -46,6 +84,9 @@ func cmdServe(args []string) {
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fatal("%v", err)
+	}
+	if err := setLogOutput(cfg.LogFile); err != nil {
+		fatal("log_file %s: %v", cfg.LogFile, err)
 	}
 	backend, err := ddns.NewRFC2136(cfg.DNSServer, cfg.TSIGName, cfg.TSIGAlgo, cfg.TSIGSecret)
 	if err != nil {
@@ -240,6 +281,9 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 		if fields := cfg.NeedsRestart(old.cfg); len(fields) > 0 {
 			log.Printf("config reloaded, but changes to %s need a restart to take effect",
 				strings.Join(fields, ", "))
+		}
+		if err := setLogOutput(cfg.LogFile); err != nil {
+			log.Printf("log_file %s: %v — keeping current log output", cfg.LogFile, err)
 		}
 
 		applyProxy(cfg)

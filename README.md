@@ -181,6 +181,49 @@ Two modes, chosen with `tls_mode`:
   (`acme_tsig_name`) as shown in `configs/named-update-policy.example`,
   and test with the staging CA first (`acme_ca`).
 
+### Edge case: one shared certbot wildcard for everything (files mode)
+
+If you maintain a certbot wildcard you also distribute to other machines,
+you can keep it as the single cert for goddns **and** the proxy names —
+but remember: **wildcards match ONE label**. `*.myip.gr` covers
+`sdns.myip.gr` but NOT `ha.internal.myip.gr`, so the browser will warn
+until the cert also carries `*.internal.myip.gr`. Two steps, once:
+
+1. Grant the certbot key the extra challenge name in the zone's
+   `update-policy` (then `rndc reconfig`):
+
+       grant acme-key name _acme-challenge.internal.myip.gr. TXT;
+
+2. Expand the existing lineage — same files, one more SAN, nothing changes
+   for whoever else consumes the wildcard:
+
+       certbot certonly --cert-name myip.gr --dns-rfc2136 \
+         --dns-rfc2136-credentials /etc/letsencrypt/rfc2136.ini \
+         -d "myip.gr" -d "*.myip.gr" -d "*.internal.myip.gr" --expand
+
+The deploy hook (`certbot-deploy-goddns.sh`) re-mirrors the pair to
+`/etc/goddns/certs/` and goddns hot-reloads it at the next handshake — no
+restarts anywhere. Verify with:
+
+    openssl x509 -in /etc/goddns/certs/fullchain.pem -noout -ext subjectAltName
+
+Note there is no "fallback to ACME" in files mode: the configured pair is
+served for every SNI, matching or not. Per-host issuance is what
+`tls_mode = "acme"` does.
+
+## Logging
+
+By default goddns logs to stderr (journald under systemd). On a busy DNS
+host that journal is shared with named and friends, so the packaged config
+sets a dedicated file:
+
+    log_file = "/var/log/goddns.log"
+
+Everything lands there: DDNS updates, `proxy-access` lines, 502s, config
+reload events. The package creates the file (goddns:goddns 0640) and ships
+`/etc/logrotate.d/goddns` (weekly, copytruncate). The key is
+hot-swappable — change/comment it and it applies on the next reload tick.
+
 ## Config hot reload
 
 `/etc/goddns/goddns.conf` is polled cfm-style (mtime+SHA-256, every
@@ -484,6 +527,40 @@ telltale line is `journal open failed: unable to create journal`.
 
 **`REFUSED`** means the update-policy does not grant the key that exact
 name/type; **`NOTAUTH`** means the TSIG key name/secret mismatch.
+
+### Surviving manual edits on a dynamic BIND zone
+
+The moment a zone has an `update-policy` (even just an ACME TXT grant) it
+is **dynamic and journal-managed**, and three classic traps appear. Rules
+learned the hard way:
+
+- **Never edit-and-reload.** The only safe cycle is:
+
+      rndc freeze <zone>                       # flush journal, pause updates
+      $EDITOR zonefile                         # edit AND bump the serial
+      named-checkzone <zone> /path/zonefile    # needs the file argument!
+      rndc thaw <zone>                         # reload + fresh journal + NOTIFY
+
+  `rndc reload <zone>` on a dynamic zone is *refused* by design
+  ("dynamic zone"), and a bare `rndc reload` silently *skips* dynamic
+  zones while reporting success — always verify with
+  `dig +short SOA <zone> @localhost` afterwards.
+
+- **`rndc: 'reload' failed: out of range`** = a stale journal that no
+  longer matches the hand-edited file. Fix: `rndc freeze <zone>`,
+  delete the `.jnl` next to the zone file, `rndc thaw <zone>`.
+
+- **Slaves serve old data with the SAME serial.** Equal serial means "I'm
+  current" — no transfer, ever. If you edited without bumping (or bumped
+  before the final edit), the change is invisible to the world while
+  `@localhost` looks fine. Bump again, thaw, then compare:
+
+      for ns in localhost ns1.example.com ns2.example.com; do
+        echo -n "$ns: "; dig +short SOA example.com @$ns
+      done
+
+  And remember public resolvers cache NXDOMAIN up to the SOA negative
+  TTL — verify against the authoritative servers directly.
 
 ## If you ever front goddns with another proxy
 
