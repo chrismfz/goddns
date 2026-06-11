@@ -50,6 +50,9 @@ func (s *Server) Run() error {
 		Addr:              cfg.Listen,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 		TLSConfig: &tls.Config{
 			MinVersion:     tls.VersionTLS12,
 			GetCertificate: s.GetCert,
@@ -70,6 +73,13 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 		ip := net.ParseIP(strings.TrimSpace(override))
 		if ip == nil {
 			return nil, fmt.Errorf("invalid ip %q", override)
+		}
+		// RFC1918 is allowed (VPN/internal DDNS is a legitimate use), but
+		// loopback/unspecified/multicast/link-local in a public record is
+		// only ever a rebinding primitive — reject.
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() ||
+			ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			return nil, fmt.Errorf("refusing non-routable ip %q", override)
 		}
 		return ip, nil
 	}

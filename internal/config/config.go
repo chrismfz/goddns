@@ -150,11 +150,15 @@ func Load(path string) (*Config, error) {
 		norm := make(map[string]ProxyRule, len(c.Proxy))
 		for host, rule := range c.Proxy {
 			h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-			if h == "" {
-				return nil, fmt.Errorf("proxy: empty hostname key")
+			if h == "" || strings.ContainsAny(h, "/: \t") {
+				return nil, fmt.Errorf("proxy: invalid hostname key %q", host)
+			}
+			if _, dup := norm[h]; dup {
+				return nil, fmt.Errorf("proxy: duplicate hostname %q after normalisation", h)
 			}
 			u, err := url.Parse(rule.Upstream)
-			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			if err != nil || u.Host == "" || u.User != nil ||
+				(u.Scheme != "http" && u.Scheme != "https") {
 				return nil, fmt.Errorf("proxy %q: upstream must be http(s)://host[:port] (got %q)", h, rule.Upstream)
 			}
 			for _, cidr := range rule.Allow {
@@ -213,8 +217,9 @@ func (c *Config) NeedsRestart(old *Config) []string {
 	}
 	if c.TLSMode == TLSACME &&
 		(c.ACMEDomain != old.ACMEDomain || c.ACMECA != old.ACMECA ||
+			c.ACMEEmail != old.ACMEEmail ||
 			c.ACMEStorage != old.ACMEStorage || c.ACMETSIGName != old.ACMETSIGName ||
-			c.ACMETSIGSecret != old.ACMETSIGSecret) {
+			c.ACMETSIGAlgo != old.ACMETSIGAlgo || c.ACMETSIGSecret != old.ACMETSIGSecret) {
 		fields = append(fields, "acme_*")
 	}
 	if c.DBPath != old.DBPath {
