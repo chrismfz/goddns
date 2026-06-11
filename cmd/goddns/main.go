@@ -1,0 +1,126 @@
+// goddns — self-hosted Dynamic DNS over RFC 2136 / TSIG.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/store"
+)
+
+// Injected by the Makefile via -ldflags (cfm-style date versioning).
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+)
+
+const defaultConf = "/etc/goddns/goddns.conf"
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `goddns %s — self-hosted Dynamic DNS over RFC 2136 / TSIG
+
+Usage:
+  goddns serve  [-config %s]
+  goddns token add  -fqdn home.myip.gr -zone myip.gr [-ttl 60] [-config ...]
+  goddns token list [-config ...]
+  goddns token del  -fqdn home.myip.gr [-config ...]
+  goddns version
+`, Version, defaultConf)
+}
+
+func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "serve":
+		cmdServe(os.Args[2:])
+	case "token":
+		cmdToken(os.Args[2:])
+	case "version", "-v", "--version":
+		fmt.Printf("goddns %s (built %s)\n", Version, BuildTime)
+	case "-h", "--help", "help":
+		usage()
+	default:
+		usage()
+		os.Exit(2)
+	}
+}
+
+func openStore(cfg *config.Config) *store.Store {
+	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
+		fatal("create db dir: %v", err)
+	}
+	st, err := store.Open(cfg.DBPath)
+	if err != nil {
+		fatal("open store: %v", err)
+	}
+	return st
+}
+
+func cmdToken(args []string) {
+	if len(args) < 1 {
+		usage()
+		os.Exit(2)
+	}
+	sub := args[0]
+	fs := flag.NewFlagSet("token", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConf, "config file")
+	fqdnArg := fs.String("fqdn", "", "fully-qualified record name")
+	zoneArg := fs.String("zone", "", "zone the record lives in")
+	ttlArg := fs.Int("ttl", 60, "TTL for the record")
+	fs.Parse(args[1:])
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fatal("%v", err)
+	}
+	st := openStore(cfg)
+	defer st.Close()
+
+	switch sub {
+	case "add":
+		if *fqdnArg == "" || *zoneArg == "" {
+			fatal("token add requires -fqdn and -zone")
+		}
+		rec, tok, err := st.Add(*fqdnArg, *zoneArg, uint32(*ttlArg))
+		if err != nil {
+			fatal("add: %v", err)
+		}
+		fmt.Printf("Created %s (zone %s, ttl %d)\n", rec.FQDN, rec.Zone, rec.TTL)
+		fmt.Printf("Token (store it now, shown once):\n  %s\n\n", tok)
+		fmt.Printf("Test:\n  curl \"https://<this-host>:8245/update/%s\"\n", tok)
+	case "list":
+		recs, err := st.List()
+		if err != nil {
+			fatal("list: %v", err)
+		}
+		if len(recs) == 0 {
+			fmt.Println("(no records)")
+			return
+		}
+		for _, r := range recs {
+			fmt.Println(r)
+		}
+	case "del":
+		if *fqdnArg == "" {
+			fatal("token del requires -fqdn")
+		}
+		if err := st.Del(*fqdnArg); err != nil {
+			fatal("del: %v", err)
+		}
+		fmt.Printf("Deleted %s\n", store.FQDN(*fqdnArg))
+	default:
+		usage()
+		os.Exit(2)
+	}
+}
+
+func fatal(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "goddns: "+format+"\n", a...)
+	os.Exit(1)
+}

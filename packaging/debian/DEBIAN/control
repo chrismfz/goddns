@@ -1,0 +1,12 @@
+Package: goddns
+Version: 2026.06.11-1
+Section: net
+Priority: optional
+Architecture: amd64
+Depends: systemd, ca-certificates
+Maintainer: Christos Panagiotakis <chris@nixpal.com>
+Description: Self-hosted Dynamic DNS over RFC 2136 / TSIG
+ goddns runs an HTTPS endpoint that maps bearer tokens to single DNS
+ records and pushes signed RFC 2136 dynamic updates to BIND. Includes a
+ DynDNS2-compatible endpoint for off-the-shelf router clients and
+ optional self-issued TLS via ACME DNS-01 (no port 80/443 needed).

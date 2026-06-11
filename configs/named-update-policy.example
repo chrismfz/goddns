@@ -1,0 +1,33 @@
+// 1) Generate a dedicated key (do NOT reuse the certbot key):
+//      tsig-keygen -a hmac-sha256 ddns-update >> /etc/named/ddns.key
+//    then `include "/etc/named/ddns.key";` at the top of named.conf.
+//
+// 2) Grant that key the RIGHT to touch ONLY the DDNS names in the zone.
+//    This is the security boundary: a leaked goddns token still cannot
+//    modify anything except the exact records you list here.
+
+key "ddns-update" {
+    algorithm hmac-sha256;
+    secret "REPLACE-WITH-tsig-keygen-OUTPUT";
+};
+
+zone "myip.gr" {
+    type master;
+    file "/var/named/myip.gr.zone";
+    update-policy {
+        grant ddns-update. name home.myip.gr.   A AAAA;
+        grant ddns-update. name vpn.myip.gr.     A AAAA;
+        // add one line per DDNS hostname
+
+        // Only if you use tls_mode = "acme": goddns solves the DNS-01
+        // challenge by writing a TXT record through this same channel.
+        // Use a dedicated key (acme_tsig_name) so the DDNS key above
+        // never needs TXT rights:
+        //   tsig-keygen -a hmac-sha256 acme-update >> /etc/named/ddns.key
+        // grant acme-update. name _acme-challenge.sdns.myip.gr. TXT;
+    };
+};
+
+// Reload:  rndc reload   (or rndc reconfig if you only changed includes)
+// Note: a dynamic zone is managed via journal; edit it afterwards with
+// `rndc freeze myip.gr` / edit / `rndc thaw myip.gr`.

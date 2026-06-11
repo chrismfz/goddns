@@ -1,0 +1,49 @@
+#!/bin/sh
+set -e
+
+# ---------------------------------------------------------------------------
+# goddns system user and group
+#
+# The daemon drops to this account (see goddns.service). getent guards make
+# the calls idempotent across installs and upgrades — same pattern as cfm.
+# ---------------------------------------------------------------------------
+if ! getent group goddns >/dev/null 2>&1; then
+    groupadd --system goddns
+fi
+
+if ! getent passwd goddns >/dev/null 2>&1; then
+    useradd \
+        --system \
+        --gid goddns \
+        --no-create-home \
+        --home-dir /var/lib/goddns \
+        --shell /sbin/nologin \
+        --comment "goddns service account" \
+        goddns
+fi
+
+# ensure config dir, force 0700 on both new and upgrade installs.
+# /etc/goddns may hold TSIG secrets (goddns.conf / goddns.env) — root-only.
+mkdir -p /etc/goddns
+chmod 0700 /etc/goddns
+
+# secrets env file (GODDNS_TSIG_SECRET, GODDNS_ACME_TSIG_SECRET); created
+# empty so the operator only has to edit it, never to remember its perms.
+if [ ! -f /etc/goddns/goddns.env ]; then
+    touch /etc/goddns/goddns.env
+fi
+chmod 0600 /etc/goddns/goddns.env
+
+# state dir: SQLite token store + ACME storage, owned by the service user
+mkdir -p /var/lib/goddns
+chown goddns:goddns /var/lib/goddns
+chmod 0750 /var/lib/goddns
+
+# systemd reload/enable/start
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+    systemctl enable goddns.service || true
+    systemctl restart goddns.service || true
+fi
+
+exit 0
