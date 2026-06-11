@@ -161,7 +161,7 @@ deb: build ## Δημιουργεί .deb
 		"$(PKGROOT)/usr/share/goddns/scripts" \
 		"$(PKGROOT)/etc/goddns" \
 		"$(OUTDIR)"
-	@chmod 0700 "$(PKGROOT)/etc/goddns"
+	@chmod 0750 "$(PKGROOT)/etc/goddns"
 
 	# copy DEBIAN metadata/scripts
 	@cp -a "$(DEB_SRC)/." "$(PKGROOT)/DEBIAN/"
@@ -189,7 +189,7 @@ stage-pkgroot: build
 	@cp -f $(BINARY) $(PKGROOT)/usr/bin/goddns
 	# configs
 	@mkdir -p $(PKGROOT)/etc/goddns
-	@chmod 0700 $(PKGROOT)/etc/goddns
+	@chmod 0750 $(PKGROOT)/etc/goddns
 	@[ -f $(PKGROOT)/etc/goddns/goddns.conf ] || install -m0640 $(CONFIG_DIR)/goddns.conf $(PKGROOT)/etc/goddns/goddns.conf
 
 	# === ship ALL example configs ===

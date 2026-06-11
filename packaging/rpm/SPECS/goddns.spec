@@ -80,8 +80,8 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/goddns/LIC
 %license /usr/share/licenses/goddns/LICENSE
 %{_bindir}/goddns
 %{_unitdir}/goddns.service
-%attr(0700,root,root) %dir /etc/goddns
-%attr(0640,root,root) %config(noreplace) /etc/goddns/goddns.conf
+%attr(0750,root,goddns) %dir /etc/goddns
+%attr(0640,root,goddns) %config(noreplace) /etc/goddns/goddns.conf
 
 # shared examples (always overwritten on upgrade)
 %dir %{_datadir}/goddns
@@ -91,8 +91,17 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/goddns/LIC
 %{_datadir}/goddns/scripts/*
 
 %post
-# /etc/goddns may hold TSIG secrets — force 0700 on upgrade too.
-[ -d /etc/goddns ] && chmod 0700 /etc/goddns || true
+# config dir: root-owned but group-readable by the service user — the
+# daemon runs as goddns and must be able to read goddns.conf. Secrets stay
+# in goddns.env, which only systemd (root) reads via EnvironmentFile.
+if [ -d /etc/goddns ]; then
+    chown root:goddns /etc/goddns || true
+    chmod 0750 /etc/goddns || true
+fi
+if [ -f /etc/goddns/goddns.conf ]; then
+    chown root:goddns /etc/goddns/goddns.conf || true
+    chmod 0640 /etc/goddns/goddns.conf || true
+fi
 
 # secrets env file (GODDNS_TSIG_SECRET, GODDNS_ACME_TSIG_SECRET)
 if [ ! -f /etc/goddns/goddns.env ]; then

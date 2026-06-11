@@ -22,10 +22,17 @@ if ! getent passwd goddns >/dev/null 2>&1; then
         goddns
 fi
 
-# ensure config dir, force 0700 on both new and upgrade installs.
-# /etc/goddns may hold TSIG secrets (goddns.conf / goddns.env) — root-only.
+# config dir: root-owned but group-readable by the service user — the
+# daemon runs as goddns (unlike cfm, which runs as root with 0700 /etc/cfm)
+# and must be able to read goddns.conf. Secrets stay in goddns.env, which
+# only systemd (root) reads via EnvironmentFile.
 mkdir -p /etc/goddns
-chmod 0700 /etc/goddns
+chown root:goddns /etc/goddns
+chmod 0750 /etc/goddns
+if [ -f /etc/goddns/goddns.conf ]; then
+    chown root:goddns /etc/goddns/goddns.conf
+    chmod 0640 /etc/goddns/goddns.conf
+fi
 
 # secrets env file (GODDNS_TSIG_SECRET, GODDNS_ACME_TSIG_SECRET); created
 # empty so the operator only has to edit it, never to remember its perms.
