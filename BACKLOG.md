@@ -36,6 +36,17 @@ path prefix; consider mTLS for server-to-server use.
 FQDN, zone, last IP, last update age, update counter, last client UA.
 Needs a hits counter column in the records table (cheap migration).
 
+## Reverse proxy mode — shipped (v1.1), possible follow-ups
+
+The `proxy_enabled` knob, host→upstream table, allowlists, per-IP rate
+limiting and access logging are implemented. Candidate extensions:
+
+- Basic-auth / forward-auth option per host (today: CIDR allowlist only).
+- mTLS (client certificates) for the really sensitive consoles.
+- Separate access_log file / JSON log format (today: journald via stdout).
+- Per-host upstream CA pinning instead of the verify on/off switch.
+- Connection/concurrency caps per host in addition to request rate.
+
 ## Misc
 
 - Per-token rate limiting (a misbehaving client should not be able to spam

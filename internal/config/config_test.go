@@ -141,3 +141,75 @@ key_file  = "/tmp/k.pem"
 		t.Fatalf("tsig change should hot-reload, got %v", f)
 	}
 }
+
+func TestProxyConfig(t *testing.T) {
+	c, err := Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+proxy_enabled = true
+
+[proxy."Orion-IDRAC.internal.myip.gr."]
+upstream   = "https://10.23.201.200"
+allow      = ["84.54.49.0/24"]
+rate_limit = 10
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.ProxyEnabled || c.ProxyListen != ":443" {
+		t.Fatalf("proxy defaults: %+v", c)
+	}
+	r, ok := c.Proxy["orion-idrac.internal.myip.gr"] // normalised key
+	if !ok {
+		t.Fatalf("host key not normalised: %v", c.ProxyHosts())
+	}
+	if r.Upstream != "https://10.23.201.200" || r.RateLimit != 10 || r.UpstreamVerify {
+		t.Fatalf("rule: %+v", r)
+	}
+
+	if _, err := Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+[proxy."a.x"]
+upstream = "ftp://nope"
+`)); err == nil {
+		t.Fatal("bad upstream scheme accepted")
+	}
+	if _, err := Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+[proxy."a.x"]
+upstream = "https://10.0.0.1"
+allow    = ["not-a-cidr"]
+`)); err == nil {
+		t.Fatal("bad allow cidr accepted")
+	}
+}
+
+func TestProxyNeedsRestart(t *testing.T) {
+	base := `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+`
+	a, _ := Load(write(t, base))
+	b, _ := Load(write(t, base+"proxy_enabled = true"))
+	if f := b.NeedsRestart(a); len(f) == 0 {
+		t.Fatal("enabling proxy should need restart")
+	}
+	// adding a host while enabled is hot
+	c1, _ := Load(write(t, base+`
+proxy_enabled = true
+[proxy."a.x"]
+upstream = "https://10.0.0.1"
+`))
+	c2, _ := Load(write(t, base+`
+proxy_enabled = true
+[proxy."a.x"]
+upstream = "https://10.0.0.1"
+[proxy."b.x"]
+upstream = "https://10.0.0.2"
+`))
+	if f := c2.NeedsRestart(c1); len(f) != 0 {
+		t.Fatalf("adding a proxy host should be hot: %v", f)
+	}
+}

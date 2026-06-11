@@ -6,7 +6,9 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -52,7 +54,24 @@ type Config struct {
 	// default), so the connection peer IP is always the client.
 	TrustedProxies []string `toml:"trusted_proxies"`
 
+	// Reverse proxy mode: a second TLS listener that routes by SNI/Host to
+	// internal upstreams (iDRAC, switches, anything without proper TLS).
+	// Off by default — pure-DDNS deployments are unaffected.
+	ProxyEnabled        bool                 `toml:"proxy_enabled"`
+	ProxyListen         string               `toml:"proxy_listen"`          // e.g. ":443" (CAP_NET_BIND_SERVICE in the unit covers low ports)
+	ProxyRedirectListen string               `toml:"proxy_redirect_listen"` // optional plain-HTTP listener (e.g. ":80") that 308-redirects to https
+	Proxy               map[string]ProxyRule `toml:"proxy"`                 // host -> rule; hot-reloadable
+
 	trustedNets []*net.IPNet
+}
+
+// ProxyRule routes one public hostname to one internal upstream.
+type ProxyRule struct {
+	Upstream       string   `toml:"upstream"`        // http(s)://ip-or-host[:port]
+	UpstreamVerify bool     `toml:"upstream_verify"` // verify the upstream's TLS cert (default off: BMCs are self-signed)
+	PreserveHost   bool     `toml:"preserve_host"`   // keep the inbound Host header instead of the upstream's
+	Allow          []string `toml:"allow"`           // client CIDRs; empty = allow everyone (set it for BMCs!)
+	RateLimit      int      `toml:"rate_limit"`      // max requests/sec per client IP (burst 2x); 0 = unlimited
 }
 
 func defaults() Config {
@@ -121,7 +140,44 @@ func Load(path string) (*Config, error) {
 		}
 		c.trustedNets = append(c.trustedNets, n)
 	}
+
+	if c.ProxyListen == "" {
+		c.ProxyListen = ":443"
+	}
+	// Normalise host keys (lowercase, no trailing dot) and validate rules so
+	// a broken reload is rejected as a whole and the old config stays live.
+	if len(c.Proxy) > 0 {
+		norm := make(map[string]ProxyRule, len(c.Proxy))
+		for host, rule := range c.Proxy {
+			h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+			if h == "" {
+				return nil, fmt.Errorf("proxy: empty hostname key")
+			}
+			u, err := url.Parse(rule.Upstream)
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+				return nil, fmt.Errorf("proxy %q: upstream must be http(s)://host[:port] (got %q)", h, rule.Upstream)
+			}
+			for _, cidr := range rule.Allow {
+				if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+					return nil, fmt.Errorf("proxy %q: allow %q: %w", h, cidr, err)
+				}
+			}
+			norm[h] = rule
+		}
+		c.Proxy = norm
+	}
 	return &c, nil
+}
+
+// ProxyHosts returns the proxied hostnames, sorted (stable for comparisons
+// and for handing the set to the ACME manager).
+func (c *Config) ProxyHosts() []string {
+	hosts := make([]string, 0, len(c.Proxy))
+	for h := range c.Proxy {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 func canonKeyName(s string) string {
@@ -163,6 +219,10 @@ func (c *Config) NeedsRestart(old *Config) []string {
 	}
 	if c.DBPath != old.DBPath {
 		fields = append(fields, "db_path")
+	}
+	if c.ProxyEnabled != old.ProxyEnabled || c.ProxyListen != old.ProxyListen ||
+		c.ProxyRedirectListen != old.ProxyRedirectListen {
+		fields = append(fields, "proxy_enabled/proxy_listen")
 	}
 	return fields
 }

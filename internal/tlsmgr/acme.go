@@ -15,14 +15,15 @@ import (
 // challenge TXT record is written through the local BIND with RFC2136/TSIG,
 // so issuance never needs port 80/443 — goddns stays on its own port.
 type ACMEOptions struct {
-	Domain     string // certificate hostname
-	Email      string
-	CA         string // ACME directory; empty = Let's Encrypt production
-	Storage    string // directory for account + certs
-	DNSServer  string // addr:port of the BIND that serves the zone
-	TSIGName   string
-	TSIGAlgo   string // hmac-sha256 etc. (named.conf spelling)
-	TSIGSecret string // base64
+	Domain       string   // certificate hostname
+	ExtraDomains []string // additional hostnames (proxy mode), each gets its own cert
+	Email        string
+	CA           string // ACME directory; empty = Let's Encrypt production
+	Storage      string // directory for account + certs
+	DNSServer    string // addr:port of the BIND that serves the zone
+	TSIGName     string
+	TSIGAlgo     string // hmac-sha256 etc. (named.conf spelling)
+	TSIGSecret   string // base64
 }
 
 // ACME wraps a certmagic Config; renewals happen in the background and the
@@ -82,10 +83,17 @@ func NewACME(ctx context.Context, o ACMEOptions) (*ACME, error) {
 	magic.Issuers = []certmagic.Issuer{issuer}
 
 	// Loads from storage or obtains from the CA, then keeps it renewed.
-	if err := magic.ManageSync(ctx, []string{o.Domain}); err != nil {
-		return nil, fmt.Errorf("acme: obtaining certificate for %s: %w", o.Domain, err)
+	domains := append([]string{o.Domain}, o.ExtraDomains...)
+	if err := magic.ManageSync(ctx, domains); err != nil {
+		return nil, fmt.Errorf("acme: obtaining certificate for %v: %w", domains, err)
 	}
 	return &ACME{magic: magic}, nil
+}
+
+// Manage adds domains to the managed set (idempotent; cached certs are
+// no-ops). Used when a config reload introduces new proxied hostnames.
+func (a *ACME) Manage(ctx context.Context, domains []string) error {
+	return a.magic.ManageSync(ctx, domains)
 }
 
 // GetCertificate is plugged into tls.Config.GetCertificate.
