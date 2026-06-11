@@ -40,6 +40,9 @@ Needs a hits counter column in the records table (cheap migration).
 
 - Per-token rate limiting (a misbehaving client should not be able to spam
   UPDATEs even when the IP changes every call).
+- Optional per-token source CIDR allowlist (e.g. only the owner's ISP
+  ranges may update) — limits the blast radius of a leaked update URL,
+  e.g. one fetched by a chat-app link-preview bot.
 - Single call updating both A and AAAA when the client is dual-stack
   (today the IP family of the observed peer wins).
 - Optional `webhook_url` per record (notify on IP change).

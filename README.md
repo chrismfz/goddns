@@ -179,6 +179,13 @@ zone churn.
 MikroTik: import `configs/mikrotik-ddns.rsc`, paste your token, schedule
 every 1–3 min.
 
+**The URL is the credential.** A bare GET with a valid token performs an
+update with the caller's source IP — that is the point of DDNS, but it also
+means anything that fetches the URL flips your record. Chat apps
+(Slack/Discord/Telegram/Teams) auto-fetch pasted links from their preview
+bots, and some AV/browser products scan clipboard URLs. Never paste a full
+update URL anywhere; if one leaks, `goddns token del` + `add` immediately.
+
 ## Troubleshooting
 
 **Service fails with `permission denied` on the config or cert.** The daemon
