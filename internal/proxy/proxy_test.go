@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/chrismfz/goddns/internal/config"
 )
 
@@ -199,5 +201,77 @@ func TestXRealIPNotSpoofable(t *testing.T) {
 	}
 	if got.Header.Get("True-Client-IP") != "" {
 		t.Fatalf("True-Client-IP passed through: %q", got.Header.Get("True-Client-IP"))
+	}
+}
+
+func TestBasicAuth(t *testing.T) {
+	// bcrypt("s3cretpass", cost 10)
+	hash, err := bcrypt.GenerateFromPassword([]byte("s3cretpass"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up, got := upstream(t)
+	p := newProxy(t, map[string]config.ProxyRule{
+		"a.internal.myip.gr": {
+			Upstream:  up.URL,
+			BasicAuth: []string{"chris:" + string(hash)},
+		},
+	})
+
+	do := func(setAuth func(*http.Request)) int {
+		req := httptest.NewRequest("GET", "http://a.internal.myip.gr/", nil)
+		req.Host = "a.internal.myip.gr"
+		req.RemoteAddr = "1.2.3.4:1"
+		if setAuth != nil {
+			setAuth(req)
+		}
+		rr := httptest.NewRecorder()
+		p.ServeHTTP(rr, req)
+		return rr.Code
+	}
+
+	// no creds -> 401 with challenge
+	req := httptest.NewRequest("GET", "http://a.internal.myip.gr/", nil)
+	req.Host = "a.internal.myip.gr"
+	req.RemoteAddr = "1.2.3.4:1"
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized || rr.Header().Get("WWW-Authenticate") == "" {
+		t.Fatalf("no creds: %d %q", rr.Code, rr.Header().Get("WWW-Authenticate"))
+	}
+	// wrong password / unknown user -> 401
+	if code := do(func(r *http.Request) { r.SetBasicAuth("chris", "wrong") }); code != http.StatusUnauthorized {
+		t.Fatalf("wrong pass: %d", code)
+	}
+	if code := do(func(r *http.Request) { r.SetBasicAuth("nobody", "s3cretpass") }); code != http.StatusUnauthorized {
+		t.Fatalf("unknown user: %d", code)
+	}
+	// correct creds -> 200, and Authorization does NOT reach the upstream
+	if code := do(func(r *http.Request) { r.SetBasicAuth("chris", "s3cretpass") }); code != 200 {
+		t.Fatalf("good creds: %d", code)
+	}
+	if got.Header.Get("Authorization") != "" {
+		t.Fatalf("Authorization leaked upstream: %q", got.Header.Get("Authorization"))
+	}
+}
+
+func TestAuthAndAllowBothEnforced(t *testing.T) {
+	hash, _ := bcrypt.GenerateFromPassword([]byte("s3cretpass"), bcrypt.MinCost)
+	up, _ := upstream(t)
+	p := newProxy(t, map[string]config.ProxyRule{
+		"a.internal.myip.gr": {
+			Upstream:  up.URL,
+			Allow:     []string{"94.67.0.0/16"},
+			BasicAuth: []string{"chris:" + string(hash)},
+		},
+	})
+	req := httptest.NewRequest("GET", "http://a.internal.myip.gr/", nil)
+	req.Host = "a.internal.myip.gr"
+	req.RemoteAddr = "8.8.8.8:1" // outside allow
+	req.SetBasicAuth("chris", "s3cretpass")
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("good creds must not bypass the allow list: %d", rr.Code)
 	}
 }

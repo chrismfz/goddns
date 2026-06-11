@@ -300,10 +300,28 @@ Works the same for anything at home: Home Assistant
 NVR — one `[proxy]` block each, all behind real TLS on one stable name.
 
 What you get per request: host-based routing, per-host client allowlist
-(403), per-host per-IP rate limiting (429), an nginx-style access log line
+(403), per-host HTTP Basic auth (401), per-host per-IP rate limiting
+(429), an nginx-style access log line
 (`proxy-access host peer "GET /" 200 11B 5ms`), upstream errors logged and
 returned as 502, websocket/console streams proxied transparently, and
 TLS ≥1.2 on the front regardless of how ancient the BMC behind it is.
+
+**Basic auth** covers the case a CIDR allowlist can't: clients on CGNAT or
+mobile networks with no stable source IP. Passwords are stored as bcrypt
+hashes (the config refuses anything else); generate entries with:
+
+    goddns passwd -user chris        # prompts, prints chris:$2a$10$...
+
+    [proxy."monitor.internal.myip.gr"]
+    upstream   = "https://chris.ddns.myip.gr:8443"
+    rate_limit = 20                       # brute force hits 429 before auth
+    basic_auth = ["chris:$2a$10$..."]     # instead of (or on top of) allow
+
+When both `allow` and `basic_auth` are set, **both** must pass. The
+`Authorization` header is consumed by goddns and never forwarded to the
+upstream. Note: Basic sends the password on every request — it's fine
+over the proxy's TLS, but treat it as a door lock for humans, not as a
+substitute for the upstream's own login.
 `proxy_redirect_listen = ":80"` adds an http→https redirect. No root
 needed for :80/:443 — the unit ships `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
 

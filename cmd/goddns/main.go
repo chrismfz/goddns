@@ -7,6 +7,10 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/term"
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/store"
@@ -28,8 +32,53 @@ Usage:
   goddns token add  -fqdn home.myip.gr -zone myip.gr [-ttl 60] [-config ...]
   goddns token list [-config ...]
   goddns token del  -fqdn home.myip.gr [-config ...]
+  goddns passwd -user chris        # bcrypt entry for proxy basic_auth
   goddns version
 `, Version, defaultConf)
+}
+
+func cmdPasswd(args []string) {
+	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
+	user := fs.String("user", "", "username for the basic_auth entry")
+	fs.Parse(args)
+	if *user == "" || strings.Contains(*user, ":") {
+		fatal("passwd requires -user (without ':')")
+	}
+
+	readPass := func(prompt string) []byte {
+		fmt.Fprint(os.Stderr, prompt)
+		if term.IsTerminal(int(os.Stdin.Fd())) {
+			p, err := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Fprintln(os.Stderr)
+			if err != nil {
+				fatal("reading password: %v", err)
+			}
+			return p
+		}
+		// piped input (scripting): one password per line
+		var s string
+		if _, err := fmt.Fscanln(os.Stdin, &s); err != nil {
+			fatal("reading password: %v", err)
+		}
+		return []byte(s)
+	}
+
+	pass := readPass("Password: ")
+	if len(pass) < 8 {
+		fatal("password too short (min 8 characters)")
+	}
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		again := readPass("Repeat:   ")
+		if string(pass) != string(again) {
+			fatal("passwords do not match")
+		}
+	}
+	hash, err := bcrypt.GenerateFromPassword(pass, bcrypt.DefaultCost)
+	if err != nil {
+		fatal("bcrypt: %v", err)
+	}
+	fmt.Printf("%s:%s\n", *user, hash)
+	fmt.Fprintf(os.Stderr, "\nAdd to the host's [proxy.\"...\"] section:\n  basic_auth = [\"%s:%s\"]\n", *user, hash)
 }
 
 func main() {
@@ -42,6 +91,8 @@ func main() {
 		cmdServe(os.Args[2:])
 	case "token":
 		cmdToken(os.Args[2:])
+	case "passwd":
+		cmdPasswd(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("goddns %s (built %s)\n", Version, BuildTime)
 	case "-h", "--help", "help":

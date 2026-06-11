@@ -41,7 +41,8 @@ Needs a hits counter column in the records table (cheap migration).
 The `proxy_enabled` knob, host→upstream table, allowlists, per-IP rate
 limiting and access logging are implemented. Candidate extensions:
 
-- Basic-auth / forward-auth option per host (today: CIDR allowlist only).
+- ~~Basic-auth per host~~ — shipped (`basic_auth` + `goddns passwd`).
+  Still open: forward-auth (delegating to an external auth endpoint).
 - Unmanage ACME certs of removed proxy hosts (certmagic
   Cache.RemoveManaged) so deleted names stop renewing forever.
 - Count bytes/duration of hijacked (websocket) sessions in the access log
