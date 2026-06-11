@@ -36,6 +36,33 @@ path prefix; consider mTLS for server-to-server use.
 FQDN, zone, last IP, last update age, update counter, last client UA.
 Needs a hits counter column in the records table (cheap migration).
 
+## `goddns tunnel` — reverse tunnel for services behind CGNAT/NAT
+
+The cloudflared/frp model, native: when the home side cannot port-forward
+at all, the only working direction is outbound — an agent dials the goddns
+server and keeps a persistent connection; inbound proxy traffic rides it
+backwards.
+
+Why it's worth building even where port-forwarding IS possible: it is a
+safety net. Zero inbound ports at home means the NAT acts as a firewall
+and the service is not addressable from the internet at all — it exists
+only through the tunnel, and every request still passes the proxy's
+allow list / basic auth / rate limit / access log at one central point,
+instead of policy being scattered across router port-forwards.
+
+Design sketch:
+
+- Same binary, new subcommand:
+  `goddns tunnel -server sdns:8245 -token <t> -local 127.0.0.1:5678`
+- Server side: websocket (or h2) endpoint on the existing listener,
+  authenticated with a tunnel token from the existing store; stream
+  multiplexing via yamux; reconnect with backoff on the agent.
+- Proxy rules grow `upstream = "tunnel://<name>"`, resolved to the live
+  tunnel session instead of a dial.
+- Until then the documented workaround is an SSH reverse tunnel
+  (`ssh -N -R 127.0.0.1:15678:localhost:5678 tunnel@sdns`) with the proxy
+  upstream pointed at the local tunnel end — zero new moving parts.
+
 ## Reverse proxy mode — shipped (v1.1), possible follow-ups
 
 The `proxy_enabled` knob, host→upstream table, allowlists, per-IP rate
