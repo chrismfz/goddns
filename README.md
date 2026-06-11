@@ -7,6 +7,9 @@ a bearer token to exactly one FQDN, and pushes a signed dynamic UPDATE to
 X-Forwarded-For regression in 11.136.0.20 — without touching the CFM
 DNAT/WAF stack.
 
+> **New here? Start with [QUICKSTART.md](QUICKSTART.md)** — your own DynDNS
+> from zero in ~10 minutes, self-issued TLS included, no certbot needed.
+
 ## Why this exists
 
 cPanel's `/cpanelwebcall/` DDNS records the client IP. After 11.136.0.20,
