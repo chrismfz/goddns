@@ -213,3 +213,32 @@ upstream = "https://10.0.0.2"
 		t.Fatalf("adding a proxy host should be hot: %v", f)
 	}
 }
+
+func TestLogFile(t *testing.T) {
+	c, err := Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogFile != "" {
+		t.Fatalf("log_file default should be empty (journald): %q", c.LogFile)
+	}
+	c, err = Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+log_file  = "/var/log/goddns.log"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.LogFile != "/var/log/goddns.log" {
+		t.Fatalf("log_file: %q", c.LogFile)
+	}
+	// hot-swappable: must NOT appear in NeedsRestart
+	a, _ := Load(write(t, "cert_file = \"/tmp/c.pem\"\nkey_file = \"/tmp/k.pem\"\n"))
+	if f := c.NeedsRestart(a); len(f) != 0 {
+		t.Fatalf("log_file change should be hot: %v", f)
+	}
+}

@@ -23,6 +23,7 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/goddns
+ReadWritePaths=-/var/log/goddns.log
 ReadOnlyPaths=-/etc/letsencrypt
 ProtectKernelTunables=true
 ProtectControlGroups=true

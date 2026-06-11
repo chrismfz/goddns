@@ -82,6 +82,7 @@ install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/goddns/LIC
 %{_unitdir}/goddns.service
 %attr(0750,root,goddns) %dir /etc/goddns
 %attr(0640,root,goddns) %config(noreplace) /etc/goddns/goddns.conf
+%config(noreplace) /etc/logrotate.d/goddns
 
 # shared examples (always overwritten on upgrade)
 %dir %{_datadir}/goddns
@@ -113,6 +114,12 @@ chmod 0600 /etc/goddns/goddns.env
 mkdir -p /var/lib/goddns
 chown goddns:goddns /var/lib/goddns
 chmod 0750 /var/lib/goddns
+
+# dedicated log file (log_file in goddns.conf); the unprivileged service
+# cannot create files under /var/log itself
+touch /var/log/goddns.log 2>/dev/null || true
+chown goddns:goddns /var/log/goddns.log || true
+chmod 0640 /var/log/goddns.log || true
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true

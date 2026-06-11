@@ -117,6 +117,9 @@ certificate from Let's Encrypt):
 
 > Already have a wildcard/certbot cert and prefer it? Use
 > `tls_mode = "files"` instead — see README → TLS and Troubleshooting.
+> Careful: wildcards match ONE label (`*.example.com` does NOT cover
+> `*.internal.example.com`) — README shows the one-time `certbot --expand`
+> to add the extra SAN.
 
 ## 6. Create hostnames and point your devices at them
 

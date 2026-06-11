@@ -1,0 +1,11 @@
+/var/log/goddns.log {
+    weekly
+    rotate 8
+    compress
+    delaycompress
+    missingok
+    notifempty
+    # goddns keeps the file handle open; copytruncate avoids any reopen
+    # signal and the file inode (and its goddns:goddns ownership) survives.
+    copytruncate
+}
