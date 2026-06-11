@@ -19,6 +19,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/chrismfz/goddns/internal/config"
 )
 
@@ -26,7 +28,8 @@ type rule struct {
 	host      string
 	src       config.ProxyRule // for change detection across reloads
 	allow     []*net.IPNet
-	limit     *limiter // nil = unlimited
+	users     map[string]string // basic auth: user -> bcrypt hash; empty = no auth
+	limit     *limiter          // nil = unlimited
 	transport *http.Transport
 	handler   http.Handler
 }
@@ -126,15 +129,44 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 		}
 		cr.allow = append(cr.allow, n)
 	}
-	if len(cr.allow) == 0 {
-		log.Printf("proxy %s: no 'allow' list — open to the whole internet; "+
-			"set allow=[...] if the upstream is a BMC/console", host)
+	if len(pr.BasicAuth) > 0 {
+		cr.users = make(map[string]string, len(pr.BasicAuth))
+		for _, cred := range pr.BasicAuth {
+			user, hash, ok := strings.Cut(cred, ":")
+			if !ok {
+				return nil, fmt.Errorf("proxy %s: malformed basic_auth entry", host)
+			}
+			cr.users[user] = hash
+		}
+	}
+	if len(cr.allow) == 0 && len(cr.users) == 0 {
+		log.Printf("proxy %s: no 'allow' list and no basic_auth — open to the "+
+			"whole internet; set at least one if the upstream is a BMC/console", host)
 	}
 	if pr.RateLimit > 0 {
 		cr.limit = newLimiter(pr.RateLimit)
 	}
 	return cr, nil
 }
+
+// checkAuth validates Basic credentials against the rule's bcrypt entries.
+func (rl *rule) checkAuth(r *http.Request) bool {
+	user, pass, ok := r.BasicAuth()
+	if !ok {
+		return false
+	}
+	hash, ok := rl.users[user]
+	if !ok {
+		// Burn comparable time so usernames aren't probeable by timing.
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(pass))
+		return false
+	}
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) == nil
+}
+
+// A valid bcrypt hash of nothing in particular, for constant-ish timing on
+// unknown usernames.
+var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
 
 // hostKey normalises an inbound Host header the same way config.Load
 // normalises table keys: lowercase, no port, no trailing dot.
@@ -183,9 +215,19 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Rate limit BEFORE auth so credential brute force eats 429s.
 	if rl.limit != nil && !rl.limit.allow(peer) {
 		http.Error(lw, "rate limited", http.StatusTooManyRequests)
 		return
+	}
+	if len(rl.users) > 0 && !rl.checkAuth(r) {
+		lw.Header().Set("WWW-Authenticate", `Basic realm="goddns", charset="UTF-8"`)
+		http.Error(lw, "authentication required", http.StatusUnauthorized)
+		return
+	}
+	// Never leak the client's credentials to the upstream.
+	if len(rl.users) > 0 {
+		r.Header.Del("Authorization")
 	}
 	rl.handler.ServeHTTP(lw, r)
 }

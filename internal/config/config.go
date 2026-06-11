@@ -72,6 +72,7 @@ type ProxyRule struct {
 	PreserveHost   bool     `toml:"preserve_host"`   // keep the inbound Host header instead of the upstream's
 	Allow          []string `toml:"allow"`           // client CIDRs; empty = allow everyone (set it for BMCs!)
 	RateLimit      int      `toml:"rate_limit"`      // max requests/sec per client IP (burst 2x); 0 = unlimited
+	BasicAuth      []string `toml:"basic_auth"`      // "user:bcrypt-hash" entries (generate: goddns passwd); for clients on CGNAT/mobile where CIDRs can't work
 }
 
 func defaults() Config {
@@ -164,6 +165,14 @@ func Load(path string) (*Config, error) {
 			for _, cidr := range rule.Allow {
 				if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
 					return nil, fmt.Errorf("proxy %q: allow %q: %w", h, cidr, err)
+				}
+			}
+			for _, cred := range rule.BasicAuth {
+				user, hash, ok := strings.Cut(cred, ":")
+				// bcrypt only — refuse anything that could be a plaintext
+				// password pasted into the config by mistake.
+				if !ok || user == "" || !strings.HasPrefix(hash, "$2") {
+					return nil, fmt.Errorf("proxy %q: basic_auth entries must be \"user:bcrypt-hash\" (generate with: goddns passwd)", h)
 				}
 			}
 			norm[h] = rule
