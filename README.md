@@ -124,6 +124,39 @@ zone churn.
 MikroTik: import `configs/mikrotik-ddns.rsc`, paste your token, schedule
 every 1–3 min.
 
+## Troubleshooting
+
+**Service fails with `permission denied` on the config or cert.** The daemon
+runs unprivileged (`User=goddns`). The package sets `/etc/goddns` to
+root:goddns 0750 and `goddns.conf` to 0640 — but the **TLS cert** must also
+be readable: `/etc/letsencrypt/live` and `archive` are root-only, so either
+use the shipped certbot deploy hook to mirror the pair where goddns can read
+it (recommended, keeps hot reload working):
+
+    /usr/share/goddns/scripts/certbot-deploy-goddns.sh /etc/letsencrypt/live/<name>
+    ln -s /usr/share/goddns/scripts/certbot-deploy-goddns.sh \
+          /etc/letsencrypt/renewal-hooks/deploy/goddns.sh
+    # goddns.conf: cert_file/key_file -> /etc/goddns/certs/{fullchain,privkey}.pem
+
+or switch to `tls_mode = "acme"` (storage under /var/lib/goddns, owned by
+the service user — no certbot involved at all).
+
+**Updates fail with `SERVFAIL` (TSIG already accepted).** BIND could not
+write the zone journal (`<zonefile>.jnl`). On EL systems `/var/named` is
+root:named and NOT writable by named — dynamic zones must live in
+`/var/named/dynamic/` (named-writable; also the SELinux-correct location):
+
+    rndc freeze myip.gr 2>/dev/null || true
+    mv /var/named/myip.gr.hosts /var/named/dynamic/
+    # named.conf: file "dynamic/myip.gr.hosts";
+    named-checkconf -z /etc/named.conf && systemctl reload named
+
+Check `journalctl -u named | grep -iE 'journal|update'` to confirm — the
+telltale line is `journal open failed: unable to create journal`.
+
+**`REFUSED`** means the update-policy does not grant the key that exact
+name/type; **`NOTAUTH`** means the TSIG key name/secret mismatch.
+
 ## If you ever front goddns with CFM
 
 Leave `trusted_proxies` empty while goddns is exposed directly. Only if you
