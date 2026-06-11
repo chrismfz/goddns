@@ -42,6 +42,10 @@ The `proxy_enabled` knob, host→upstream table, allowlists, per-IP rate
 limiting and access logging are implemented. Candidate extensions:
 
 - Basic-auth / forward-auth option per host (today: CIDR allowlist only).
+- Unmanage ACME certs of removed proxy hosts (certmagic
+  Cache.RemoveManaged) so deleted names stop renewing forever.
+- Count bytes/duration of hijacked (websocket) sessions in the access log
+  (today they log as 101/0B at upgrade time).
 - mTLS (client certificates) for the really sensitive consoles.
 - Separate access_log file / JSON log format (today: journald via stdout).
 - Per-host upstream CA pinning instead of the verify on/off switch.

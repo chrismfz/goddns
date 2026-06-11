@@ -51,7 +51,12 @@ func (w *Watcher) Changed() ([]byte, bool) {
 		return nil, false
 	}
 	h := sha256.Sum256(b)
-	if w.have && st.ModTime().Equal(w.mod) && h == w.sum {
+	// mtime changed but contents did not (bare `touch`, rsync, editor
+	// save without edits): record the new mtime, suppress the event.
+	// (The cfm original compared mtime here too, which can never be true
+	// on this path — the hash check was effectively dead code.)
+	if w.have && h == w.sum {
+		w.mod = st.ModTime()
 		return nil, false
 	}
 	w.mod, w.sum, w.have = st.ModTime(), h, true

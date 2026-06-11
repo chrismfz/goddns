@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,10 +23,12 @@ import (
 )
 
 type rule struct {
-	host    string
-	allow   []*net.IPNet
-	limit   *limiter // nil = unlimited
-	handler http.Handler
+	host      string
+	src       config.ProxyRule // for change detection across reloads
+	allow     []*net.IPNet
+	limit     *limiter // nil = unlimited
+	transport *http.Transport
+	handler   http.Handler
 }
 
 // Proxy routes requests by Host header. Zero value is unusable; use New.
@@ -41,10 +44,17 @@ func New() *Proxy {
 }
 
 // Update compiles the routing table from a validated config and swaps it in
-// atomically. On error the previous table stays live.
+// atomically. Rules whose config is unchanged are carried over (keeping
+// their limiter state and connection pool); replaced rules get their idle
+// upstream connections closed. On error the previous table stays live.
 func (p *Proxy) Update(cfg *config.Config) error {
+	prev := *p.rules.Load()
 	table := make(map[string]*rule, len(cfg.Proxy))
 	for host, pr := range cfg.Proxy {
+		if old, ok := prev[host]; ok && reflect.DeepEqual(old.src, pr) {
+			table[host] = old
+			continue
+		}
 		r, err := compile(host, pr)
 		if err != nil {
 			return err
@@ -52,6 +62,11 @@ func (p *Proxy) Update(cfg *config.Config) error {
 		table[host] = r
 	}
 	p.rules.Store(&table)
+	for host, old := range prev {
+		if table[host] != old {
+			old.transport.CloseIdleConnections()
+		}
+	}
 	return nil
 }
 
@@ -61,6 +76,22 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 		return nil, fmt.Errorf("proxy %s: %w", host, err)
 	}
 
+	transport := &http.Transport{
+		// BMC web stacks are universally self-signed; verification is
+		// opt-in via upstream_verify.
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: !pr.UpstreamVerify, // #nosec G402
+			MinVersion:         tls.VersionTLS10,   // ancient BMCs
+		},
+		// No Proxy field: upstreams are internal by definition — never
+		// route them through an HTTPS_PROXY from the environment.
+		ForceAttemptHTTP2:     false,
+		MaxIdleConns:          16,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+	}
+
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(u) // also rewrites the outbound Host to the upstream's
@@ -68,21 +99,18 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 			if pr.PreserveHost {
 				r.Out.Host = r.In.Host
 			}
+			// The stdlib strips X-Forwarded-*/Forwarded, but ad-hoc
+			// identity headers would pass through to the upstream, and
+			// BMC audit logs love X-Real-IP. Never trust the client's.
+			r.Out.Header.Del("X-Client-IP")
+			r.Out.Header.Del("True-Client-IP")
+			if peer, _, err := net.SplitHostPort(r.In.RemoteAddr); err == nil {
+				r.Out.Header.Set("X-Real-IP", peer)
+			} else {
+				r.Out.Header.Del("X-Real-IP")
+			}
 		},
-		Transport: &http.Transport{
-			// BMC web stacks are universally self-signed; verification is
-			// opt-in via upstream_verify.
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: !pr.UpstreamVerify, // #nosec G402
-				MinVersion:         tls.VersionTLS10,   // ancient BMCs
-			},
-			Proxy:                 http.ProxyFromEnvironment,
-			ForceAttemptHTTP2:     false,
-			MaxIdleConns:          16,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   15 * time.Second,
-			ResponseHeaderTimeout: 60 * time.Second,
-		},
+		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			log.Printf("proxy %s -> %s: %v", host, pr.Upstream, err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
@@ -90,7 +118,7 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 		FlushInterval: 100 * time.Millisecond, // console streams
 	}
 
-	cr := &rule{host: host, handler: rp}
+	cr := &rule{host: host, src: pr, transport: transport, handler: rp}
 	for _, cidr := range pr.Allow {
 		_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
 		if err != nil {
@@ -108,6 +136,16 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 	return cr, nil
 }
 
+// hostKey normalises an inbound Host header the same way config.Load
+// normalises table keys: lowercase, no port, no trailing dot.
+func hostKey(h string) string {
+	h = strings.ToLower(h)
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		h = host
+	}
+	return strings.TrimSuffix(h, ".")
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	peerStr, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -115,11 +153,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		peerStr = r.RemoteAddr
 	}
 	peer := net.ParseIP(peerStr)
-
-	host := strings.ToLower(r.Host)
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
+	host := hostKey(r.Host)
 
 	lw := &logWriter{ResponseWriter: w}
 	defer func() {
@@ -149,20 +183,42 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if rl.limit != nil && peer != nil && !rl.limit.allow(peer) {
+	if rl.limit != nil && !rl.limit.allow(peer) {
 		http.Error(lw, "rate limited", http.StatusTooManyRequests)
 		return
 	}
 	rl.handler.ServeHTTP(lw, r)
 }
 
+// RedirectHandler serves the optional plain-HTTP listener: redirect of
+// every known host to its HTTPS counterpart. 307 + no-store so a stale
+// mapping is never cached into clients permanently.
+func (p *Proxy) RedirectHandler(httpsPort string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := hostKey(r.Host)
+		if _, ok := (*p.rules.Load())[host]; !ok {
+			http.Error(w, "unknown host", http.StatusNotFound)
+			return
+		}
+		target := "https://" + host
+		if httpsPort != "" && httpsPort != "443" {
+			target += ":" + httpsPort
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	})
+}
+
 // logWriter captures status/bytes for the access log while passing through
 // Flusher (streaming) and Hijacker (websocket upgrades for BMC consoles).
+// Bytes after a hijack are not counted: console sessions log as 101/0B.
 type logWriter struct {
 	http.ResponseWriter
 	status int
 	bytes  int64
 }
+
+func (l *logWriter) Unwrap() http.ResponseWriter { return l.ResponseWriter }
 
 func (l *logWriter) WriteHeader(code int) {
 	if l.status == 0 {
@@ -195,24 +251,4 @@ func (l *logWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 		l.status = http.StatusSwitchingProtocols
 	}
 	return h.Hijack()
-}
-
-// RedirectHandler serves the optional plain-HTTP listener: permanent
-// redirect of every known host to its HTTPS counterpart.
-func (p *Proxy) RedirectHandler(httpsPort string) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		host := strings.ToLower(r.Host)
-		if h, _, err := net.SplitHostPort(host); err == nil {
-			host = h
-		}
-		if _, ok := (*p.rules.Load())[host]; !ok {
-			http.Error(w, "unknown host", http.StatusNotFound)
-			return
-		}
-		target := "https://" + host
-		if httpsPort != "" && httpsPort != "443" {
-			target += ":" + httpsPort
-		}
-		http.Redirect(w, r, target+r.URL.RequestURI(), http.StatusPermanentRedirect)
-	})
 }

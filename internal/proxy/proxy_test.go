@@ -147,3 +147,57 @@ func TestUpstreamDown(t *testing.T) {
 		t.Fatalf("dead upstream: %d", code)
 	}
 }
+
+func TestIPv6LimiterBucketing(t *testing.T) {
+	l := newLimiter(2) // burst 4
+	// Same /64, different addresses -> same bucket.
+	for i := 0; i < 4; i++ {
+		if !l.allow(net.ParseIP(fmt.Sprintf("2001:db8:1:1::%d", i+1))) {
+			t.Fatalf("burst request %d denied early", i)
+		}
+	}
+	if l.allow(net.ParseIP("2001:db8:1:1::ffff")) {
+		t.Fatal("rotating within the /64 escaped the bucket")
+	}
+	// Different /64 -> fresh bucket.
+	if !l.allow(net.ParseIP("2001:db8:2:2::1")) {
+		t.Fatal("distinct /64 wrongly limited")
+	}
+	// nil peer shares one bucket instead of bypassing.
+	for i := 0; i < 4; i++ {
+		l.allow(nil)
+	}
+	if l.allow(nil) {
+		t.Fatal("nil peer bypassed the limiter")
+	}
+}
+
+func TestTrailingDotHost(t *testing.T) {
+	up, _ := upstream(t)
+	p := newProxy(t, map[string]config.ProxyRule{
+		"a.internal.myip.gr": {Upstream: up.URL},
+	})
+	if code, _ := request(p, "A.internal.myip.gr.", "/", "1.2.3.4:1"); code != 200 {
+		t.Fatalf("trailing-dot host not matched: %d", code)
+	}
+}
+
+func TestXRealIPNotSpoofable(t *testing.T) {
+	up, got := upstream(t)
+	p := newProxy(t, map[string]config.ProxyRule{
+		"a.internal.myip.gr": {Upstream: up.URL},
+	})
+	req := httptest.NewRequest("GET", "http://a.internal.myip.gr/", nil)
+	req.Host = "a.internal.myip.gr"
+	req.RemoteAddr = "94.67.31.235:50000"
+	req.Header.Set("X-Real-IP", "10.0.0.1") // attacker-supplied
+	req.Header.Set("True-Client-IP", "10.0.0.1")
+	rr := httptest.NewRecorder()
+	p.ServeHTTP(rr, req)
+	if got.Header.Get("X-Real-IP") != "94.67.31.235" {
+		t.Fatalf("X-Real-IP reaching upstream: %q", got.Header.Get("X-Real-IP"))
+	}
+	if got.Header.Get("True-Client-IP") != "" {
+		t.Fatalf("True-Client-IP passed through: %q", got.Header.Get("True-Client-IP"))
+	}
+}

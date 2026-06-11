@@ -32,11 +32,13 @@ type Record struct {
 type Store struct{ db *sql.DB }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	// Pragmas go in the DSN so they apply to EVERY pooled connection —
+	// a bare `PRAGMA` Exec only configures whichever connection the pool
+	// happens to hand out, and concurrent CLI+server access would then
+	// hit "database is locked" on the unconfigured ones.
+	db, err := sql.Open("sqlite",
+		"file:"+path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
 	if err != nil {
-		return nil, err
-	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;`); err != nil {
 		return nil, err
 	}
 	schema := `CREATE TABLE IF NOT EXISTS records (

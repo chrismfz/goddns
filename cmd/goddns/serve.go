@@ -5,10 +5,11 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"reflect"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -116,19 +117,25 @@ func buildTLS(cfg *config.Config) (*tlsSource, error) {
 	}
 }
 
-// runProxy blocks serving the reverse-proxy listener(s); fatal on exit, same
-// contract as the DDNS listener.
+// runProxy blocks serving the reverse-proxy listener; fatal on exit, same
+// contract as the DDNS listener. The optional plain-HTTP redirect listener
+// is a convenience: failure to bind logs and is otherwise ignored.
 func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
 	if cfg.ProxyRedirectListen != "" {
-		_, httpsPort, _ := strings.Cut(cfg.ProxyListen, ":")
+		httpsPort := "443"
+		if _, p, err := net.SplitHostPort(cfg.ProxyListen); err == nil {
+			httpsPort = p
+		}
 		go func() {
 			rs := &http.Server{
 				Addr:              cfg.ProxyRedirectListen,
 				Handler:           px.RedirectHandler(httpsPort),
 				ReadHeaderTimeout: 10 * time.Second,
+				IdleTimeout:       2 * time.Minute,
 			}
 			if err := rs.ListenAndServe(); err != nil {
-				fatal("proxy redirect listener: %v", err)
+				log.Printf("proxy redirect listener (%s) failed: %v — continuing without it",
+					cfg.ProxyRedirectListen, err)
 			}
 		}()
 	}
@@ -136,6 +143,7 @@ func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
 		Addr:              cfg.ProxyListen,
 		Handler:           px,
 		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
 		// No WriteTimeout: BMC console sessions are long-lived streams.
 		TLSConfig: &tls.Config{
 			MinVersion:     tls.VersionTLS12,
@@ -157,6 +165,46 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 
+	// Proxy state is tracked separately from cur so that a failed apply
+	// (route compile error, transient ACME failure) is retried on every
+	// tick instead of being masked by the already-stored new config.
+	appliedHosts := cur.Load().cfg.ProxyHosts()
+	proxyDirty := false
+
+	applyProxy := func(cfg *config.Config) {
+		if px == nil {
+			return
+		}
+		if !cfg.ProxyEnabled {
+			// Fail-safe: flipping the knob off empties the table (all 404)
+			// even though dropping the listener itself needs a restart.
+			if len(appliedHosts) > 0 {
+				_ = px.Update(&config.Config{})
+				appliedHosts = nil
+			}
+			proxyDirty = false
+			return
+		}
+		if err := px.Update(cfg); err != nil {
+			log.Printf("proxy reload failed, keeping previous routes (will retry): %v", err)
+			proxyDirty = true
+			return
+		}
+		hosts := cfg.ProxyHosts()
+		if src.manage != nil && !slices.Equal(hosts, appliedHosts) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			err := src.manage(ctx, hosts)
+			cancel()
+			if err != nil {
+				log.Printf("acme: managing proxy hosts (will retry): %v", err)
+				proxyDirty = true
+				return
+			}
+		}
+		appliedHosts = hosts
+		proxyDirty = false
+	}
+
 	interval := time.Duration(cur.Load().cfg.ReloadInterval) * time.Second
 	if interval <= 0 {
 		interval = 20 * time.Second
@@ -168,6 +216,9 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 		select {
 		case <-t.C:
 			if _, ok := w.Changed(); !ok {
+				if proxyDirty {
+					applyProxy(cur.Load().cfg)
+				}
 				continue
 			}
 		case <-hup:
@@ -191,20 +242,7 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 				strings.Join(fields, ", "))
 		}
 
-		// Proxy table swaps live; new hostnames get certs on the fly in
-		// acme mode. Errors keep the previous table/certs.
-		if px != nil && cfg.ProxyEnabled {
-			if err := px.Update(cfg); err != nil {
-				log.Printf("proxy reload failed, keeping previous routes: %v", err)
-			} else if src.manage != nil &&
-				!reflect.DeepEqual(cfg.ProxyHosts(), old.cfg.ProxyHosts()) {
-				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-				if err := src.manage(ctx, cfg.ProxyHosts()); err != nil {
-					log.Printf("acme: managing proxy hosts: %v", err)
-				}
-				cancel()
-			}
-		}
+		applyProxy(cfg)
 
 		cur.Store(&runtime{cfg: cfg, backend: backend})
 		log.Printf("config reloaded from %s", path)

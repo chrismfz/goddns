@@ -70,9 +70,13 @@ func (u *RFC2136) Update(fqdn, zone string, ip net.IP, ttl uint32) error {
 	m := new(dns.Msg)
 	m.SetUpdate(dns.Fqdn(zone))
 
-	// Remove any existing RRset of this exact type at this name, then add ours.
-	m.RemoveRRset([]dns.RR{&dns.A{Hdr: dns.RR_Header{
-		Name: dns.Fqdn(fqdn), Rrtype: rrType, Class: dns.ClassINET}}})
+	// Remove BOTH address RRsets at this name, then add ours: a client
+	// flipping IPv4<->IPv6 must not leave the other family's stale record
+	// answering alongside the new one.
+	m.RemoveRRset([]dns.RR{
+		&dns.A{Hdr: dns.RR_Header{Name: dns.Fqdn(fqdn), Rrtype: dns.TypeA, Class: dns.ClassINET}},
+		&dns.AAAA{Hdr: dns.RR_Header{Name: dns.Fqdn(fqdn), Rrtype: dns.TypeAAAA, Class: dns.ClassINET}},
+	})
 
 	hdr := dns.RR_Header{Name: dns.Fqdn(fqdn), Rrtype: rrType, Class: dns.ClassINET, Ttl: ttl}
 	if rrType == dns.TypeA {
