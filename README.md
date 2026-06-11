@@ -299,6 +299,90 @@ Works the same for anything at home: Home Assistant
 (`upstream = "http://chris.ddns.myip.gr:8123"`), a NAS UI, an IP camera
 NVR — one `[proxy]` block each, all behind real TLS on one stable name.
 
+### Zero open ports: SSH reverse tunnels (the whole LAN, not just one box)
+
+If you can't — or don't want to — open ports at home at all (CGNAT, or
+simply as a safety net), flip the direction: one always-on Linux box at
+home (a Raspberry Pi is plenty) dials OUT to the goddns server over SSH
+and carries the traffic backwards. Nothing at home is addressable from
+the internet; every request still passes the proxy's allow list / basic
+auth / rate limit / access log.
+
+The key detail: the `-R` forward target is **any address the home box can
+reach**, not just itself. One box exposes the entire LAN:
+
+    -R 127.0.0.1:15601:localhost:8443        # LibreNMS on the box itself
+    -R 127.0.0.1:15602:192.168.1.50:80       # an IP camera elsewhere on the LAN
+    -R 127.0.0.1:15603:192.168.1.60:5000     # the NAS UI
+    -R 127.0.0.1:15604:192.168.1.1:443       # even the router's own admin page
+
+Each `-R` makes the service appear on the goddns server as a loopback
+port (15601…), which is exactly what the proxy rules point at. Pick a
+port range convention (e.g. 156xx = chris-home) and it stays readable.
+
+**On the goddns server (sdns)** — a dedicated tunnel-only account, locked
+down to exactly those loopback ports:
+
+    useradd -r -m -s /usr/sbin/nologin tunnel    # -N sessions never spawn the shell
+
+    # /etc/ssh/sshd_config.d/tunnel.conf
+    Match User tunnel
+        AllowTcpForwarding remote
+        PermitListen 127.0.0.1:15601 127.0.0.1:15602 127.0.0.1:15603 127.0.0.1:15604
+        PermitTTY no
+        X11Forwarding no
+        AllowAgentForwarding no
+
+    # ~tunnel/.ssh/authorized_keys — key restricted to forwarding only:
+    restrict,port-forwarding ssh-ed25519 AAAA... homebox-tunnel
+
+`PermitListen` pins the loopback ports this key may claim; default
+loopback binding means only the local proxy can reach them.
+
+**On the home box** — a systemd unit that keeps the tunnel alive:
+
+    # /etc/systemd/system/sdns-tunnel.service
+    [Unit]
+    Description=reverse tunnel to sdns (no inbound ports at home)
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    ExecStart=/usr/bin/ssh -N \
+        -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+        -o ExitOnForwardFailure=yes \
+        -o StrictHostKeyChecking=accept-new \
+        -i /etc/tunnel/id_ed25519 \
+        -R 127.0.0.1:15601:localhost:8443 \
+        -R 127.0.0.1:15602:192.168.1.50:80 \
+        -R 127.0.0.1:15603:192.168.1.60:5000 \
+        tunnel@sdns.myip.gr
+    Restart=always
+    RestartSec=10
+
+    [Install]
+    WantedBy=multi-user.target
+
+`ExitOnForwardFailure=yes` + `Restart=always` is the self-healing pair:
+if a forward can't be established the process exits and systemd retries.
+
+**And the proxy rules** — one per service, exactly like any other upstream:
+
+    [proxy."monitor.internal.myip.gr"]
+    upstream   = "https://127.0.0.1:15601"
+    basic_auth = ["chris:$2a$10$..."]
+    rate_limit = 20
+
+    [proxy."cam.internal.myip.gr"]
+    upstream   = "http://127.0.0.1:15602"
+    allow      = ["94.67.0.0/16"]
+    basic_auth = ["chris:$2a$10$..."]
+    rate_limit = 10
+
+Adding another device later = one `-R` line, one `PermitListen` port, one
+`[proxy]` block (hot-reloaded). A native `goddns tunnel` subcommand —
+same model without sshd — is sketched in `BACKLOG.md`.
+
 What you get per request: host-based routing, per-host client allowlist
 (403), per-host HTTP Basic auth (401), per-host per-IP rate limiting
 (429), an nginx-style access log line
