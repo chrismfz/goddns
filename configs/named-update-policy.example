@@ -59,3 +59,20 @@ zone "ddns.myip.gr" {
 // ...and in the zone holding the goddns hostname:
 //   grant acme-update. name _acme-challenge.sdns.myip.gr. TXT;
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// PROXY MODE zone (see README "Reverse proxy mode"). Only needed with
+// tls_mode = "acme" — with a wildcard cert (files mode) a single STATIC
+// record in the parent zone is enough (*.internal IN A <goddns-ip>) and
+// no zone/key/policy is needed at all. For acme, the challenge TXTs need
+// a small dynamic zone granted to the ACME key ONLY (ddns-update is not
+// involved); the wildcard A lives statically inside its zone file.
+// ---------------------------------------------------------------------------
+// zone "internal.myip.gr" {
+//     type master;
+//     file "dynamic/internal.myip.gr.hosts";
+//     update-policy {
+//         grant acme-update. wildcard *.internal.myip.gr. TXT;
+//     };
+// };
+// ... parent zone file (myip.gr.hosts):  internal IN NS sdns.myip.gr.

@@ -205,16 +205,42 @@ iDRAC/iLO/IPMI consoles, switches, UPSes.
     allow      = ["84.54.49.0/24"]           # client CIDRs — ALWAYS set for BMCs
     rate_limit = 10                          # req/s per client IP (burst 2x)
 
-DNS: one static wildcard in your zone — `*.internal.myip.gr A <this-host>` —
-and every proxied name resolves to goddns. (Records never point at the
-10.x addresses directly, which also avoids DNS-rebind filtering.)
+### DNS + certificates for the proxied names
 
-Certificates: with `tls_mode = "files"` use a wildcard covering the proxy
-names; with `tls_mode = "acme"` every host in the table gets its own cert
-automatically — grant the acme key
-`grant <acme-key> wildcard *.internal.myip.gr. TXT;` in the zone. Hosts
-added to the table at runtime are picked up by the hot reload, certs
-included — no restart.
+The records never point at the 10.x addresses — every proxied name
+resolves to the goddns host itself (which also avoids DNS-rebind
+filtering). What you need depends only on the TLS mode:
+
+**`tls_mode = "files"` with a wildcard cert (`*.internal.myip.gr`)** — the
+simple case: **no new zone, no update keys, nothing dynamic.** One static
+wildcard record in your existing zone and you're done:
+
+    ; in myip.gr.hosts (static zone, no journal, no policy):
+    *.internal    IN A    84.54.49.3        ; the goddns host
+
+**`tls_mode = "acme"`** — each proxied host gets its own Let's Encrypt
+cert, so goddns must be able to write `_acme-challenge.<host>` TXT
+records. That needs a small dedicated **dynamic** zone, granted to the
+**acme key only** — the `ddns-update` key is not involved anywhere:
+
+    zone "internal.myip.gr" {
+        type master;
+        file "dynamic/internal.myip.gr.hosts";
+        update-policy {
+            grant acme-update. wildcard *.internal.myip.gr. TXT;
+        };
+    };
+
+with the wildcard A living statically inside that zone file:
+
+    $TTL 300
+    @   IN SOA  sdns.myip.gr. hostmaster.myip.gr. (1 3600 900 604800 60)
+        IN NS   sdns.myip.gr.
+    *   IN A    84.54.49.3                  ; everything -> goddns
+
+plus the one-time delegation in the parent: `internal IN NS sdns.myip.gr.`
+Hosts added to the proxy table at runtime are picked up by the hot
+reload, certs included — no restart.
 
 What you get per request: host-based routing, per-host client allowlist
 (403), per-host per-IP rate limiting (429), an nginx-style access log line

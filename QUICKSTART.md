@@ -145,6 +145,25 @@ never needs to know its own address.
 link previews will fetch it and "update" your record from an AWS IP — ask
 us how we know). If a token leaks: `goddns token del` + `add`.
 
+## Bonus: TLS for your internal consoles (reverse proxy mode)
+
+The same binary can also put a real hostname + real certificate + access
+control in front of things that can never have them on their own (iDRAC,
+iLO, switches):
+
+    proxy_enabled = true
+    proxy_listen  = ":443"
+
+    [proxy."idrac.internal.example.com"]
+    upstream   = "https://10.0.0.200"
+    allow      = ["YOUR.ISP.CIDR.0/24"]
+    rate_limit = 10
+
+With `tls_mode = "acme"` it issues per-host certs through the same DNS
+mechanism. DNS needs one wildcard record pointing at this server — full
+recipe (including the zone/update-policy for acme) in
+[README → Reverse proxy mode](README.md#reverse-proxy-mode-optional).
+
 ## Done. What you got
 
 - `home.ddns.example.com` always points at your current IP, TTL 60.
