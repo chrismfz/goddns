@@ -45,10 +45,10 @@ Date-based versioning, fakeroot/dpkg-deb and rpmbuild staging, remote repo
 sync and `gh` release flow are all cloned from the cfm Makefile. Pure-Go
 SQLite (modernc.org/sqlite) — no cgo, no libc dependency.
 
-## Recommended: a dedicated delegated zone (ddns.myip.gr)
+## Setup (recommended): a dedicated delegated DDNS zone
 
-Instead of making your main zone dynamic, delegate a child zone and let
-goddns own it. Three wins:
+The recommended layout is to delegate a child zone (e.g. `ddns.myip.gr`)
+and let goddns own it, instead of making your main zone dynamic:
 
 - **`myip.gr` stays a normal static zone** — no journal, no
   `rndc freeze/thaw` dance, hand-edit as always.
@@ -58,8 +58,15 @@ goddns own it. Three wins:
 - **Blast radius**: the TSIG key physically cannot touch anything outside
   `*.ddns.myip.gr`.
 
-1. New zone on the BIND host (file under `/var/named/dynamic/` — named must
-   be able to create the journal next to it, see Troubleshooting):
+Steps on the BIND host (e.g. sdns):
+
+1. Dedicated TSIG key (do NOT reuse the certbot rfc2136 key), then
+   `include "/etc/named/ddns.key";` in `named.conf`:
+
+       tsig-keygen -a hmac-sha256 ddns-update | sudo tee -a /etc/named/ddns.key
+
+2. New zone in `named.conf` — the file MUST live under `/var/named/dynamic/`
+   so named can create the journal next to it (see Troubleshooting):
 
        zone "ddns.myip.gr" {
            type master;
@@ -69,51 +76,52 @@ goddns own it. Three wins:
            };
        };
 
-2. Minimal zone file `/var/named/dynamic/ddns.myip.gr.hosts`:
+3. Zone file: copy `configs/ddns-zone.example` (shipped at
+   `/usr/share/goddns/configs/ddns-zone.example`) to
+   `/var/named/dynamic/ddns.myip.gr.hosts` and adjust the SOA/NS names.
 
-       $TTL 60
-       @   IN SOA  sdns.myip.gr. hostmaster.myip.gr. (1 3600 900 604800 60)
-           IN NS   sdns.myip.gr.
-
-   (Add your other NS + matching `allow-transfer`/`also-notify` only if you
-   want the slaves to carry it — for DDNS records with TTL 60, serving it
-   from the one master is usually fine.)
-
-3. Delegate it from the parent zone — one-time, static edit in
-   `myip.gr.hosts`:
+4. Delegate it from the parent — one-time, static edit in `myip.gr.hosts`:
 
        ddns    IN NS   sdns.myip.gr.
 
-4. `named-checkconf -z && rndc reconfig`, then per hostname only:
+5. Load it:
 
-       goddns token add -fqdn chris.ddns.myip.gr -zone ddns.myip.gr -ttl 60
-       goddns token add -fqdn vpn.ddns.myip.gr   -zone ddns.myip.gr -ttl 60
+       named-checkconf -z /etc/named.conf && rndc reconfig
 
-The per-name `update-policy` style (next section) remains the tighter
-choice when you want an explicit allowlist of DDNS names in the main zone.
-
-## Setup on a BIND host (e.g. sdns)
-
-1. Dedicated TSIG key (do NOT reuse the certbot rfc2136 key):
-
-       tsig-keygen -a hmac-sha256 ddns-update | sudo tee -a /etc/named/ddns.key
-
-2. In `named.conf`: `include "/etc/named/ddns.key";` and add an
-   `update-policy` to the zone granting that key the DDNS names only
-   (see `configs/named-update-policy.example`). Then `rndc reload`.
-
-   Note: once a zone is dynamic it is journal-managed. To hand-edit later:
-   `rndc freeze myip.gr` / edit the file / `rndc thaw myip.gr`.
-
-3. Install the .deb/.rpm — it creates the `goddns` user, `/etc/goddns`
-   (0700) and `/var/lib/goddns`. Put the TSIG secret in the env file:
+6. Install the goddns .deb/.rpm — it creates the `goddns` user,
+   `/etc/goddns` (0750 root:goddns) and `/var/lib/goddns`. Put the TSIG
+   secret in the env file:
 
        printf 'GODDNS_TSIG_SECRET=%s\n' "<base64 from ddns.key>" \
            | sudo tee /etc/goddns/goddns.env      # already chmod 0600
 
-4. Edit `/etc/goddns/goddns.conf` (TLS — see below) and:
+7. Edit `/etc/goddns/goddns.conf` (TLS — see below) and:
 
        sudo systemctl enable --now goddns
+
+8. From now on, a new hostname is ONLY this — no BIND changes:
+
+       goddns token add -fqdn chris.ddns.myip.gr -zone ddns.myip.gr -ttl 60
+       goddns token add -fqdn vpn.ddns.myip.gr   -zone ddns.myip.gr -ttl 60
+
+## Edge case: per-name grants in an existing zone
+
+If you'd rather keep DDNS names directly in the main zone (an explicit
+allowlist, no delegation), grant the key each name individually — see the
+commented variant in `configs/named-update-policy.example`:
+
+       zone "myip.gr" {
+           ...
+           update-policy {
+               grant ddns-update. name chrisdns.myip.gr. A AAAA;
+               grant ddns-update. name vpn.myip.gr.      A AAAA;
+           };
+       };
+
+Trade-offs: every new hostname needs a named.conf edit + `rndc reconfig`,
+and the zone becomes journal-managed — hand-edit afterwards only via
+`rndc freeze myip.gr` / edit / `rndc thaw myip.gr`. The zone file must
+also move under `/var/named/dynamic/` (journal, see Troubleshooting).
 
 ## TLS
 

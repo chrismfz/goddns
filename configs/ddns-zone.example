@@ -1,0 +1,28 @@
+; /var/named/dynamic/ddns.myip.gr.hosts
+;
+; Minimal zone file for the RECOMMENDED dedicated DDNS zone (see README).
+; Lives under /var/named/dynamic/ so named (-u named) can create the
+; journal (.jnl) next to it — /var/named itself is not named-writable on EL.
+;
+; After loading, the zone is journal-managed: hand-edit only with
+;   rndc freeze ddns.myip.gr  /  edit  /  rndc thaw ddns.myip.gr
+; (You should rarely need to — goddns writes the records.)
+
+$TTL 60
+@   IN SOA  sdns.myip.gr. hostmaster.myip.gr. (
+        1           ; serial (named bumps it via the journal)
+        3600        ; refresh
+        900         ; retry
+        604800      ; expire
+        60 )        ; negative-caching TTL
+
+    IN NS   sdns.myip.gr.
+; Add the other NS lines only if your slaves also carry this zone
+; (then mirror allow-transfer/also-notify in named.conf). For TTL-60
+; DDNS records, serving from the single master is usually fine:
+;   IN NS   ns2.myip.gr.
+;   IN NS   ns3.myip.gr.
+
+; No A/AAAA records needed here — goddns creates them dynamically:
+;   chris  IN A  <set by goddns>
+;   vpn    IN A  <set by goddns>

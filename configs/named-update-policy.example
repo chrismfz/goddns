@@ -1,50 +1,61 @@
+// goddns BIND configuration — RECOMMENDED SETUP
+// ===========================================================================
+// A dedicated, delegated DDNS zone. The parent zone (myip.gr) stays a
+// normal static zone, and ONE wildcard grant covers every current and
+// future DDNS hostname: adding a host is just `goddns token add` — no
+// named.conf edit, no reload, ever. A leaked token (or even the TSIG key)
+// can never touch anything outside *.ddns.myip.gr.
+//
 // 1) Generate a dedicated key (do NOT reuse the certbot key):
 //      tsig-keygen -a hmac-sha256 ddns-update >> /etc/named/ddns.key
 //    then `include "/etc/named/ddns.key";` at the top of named.conf.
-//
-// 2) Grant that key the RIGHT to touch ONLY the DDNS names in the zone.
-//    This is the security boundary: a leaked goddns token still cannot
-//    modify anything except the exact records you list here.
 
 key "ddns-update" {
     algorithm hmac-sha256;
     secret "REPLACE-WITH-tsig-keygen-OUTPUT";
 };
 
-zone "myip.gr" {
-    type master;
-    file "/var/named/myip.gr.zone";
-    update-policy {
-        grant ddns-update. name home.myip.gr.   A AAAA;
-        grant ddns-update. name vpn.myip.gr.     A AAAA;
-        // add one line per DDNS hostname
+// 2) The DDNS zone. The file MUST live under /var/named/dynamic/ so named
+//    (-u named) can create the journal (.jnl) next to it — /var/named
+//    itself is not named-writable on EL systems.
+//    Seed the file from ddns-zone.example (shipped in
+//    /usr/share/goddns/configs/).
 
-        // Only if you use tls_mode = "acme": goddns solves the DNS-01
-        // challenge by writing a TXT record through this same channel.
-        // Use a dedicated key (acme_tsig_name) so the DDNS key above
-        // never needs TXT rights:
-        //   tsig-keygen -a hmac-sha256 acme-update >> /etc/named/ddns.key
-        // grant acme-update. name _acme-challenge.sdns.myip.gr. TXT;
+zone "ddns.myip.gr" {
+    type master;
+    file "dynamic/ddns.myip.gr.hosts";
+    update-policy {
+        grant ddns-update. wildcard *.ddns.myip.gr. A AAAA;
     };
 };
 
+// 3) One-time delegation in the PARENT zone file (myip.gr.hosts):
+//      ddns    IN NS   sdns.myip.gr.
+//
+// 4) Load:  named-checkconf -z /etc/named.conf && rndc reconfig
+
 // ---------------------------------------------------------------------------
-// RECOMMENDED ALTERNATIVE: dedicated delegated zone (see README).
-// The parent zone stays static; ONE wildcard grant covers every current and
-// future DDNS hostname — adding a host is just `goddns token add`.
-// Keep dynamic zone files under /var/named/dynamic/ so named can create
-// the journal (.jnl) next to them.
+// EDGE CASE: per-name grants in an existing zone (no delegation).
+// Tighter allowlist, but: every new hostname needs a named.conf edit +
+// rndc reconfig, the zone becomes journal-managed (hand-edit only via
+// `rndc freeze myip.gr` / edit / `rndc thaw myip.gr`), and the zone file
+// must still move under /var/named/dynamic/ for the journal.
 // ---------------------------------------------------------------------------
-// zone "ddns.myip.gr" {
+// zone "myip.gr" {
 //     type master;
-//     file "dynamic/ddns.myip.gr.hosts";
+//     file "dynamic/myip.gr.hosts";
 //     update-policy {
-//         grant ddns-update. wildcard *.ddns.myip.gr. A AAAA;
+//         grant ddns-update. name chrisdns.myip.gr. A AAAA;
+//         grant ddns-update. name vpn.myip.gr.      A AAAA;
+//         // one line per DDNS hostname
 //     };
 // };
-// ... and in the PARENT zone file (myip.gr.hosts), the one-time delegation:
-//     ddns    IN NS   sdns.myip.gr.
 
-// Reload:  rndc reload   (or rndc reconfig if you only changed includes)
-// Note: a dynamic zone is managed via journal; edit it afterwards with
-// `rndc freeze myip.gr` / edit / `rndc thaw myip.gr`.
+// ---------------------------------------------------------------------------
+// Only if you use tls_mode = "acme": goddns solves the DNS-01 challenge by
+// writing a TXT record through this same channel. Use a dedicated key
+// (acme_tsig_name) so the DDNS key never needs TXT rights:
+//   tsig-keygen -a hmac-sha256 acme-update >> /etc/named/ddns.key
+// ...and in the zone holding the goddns hostname:
+//   grant acme-update. name _acme-challenge.sdns.myip.gr. TXT;
+// ---------------------------------------------------------------------------
