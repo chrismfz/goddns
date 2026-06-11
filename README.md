@@ -1,33 +1,70 @@
 # goddns
 
-Self-hosted Dynamic DNS for BIND, over RFC 2136 / TSIG. A single static Go
-binary that runs an HTTPS endpoint on its own port (default **:8245**), maps
-a bearer token to exactly one FQDN, and pushes a signed dynamic UPDATE to
-`named`. Built to replace cPanel's Dynamic DNS web-call after the cpsrvd
-X-Forwarded-For regression in 11.136.0.20 — without touching the CFM
-DNAT/WAF stack.
+**Own your dynamic DNS — and the front door to everything behind it.**
+
+goddns is a single static Go binary that turns a BIND server you already
+run into a self-hosted DynDNS service, and optionally into a TLS reverse
+proxy for all the things that could never have a proper hostname,
+certificate, or access control on their own.
+
+- **Dynamic DNS server**: one bearer token = one hostname. Clients hit an
+  HTTPS endpoint (plain `curl`, or the DynDNS2 protocol every router and
+  MikroTik already speaks) and goddns pushes a signed RFC 2136 / TSIG
+  update straight into your zone. `nochg` semantics keep aggressive cron
+  clients free.
+- **TLS without the usual fight**: serve an existing certificate with
+  automatic pickup on renewal, or let goddns issue and renew its own
+  Let's Encrypt certs via **DNS-01 through the same BIND** — it never
+  needs ports 80/443, so it coexists with any web stack on the box.
+- **Reverse proxy mode** (optional): hostname-routed TLS front for
+  internal services — iDRAC/BMC consoles, NAS UIs, home services on
+  dynamic IPs — with per-host CIDR allowlists, HTTP Basic auth (bcrypt),
+  per-IP rate limiting, access logging and websocket passthrough.
+  Combined with SSH reverse tunnels, it exposes a whole home LAN with
+  **zero open ports** at home.
+- **Operations-friendly**: flat TOML config, hot-reloaded while running
+  (poll + SIGHUP, no restarts); pure Go (no cgo); .deb/.rpm packaging;
+  hardened systemd unit running unprivileged; runs on its own port
+  (default **:8245**, the historical DynDNS update port) so it drops onto
+  any server without touching the existing web stack.
 
 > **New here? Start with [QUICKSTART.md](QUICKSTART.md)** — your own DynDNS
 > from zero in ~10 minutes, self-issued TLS included, no certbot needed.
 
-## Why this exists
+| You want to… | Read |
+|---|---|
+| Stand up your own DynDNS from zero | [QUICKSTART.md](QUICKSTART.md) |
+| Set up the recommended zone layout | [Dedicated delegated zone](#setup-recommended-a-dedicated-delegated-ddns-zone) |
+| Create hostnames & tokens | [Manage records](#manage-records) |
+| Point routers / MikroTik / cron at it | [Client usage](#client-usage) |
+| Serve an existing cert, or self-issue via DNS-01 | [TLS](#tls) |
+| Put TLS + auth in front of internal consoles (iDRAC, NAS…) | [Reverse proxy mode](#reverse-proxy-mode-optional) |
+| Expose a home service on a dynamic IP | [DDNS + proxy together](#ddns--proxy-together-a-home-service-on-a-dynamic-ip) |
+| Expose a whole LAN with zero open ports | [SSH reverse tunnels](#zero-open-ports-ssh-reverse-tunnels-the-whole-lan-not-just-one-box) |
+| Build .deb/.rpm packages | [Build & packaging](#build--packaging-cfm-style-workflow) |
+| Something broke | [Troubleshooting](#troubleshooting) |
 
-cPanel's `/cpanelwebcall/` DDNS records the client IP. After 11.136.0.20,
-cpsrvd stopped trusting `X-Forwarded-For` from its own loopback proxy, so every
-record now resolves to `127.0.0.1`. goddns sidesteps it entirely: it listens
-on its own dedicated port, so it is never behind a proxy unless you choose to
-put it behind one — the TCP peer IP is the real client, no forwarded-header
-trust needed. The dedicated port (8245, the historical DynDNS update port)
-also makes it portable: it can be dropped onto any server, including cPanel
-boxes, without fighting for 80/443.
+## Three ways to run it
+
+1. **Just DDNS** — delegate a small zone (`ddns.example.com`), hand out
+   tokens, point your routers at it. Your main zone stays static and
+   untouched.
+2. **Just the proxy** — one wildcard record (`*.internal.example.com`)
+   pointing at goddns, one `[proxy]` block per internal service: real
+   hostnames + real certs + auth in front of devices that deserve none of
+   the trust they usually get.
+3. **Both together** — a proxy rule's upstream can be one of your own DDNS
+   names: `monitor.internal.example.com` → `chris.ddns.example.com:8443`
+   follows your home IP wherever it moves, with zero propagation delay.
 
 ## Security model
 
 The trust boundary is in **BIND**, not in this program. The TSIG key used by
-goddns is granted, via `update-policy`, the right to modify *only the specific
-DDNS hostnames* you list — nothing else in the zone. A leaked token (or a
-compromised goddns) can at worst flap the IP of those exact records; it can
-never rewrite NS, MX, the apex, or any other name.
+goddns is granted rights via `update-policy` — typically over a small
+dedicated zone (`ddns.example.com`), or over an explicit list of names.
+A leaked token (or a compromised goddns) can at worst flap the IP of the
+records inside that grant; it can never rewrite NS, MX, your main zone's
+apex, or any other name.
 
 Tokens are 256-bit random values; only their SHA-256 hash is stored in SQLite.
 TSIG secrets are supplied via the systemd `EnvironmentFile`
@@ -448,13 +485,14 @@ telltale line is `journal open failed: unable to create journal`.
 **`REFUSED`** means the update-policy does not grant the key that exact
 name/type; **`NOTAUTH`** means the TSIG key name/secret mismatch.
 
-## If you ever front goddns with CFM
+## If you ever front goddns with another proxy
 
-Leave `trusted_proxies` empty while goddns is exposed directly. Only if you
-later put it behind CFM/nginx, set `trusted_proxies` to the proxy's source
-IP(s); goddns then honours `X-Forwarded-For`, but only from those peers, and
-walks the chain right-to-left to find the first untrusted hop — i.e. it does
-the forwarded-header validation cpsrvd stopped doing.
+Leave `trusted_proxies` empty while goddns is exposed directly — the safe
+default. Only if you later put it behind a reverse proxy (CFM/angie/nginx),
+set `trusted_proxies` to the proxy's source IP(s); goddns then honours
+`X-Forwarded-For`, but only from those peers, and walks the chain
+right-to-left to find the first untrusted hop — proper forwarded-header
+validation instead of blind trust.
 
 ## Roadmap
 
