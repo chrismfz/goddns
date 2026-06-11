@@ -28,6 +28,23 @@ zone "myip.gr" {
     };
 };
 
+// ---------------------------------------------------------------------------
+// RECOMMENDED ALTERNATIVE: dedicated delegated zone (see README).
+// The parent zone stays static; ONE wildcard grant covers every current and
+// future DDNS hostname — adding a host is just `goddns token add`.
+// Keep dynamic zone files under /var/named/dynamic/ so named can create
+// the journal (.jnl) next to them.
+// ---------------------------------------------------------------------------
+// zone "ddns.myip.gr" {
+//     type master;
+//     file "dynamic/ddns.myip.gr.hosts";
+//     update-policy {
+//         grant ddns-update. wildcard *.ddns.myip.gr. A AAAA;
+//     };
+// };
+// ... and in the PARENT zone file (myip.gr.hosts), the one-time delegation:
+//     ddns    IN NS   sdns.myip.gr.
+
 // Reload:  rndc reload   (or rndc reconfig if you only changed includes)
 // Note: a dynamic zone is managed via journal; edit it afterwards with
 // `rndc freeze myip.gr` / edit / `rndc thaw myip.gr`.

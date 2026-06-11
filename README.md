@@ -45,6 +45,53 @@ Date-based versioning, fakeroot/dpkg-deb and rpmbuild staging, remote repo
 sync and `gh` release flow are all cloned from the cfm Makefile. Pure-Go
 SQLite (modernc.org/sqlite) — no cgo, no libc dependency.
 
+## Recommended: a dedicated delegated zone (ddns.myip.gr)
+
+Instead of making your main zone dynamic, delegate a child zone and let
+goddns own it. Three wins:
+
+- **`myip.gr` stays a normal static zone** — no journal, no
+  `rndc freeze/thaw` dance, hand-edit as always.
+- **One `wildcard` grant covers every future hostname**: adding
+  `chris.ddns.myip.gr` is just `goddns token add` — no named.conf edit,
+  no reload, ever.
+- **Blast radius**: the TSIG key physically cannot touch anything outside
+  `*.ddns.myip.gr`.
+
+1. New zone on the BIND host (file under `/var/named/dynamic/` — named must
+   be able to create the journal next to it, see Troubleshooting):
+
+       zone "ddns.myip.gr" {
+           type master;
+           file "dynamic/ddns.myip.gr.hosts";
+           update-policy {
+               grant ddns-update. wildcard *.ddns.myip.gr. A AAAA;
+           };
+       };
+
+2. Minimal zone file `/var/named/dynamic/ddns.myip.gr.hosts`:
+
+       $TTL 60
+       @   IN SOA  sdns.myip.gr. hostmaster.myip.gr. (1 3600 900 604800 60)
+           IN NS   sdns.myip.gr.
+
+   (Add your other NS + matching `allow-transfer`/`also-notify` only if you
+   want the slaves to carry it — for DDNS records with TTL 60, serving it
+   from the one master is usually fine.)
+
+3. Delegate it from the parent zone — one-time, static edit in
+   `myip.gr.hosts`:
+
+       ddns    IN NS   sdns.myip.gr.
+
+4. `named-checkconf -z && rndc reconfig`, then per hostname only:
+
+       goddns token add -fqdn chris.ddns.myip.gr -zone ddns.myip.gr -ttl 60
+       goddns token add -fqdn vpn.ddns.myip.gr   -zone ddns.myip.gr -ttl 60
+
+The per-name `update-policy` style (next section) remains the tighter
+choice when you want an explicit allowlist of DDNS names in the main zone.
+
 ## Setup on a BIND host (e.g. sdns)
 
 1. Dedicated TSIG key (do NOT reuse the certbot rfc2136 key):
