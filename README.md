@@ -190,6 +190,46 @@ means anything that fetches the URL flips your record. Chat apps
 bots, and some AV/browser products scan clipboard URLs. Never paste a full
 update URL anywhere; if one leaks, `goddns token del` + `add` immediately.
 
+## Reverse proxy mode (optional)
+
+`proxy_enabled = true` turns on a second TLS listener (`proxy_listen`,
+default `:443`) that routes by hostname to internal upstreams — built for
+things that can never have a proper hostname + certificate on their own:
+iDRAC/iLO/IPMI consoles, switches, UPSes.
+
+    proxy_enabled = true
+    proxy_listen  = ":443"
+
+    [proxy."orion-idrac.internal.myip.gr"]
+    upstream   = "https://10.23.201.200"     # reachable via LAN/VPN
+    allow      = ["84.54.49.0/24"]           # client CIDRs — ALWAYS set for BMCs
+    rate_limit = 10                          # req/s per client IP (burst 2x)
+
+DNS: one static wildcard in your zone — `*.internal.myip.gr A <this-host>` —
+and every proxied name resolves to goddns. (Records never point at the
+10.x addresses directly, which also avoids DNS-rebind filtering.)
+
+Certificates: with `tls_mode = "files"` use a wildcard covering the proxy
+names; with `tls_mode = "acme"` every host in the table gets its own cert
+automatically — grant the acme key
+`grant <acme-key> wildcard *.internal.myip.gr. TXT;` in the zone. Hosts
+added to the table at runtime are picked up by the hot reload, certs
+included — no restart.
+
+What you get per request: host-based routing, per-host client allowlist
+(403), per-host per-IP rate limiting (429), an nginx-style access log line
+(`proxy-access host peer "GET /" 200 11B 5ms`), upstream errors logged and
+returned as 502, websocket/console streams proxied transparently, and
+TLS ≥1.2 on the front regardless of how ancient the BMC behind it is.
+`proxy_redirect_listen = ":80"` adds an http→https redirect. No root
+needed for :80/:443 — the unit ships `AmbientCapabilities=CAP_NET_BIND_SERVICE`.
+
+What this is NOT: an edge/web-acceleration proxy. No caching, no
+load-balancing, no WAF — for public web traffic keep angie/CFM in front.
+This is an admin-plane proxy for a handful of consoles; treat the
+`allow` list as mandatory, and prefer keeping it reachable only over
+VPN when possible.
+
 ## Troubleshooting
 
 **Service fails with `permission denied` on the config or cert.** The daemon

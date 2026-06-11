@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -15,6 +17,7 @@ import (
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filewatch"
+	"github.com/chrismfz/goddns/internal/proxy"
 	"github.com/chrismfz/goddns/internal/server"
 	"github.com/chrismfz/goddns/internal/tlsmgr"
 )
@@ -25,6 +28,13 @@ import (
 type runtime struct {
 	cfg     *config.Config
 	backend ddns.Backend
+}
+
+// tlsSource is what buildTLS hands back: the handshake callback plus, in
+// acme mode, the ability to bring new hostnames under management at reload.
+type tlsSource struct {
+	getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	manage  func(context.Context, []string) error // nil in files mode
 }
 
 func cmdServe(args []string) {
@@ -47,7 +57,7 @@ func cmdServe(args []string) {
 	st := openStore(cfg)
 	defer st.Close()
 
-	getCert, err := buildTLS(cfg)
+	src, err := buildTLS(cfg)
 	if err != nil {
 		fatal("%v", err)
 	}
@@ -56,45 +66,91 @@ func cmdServe(args []string) {
 		Cfg:     func() *config.Config { return cur.Load().cfg },
 		Backend: func() ddns.Backend { return cur.Load().backend },
 		Store:   st,
-		GetCert: getCert,
+		GetCert: src.getCert,
 	}
 
-	go reloadLoop(*cfgPath, &cur)
+	var px *proxy.Proxy
+	if cfg.ProxyEnabled {
+		px = proxy.New()
+		if err := px.Update(cfg); err != nil {
+			fatal("proxy: %v", err)
+		}
+		go runProxy(cfg, px, src)
+	}
+
+	go reloadLoop(*cfgPath, &cur, px, src)
 
 	if err := srv.Run(); err != nil {
 		fatal("server: %v", err)
 	}
 }
 
-func buildTLS(cfg *config.Config) (func(*tls.ClientHelloInfo) (*tls.Certificate, error), error) {
+func buildTLS(cfg *config.Config) (*tlsSource, error) {
 	switch cfg.TLSMode {
 	case config.TLSACME:
+		var extra []string
+		if cfg.ProxyEnabled {
+			extra = cfg.ProxyHosts()
+		}
 		a, err := tlsmgr.NewACME(context.Background(), tlsmgr.ACMEOptions{
-			Domain:     cfg.ACMEDomain,
-			Email:      cfg.ACMEEmail,
-			CA:         cfg.ACMECA,
-			Storage:    cfg.ACMEStorage,
-			DNSServer:  cfg.DNSServer,
-			TSIGName:   cfg.ACMETSIGName,
-			TSIGAlgo:   cfg.ACMETSIGAlgo,
-			TSIGSecret: cfg.ACMETSIGSecret,
+			Domain:       cfg.ACMEDomain,
+			ExtraDomains: extra,
+			Email:        cfg.ACMEEmail,
+			CA:           cfg.ACMECA,
+			Storage:      cfg.ACMEStorage,
+			DNSServer:    cfg.DNSServer,
+			TSIGName:     cfg.ACMETSIGName,
+			TSIGAlgo:     cfg.ACMETSIGAlgo,
+			TSIGSecret:   cfg.ACMETSIGSecret,
 		})
 		if err != nil {
 			return nil, err
 		}
-		return a.GetCertificate, nil
+		return &tlsSource{getCert: a.GetCertificate, manage: a.Manage}, nil
 	default: // config.TLSFiles (validated in config.Load)
 		f, err := tlsmgr.NewFiles(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
 			return nil, err
 		}
-		return f.GetCertificate, nil
+		return &tlsSource{getCert: f.GetCertificate}, nil
+	}
+}
+
+// runProxy blocks serving the reverse-proxy listener(s); fatal on exit, same
+// contract as the DDNS listener.
+func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
+	if cfg.ProxyRedirectListen != "" {
+		_, httpsPort, _ := strings.Cut(cfg.ProxyListen, ":")
+		go func() {
+			rs := &http.Server{
+				Addr:              cfg.ProxyRedirectListen,
+				Handler:           px.RedirectHandler(httpsPort),
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			if err := rs.ListenAndServe(); err != nil {
+				fatal("proxy redirect listener: %v", err)
+			}
+		}()
+	}
+	ps := &http.Server{
+		Addr:              cfg.ProxyListen,
+		Handler:           px,
+		ReadHeaderTimeout: 10 * time.Second,
+		// No WriteTimeout: BMC console sessions are long-lived streams.
+		TLSConfig: &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: src.getCert,
+		},
+	}
+	log.Printf("goddns proxy listening on %s (%d hosts)", cfg.ProxyListen, len(cfg.Proxy))
+	if err := ps.ListenAndServeTLS("", ""); err != nil {
+		fatal("proxy server: %v", err)
 	}
 }
 
 // reloadLoop polls the config file (mtime+sha256, like cfm's main tick loop)
 // and swaps the runtime bundle on change. SIGHUP forces an immediate check.
-func reloadLoop(path string, cur *atomic.Pointer[runtime]) {
+func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src *tlsSource) {
 	w := filewatch.New(path)
 	w.Changed() // prime with the already-loaded state
 
@@ -134,6 +190,22 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime]) {
 			log.Printf("config reloaded, but changes to %s need a restart to take effect",
 				strings.Join(fields, ", "))
 		}
+
+		// Proxy table swaps live; new hostnames get certs on the fly in
+		// acme mode. Errors keep the previous table/certs.
+		if px != nil && cfg.ProxyEnabled {
+			if err := px.Update(cfg); err != nil {
+				log.Printf("proxy reload failed, keeping previous routes: %v", err)
+			} else if src.manage != nil &&
+				!reflect.DeepEqual(cfg.ProxyHosts(), old.cfg.ProxyHosts()) {
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				if err := src.manage(ctx, cfg.ProxyHosts()); err != nil {
+					log.Printf("acme: managing proxy hosts: %v", err)
+				}
+				cancel()
+			}
+		}
+
 		cur.Store(&runtime{cfg: cfg, backend: backend})
 		log.Printf("config reloaded from %s", path)
 
