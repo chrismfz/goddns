@@ -255,6 +255,50 @@ then add the `[proxy."idrac.ddns.myip.gr"]` block. First-time
 For acme certs in that zone, widen the policy once:
 `grant acme-update. wildcard *.ddns.myip.gr. TXT;`
 
+### DDNS + proxy together: a home service on a dynamic IP
+
+The upstream of a proxy rule doesn't have to be an IP — **it can be one of
+your own DDNS hostnames**. That combination gives a service running at
+home (dynamic IP, no ports 80/443, self-signed at best) a stable public
+name with a real certificate:
+
+    you, anywhere ──► https://monitor.internal.myip.gr (goddns proxy, real cert)
+                          │ resolves chris.ddns.myip.gr on the spot —
+                          │ authoritatively, on this very server
+                          ▼
+                      https://chris.ddns.myip.gr:8443 (home, dynamic IP)
+
+Worked example — LibreNMS on port 8443 behind a home connection:
+
+1. The DDNS part you already have: the home router updates
+   `chris.ddns.myip.gr` every few minutes (MikroTik script / cron).
+
+2. On the home side: port-forward `8443` to the LibreNMS box, and — since
+   the only legitimate client is the proxy — restrict the forward to the
+   goddns server's IP in the router's firewall.
+
+3. One proxy rule:
+
+       [proxy."monitor.internal.myip.gr"]
+       upstream   = "https://chris.ddns.myip.gr:8443"
+       allow      = ["94.67.0.0/16"]      # who may reach LibreNMS
+       rate_limit = 20
+       # upstream_verify stays off: the home service is self-signed;
+       # the *public* side still serves the proper cert.
+
+4. DNS + cert for `monitor.internal.myip.gr` exactly as above (static
+   wildcard A → goddns; wildcard cert or acme).
+
+When the home IP changes, the DDNS update lands in BIND and the proxy
+picks it up on the next connection — it resolves the upstream name through
+the same server that is authoritative for it, so there is no propagation
+delay and the record's TTL doesn't even matter locally. Established idle
+connections to the old IP age out within ~90 seconds.
+
+Works the same for anything at home: Home Assistant
+(`upstream = "http://chris.ddns.myip.gr:8123"`), a NAS UI, an IP camera
+NVR — one `[proxy]` block each, all behind real TLS on one stable name.
+
 What you get per request: host-based routing, per-host client allowlist
 (403), per-host per-IP rate limiting (429), an nginx-style access log line
 (`proxy-access host peer "GET /" 200 11B 5ms`), upstream errors logged and
