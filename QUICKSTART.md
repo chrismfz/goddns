@@ -132,8 +132,10 @@ Responses: `good <ip>` (updated), `nochg <ip>` (no change — costs nothing,
 hammer away). The server uses the connection's source IP, so the client
 never needs to know its own address.
 
-- **MikroTik:** import `configs/mikrotik-ddns.rsc` (shipped in
-  `/usr/share/goddns/configs/`), paste the token, add a scheduler entry.
+- **MikroTik:** edit the URL in `configs/mikrotik-ddns-minimal.rsc`
+  (shipped in `/usr/share/goddns/configs/`), upload it and
+  `/import mikrotik-ddns-minimal.rsc` — script + 3-minute scheduler in
+  one shot.
 - **Routers with "Custom DynDNS":** server `ddns.example.com:8245`, path
   `/nic/update`, the token as the password.
 - **Plain cron:**
