@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -39,40 +40,63 @@ type tlsSource struct {
 	manage  func(context.Context, []string) error // nil in files mode
 }
 
-// logSink redirects the standard logger to a dedicated file (log_file in
-// the config) and supports hot-swapping the path on reload. Empty path =
-// stderr (journald under systemd). Rotation is handled by the shipped
+// logTarget owns one hot-swappable log file (log_file / access_log in the
+// config). Empty path = the fallback (stderr/journald for the main log,
+// merged-into-main for the access log). Rotation is handled by the shipped
 // logrotate config with copytruncate, so no reopen signal is needed.
-var logSink struct {
+type logTarget struct {
 	mu   sync.Mutex
 	f    *os.File
 	path string
 }
 
-func setLogOutput(path string) error {
-	logSink.mu.Lock()
-	defer logSink.mu.Unlock()
-	if path == logSink.path {
-		return nil
+// swap opens path and returns (writer, changed). nil writer with
+// changed=true means "path cleared, revert to the fallback".
+func (t *logTarget) swap(path string) (*os.File, bool, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if path == t.path {
+		return nil, false, nil
 	}
-	if path == "" {
-		log.SetOutput(os.Stderr)
-		if logSink.f != nil {
-			logSink.f.Close()
-			logSink.f = nil
+	var f *os.File
+	if path != "" {
+		var err error
+		f, err = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+		if err != nil {
+			return nil, false, err
 		}
-		logSink.path = ""
-		return nil
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
-	if err != nil {
-		return err
+	if t.f != nil {
+		t.f.Close()
 	}
-	log.SetOutput(f)
-	if logSink.f != nil {
-		logSink.f.Close()
+	t.f, t.path = f, path
+	return f, true, nil
+}
+
+var (
+	mainLogTarget   logTarget
+	accessLogTarget logTarget
+)
+
+func applyLogConfig(cfg *config.Config) error {
+	if f, changed, err := mainLogTarget.swap(cfg.LogFile); err != nil {
+		return fmt.Errorf("log_file %s: %w", cfg.LogFile, err)
+	} else if changed {
+		if f == nil {
+			log.SetOutput(os.Stderr)
+		} else {
+			log.SetOutput(f)
+		}
 	}
-	logSink.f, logSink.path = f, path
+	if f, changed, err := accessLogTarget.swap(cfg.AccessLog); err != nil {
+		return fmt.Errorf("access_log %s: %w", cfg.AccessLog, err)
+	} else if changed {
+		if f == nil {
+			proxy.SetAccessLogger(nil)
+		} else {
+			proxy.SetAccessLogger(log.New(f, "", log.LstdFlags))
+		}
+	}
 	return nil
 }
 
@@ -85,8 +109,8 @@ func cmdServe(args []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
-	if err := setLogOutput(cfg.LogFile); err != nil {
-		fatal("log_file %s: %v", cfg.LogFile, err)
+	if err := applyLogConfig(cfg); err != nil {
+		fatal("%v", err)
 	}
 	backend, err := ddns.NewRFC2136(cfg.DNSServer, cfg.TSIGName, cfg.TSIGAlgo, cfg.TSIGSecret)
 	if err != nil {
@@ -282,8 +306,8 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 			log.Printf("config reloaded, but changes to %s need a restart to take effect",
 				strings.Join(fields, ", "))
 		}
-		if err := setLogOutput(cfg.LogFile); err != nil {
-			log.Printf("log_file %s: %v — keeping current log output", cfg.LogFile, err)
+		if err := applyLogConfig(cfg); err != nil {
+			log.Printf("%v — keeping current log output", err)
 		}
 
 		applyProxy(cfg)
