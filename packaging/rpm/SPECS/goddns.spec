@@ -115,11 +115,13 @@ mkdir -p /var/lib/goddns
 chown goddns:goddns /var/lib/goddns
 chmod 0750 /var/lib/goddns
 
-# dedicated log file (log_file in goddns.conf); the unprivileged service
-# cannot create files under /var/log itself
-touch /var/log/goddns.log 2>/dev/null || true
-chown goddns:goddns /var/log/goddns.log || true
-chmod 0640 /var/log/goddns.log || true
+# dedicated log files (log_file / access_log in goddns.conf); the
+# unprivileged service cannot create files under /var/log itself
+for lf in /var/log/goddns.log /var/log/goddns-access.log; do
+    touch "$lf" 2>/dev/null || true
+    chown goddns:goddns "$lf" || true
+    chmod 0640 "$lf" || true
+done
 
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true

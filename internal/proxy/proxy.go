@@ -46,6 +46,21 @@ func New() *Proxy {
 	return p
 }
 
+// accessLogger optionally routes the per-request "proxy-access" lines to a
+// dedicated logger (access_log in the config, nginx-style). nil = the
+// process-wide logger, i.e. merged into the main log. Errors/warnings
+// always stay on the main logger.
+var accessLogger atomic.Pointer[log.Logger]
+
+func SetAccessLogger(l *log.Logger) { accessLogger.Store(l) }
+
+func alog() *log.Logger {
+	if l := accessLogger.Load(); l != nil {
+		return l
+	}
+	return log.Default()
+}
+
 // Update compiles the routing table from a validated config and swaps it in
 // atomically. Rules whose config is unchanged are carried over (keeping
 // their limiter state and connection pool); replaced rules get their idle
@@ -191,7 +206,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		// One access-log line per request, nginx-ish:
 		// proxy-access host peer "METHOD /path" status bytes duration
-		log.Printf("proxy-access %s %s \"%s %s\" %d %dB %s",
+		alog().Printf("proxy-access %s %s \"%s %s\" %d %dB %s",
 			host, peerStr, r.Method, r.URL.RequestURI(),
 			lw.status, lw.bytes, time.Since(start).Round(time.Millisecond))
 	}()

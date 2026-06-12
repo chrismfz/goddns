@@ -217,12 +217,16 @@ By default goddns logs to stderr (journald under systemd). On a busy DNS
 host that journal is shared with named and friends, so the packaged config
 sets a dedicated file:
 
-    log_file = "/var/log/goddns.log"
+    log_file   = "/var/log/goddns.log"
+    access_log = "/var/log/goddns-access.log"
 
-Everything lands there: DDNS updates, `proxy-access` lines, 502s, config
-reload events. The package creates the file (goddns:goddns 0640) and ships
-`/etc/logrotate.d/goddns` (weekly, copytruncate). The key is
-hot-swappable — change/comment it and it applies on the next reload tick.
+nginx-style split: `access_log` gets only the per-request `proxy-access`
+lines, `log_file` keeps the events — DDNS updates, proxy errors/502s,
+config reloads. Leave `access_log` empty to merge traffic into `log_file`;
+leave both empty for journald. The package creates the files
+(goddns:goddns 0640) and ships `/etc/logrotate.d/goddns` (weekly,
+copytruncate). Both keys are hot-swappable — change/comment them and they
+apply on the next reload tick.
 
 ## Config hot reload
 

@@ -24,6 +24,7 @@ ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/goddns
 ReadWritePaths=-/var/log/goddns.log
+ReadWritePaths=-/var/log/goddns-access.log
 ReadOnlyPaths=-/etc/letsencrypt
 ProtectKernelTunables=true
 ProtectControlGroups=true

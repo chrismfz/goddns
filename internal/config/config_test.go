@@ -242,3 +242,24 @@ log_file  = "/var/log/goddns.log"
 		t.Fatalf("log_file change should be hot: %v", f)
 	}
 }
+
+func TestAccessLog(t *testing.T) {
+	c, err := Load(write(t, `
+cert_file  = "/tmp/c.pem"
+key_file   = "/tmp/k.pem"
+access_log = "/var/log/goddns-access.log"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AccessLog != "/var/log/goddns-access.log" {
+		t.Fatalf("access_log: %q", c.AccessLog)
+	}
+	a, _ := Load(write(t, "cert_file = \"/tmp/c.pem\"\nkey_file = \"/tmp/k.pem\"\n"))
+	if a.AccessLog != "" {
+		t.Fatalf("access_log default should be empty: %q", a.AccessLog)
+	}
+	if f := c.NeedsRestart(a); len(f) != 0 {
+		t.Fatalf("access_log change should be hot: %v", f)
+	}
+}

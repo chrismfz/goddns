@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -273,5 +274,22 @@ func TestAuthAndAllowBothEnforced(t *testing.T) {
 	p.ServeHTTP(rr, req)
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("good creds must not bypass the allow list: %d", rr.Code)
+	}
+}
+
+func TestAccessLoggerSplit(t *testing.T) {
+	var buf strings.Builder
+	SetAccessLogger(log.New(&buf, "", 0))
+	t.Cleanup(func() { SetAccessLogger(nil) })
+
+	up, _ := upstream(t)
+	p := newProxy(t, map[string]config.ProxyRule{
+		"a.internal.myip.gr": {Upstream: up.URL},
+	})
+	if code, _ := request(p, "a.internal.myip.gr", "/x", "1.2.3.4:1"); code != 200 {
+		t.Fatalf("request: %d", code)
+	}
+	if !strings.Contains(buf.String(), `proxy-access a.internal.myip.gr 1.2.3.4 "GET /x" 200`) {
+		t.Fatalf("access line not routed to dedicated logger: %q", buf.String())
 	}
 }
