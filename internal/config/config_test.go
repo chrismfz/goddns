@@ -309,3 +309,12 @@ upstream = "https://10.0.0.1"
 		t.Fatalf("valid config rejected: %v", err)
 	}
 }
+
+// TestShippedExampleLoads guards against the shipped configs/goddns.conf
+// ever drifting into a layout that strict decoding rejects (e.g. a
+// top-level key accidentally placed below a [section]).
+func TestShippedExampleLoads(t *testing.T) {
+	if _, err := Load("../../configs/goddns.conf"); err != nil {
+		t.Fatalf("shipped configs/goddns.conf does not load: %v", err)
+	}
+}
