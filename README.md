@@ -239,10 +239,20 @@ security theatre; layered auth is the real control:
    `SameSite=Strict`, HttpOnly cookie. CSRF tokens on every mutating form.
 
 So a single auth bug isn't game over, and every mutation is written to the
-event log as an `admin-audit` line. The session key is auto-created at
-`/var/lib/goddns/admin.secret` (or set `GODDNS_ADMIN_SECRET`) and persists
-across restarts. `users`/`allow`/`basic_auth` hot-reload; enabling or moving
-the vhost needs a restart.
+event log as an `admin-audit` line. The login form is **rate-limited per
+client IP** (fail2ban-style: an attacking source locks itself out with
+exponential backoff; legit accounts can't be locked out by others), on top
+of bcrypt. Sessions are bound to the user's current credential, so changing
+a password — or removing the user — invalidates their outstanding sessions
+immediately. The session key is auto-created at `/var/lib/goddns/admin.secret`
+(or set `GODDNS_ADMIN_SECRET`, min 16 bytes) and persists across restarts.
+`users`/`allow`/`basic_auth` hot-reload; enabling or moving the vhost needs
+a restart.
+
+For an **internet-facing** admin host, set a restrictive `allow` and/or
+`basic_auth` (goddns logs a warning at startup if both are empty) — the
+login throttle protects the form, but a CIDR/Basic gate keeps unauthenticated
+traffic away from it entirely.
 
 DNS for the admin name is just a static record at your goddns host — e.g.
 `admin.internal.myip.gr` already covered by the `*.internal` wildcard, or a

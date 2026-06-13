@@ -151,6 +151,11 @@ func cmdServe(args []string) {
 			}
 			adminH = admin.New(func() *config.Config { return cur.Load().cfg }, st, secret, Version)
 			log.Printf("admin UI enabled at https://%s%s", cfg.Admin.Host, cfg.ProxyListen)
+			if len(cfg.Admin.Allow) == 0 && len(cfg.Admin.BasicAuth) == 0 {
+				log.Printf("WARNING: admin has no 'allow' CIDR list and no 'basic_auth' — the login " +
+					"form is reachable from anywhere (login throttling is on, but set allow and/or " +
+					"basic_auth for an internet-facing host)")
+			}
 		}
 		go runProxy(cfg, px, src, adminH)
 	}

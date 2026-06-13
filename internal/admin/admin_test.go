@@ -17,19 +17,72 @@ import (
 
 func TestSessionRoundTrip(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
-	tok := newSession(secret, "chris", time.Hour)
-	if u, ok := parseSession(secret, tok); !ok || u != "chris" {
+	const fp = "$2a$10$hashfingerprint"
+	look := func(u string) (string, bool) {
+		if u == "chris" {
+			return fp, true
+		}
+		return "", false
+	}
+	tok := newSession(secret, fp, "chris", time.Hour)
+	if u, ok := parseSession(secret, tok, look); !ok || u != "chris" {
 		t.Fatalf("valid session: %q %v", u, ok)
 	}
-	if _, ok := parseSession([]byte("different-key-different-key-1234"), tok); ok {
+	if _, ok := parseSession([]byte("different-key-different-key-1234"), tok, look); ok {
 		t.Fatal("session verified under wrong key")
 	}
-	if _, ok := parseSession(secret, tok+"x"); ok {
+	if _, ok := parseSession(secret, tok+"x", look); ok {
 		t.Fatal("tampered session accepted")
 	}
-	exp := newSession(secret, "chris", -time.Hour)
-	if _, ok := parseSession(secret, exp); ok {
+	// password change -> different fingerprint -> session invalid
+	look2 := func(u string) (string, bool) { return "$2a$10$DIFFERENThash", u == "chris" }
+	if _, ok := parseSession(secret, tok, look2); ok {
+		t.Fatal("session survived a credential change")
+	}
+	// user removed -> lookup fails -> invalid
+	if _, ok := parseSession(secret, tok, func(string) (string, bool) { return "", false }); ok {
+		t.Fatal("session survived user removal")
+	}
+	exp := newSession(secret, fp, "chris", -time.Hour)
+	if _, ok := parseSession(secret, exp, look); ok {
 		t.Fatal("expired session accepted")
+	}
+}
+
+func TestLoginThrottle(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	// hammer wrong passwords from one IP until it locks
+	locked := false
+	for i := 0; i < throttleThreshold+2; i++ {
+		rr := do(h, "POST", "/login", "203.0.113.9:1",
+			map[string]string{"user": "admin", "pass": "wrong"}, nil)
+		if rr.Code == http.StatusTooManyRequests {
+			locked = true
+			break
+		}
+	}
+	if !locked {
+		t.Fatal("login never throttled after repeated failures")
+	}
+	// a different IP is unaffected (gets normal 401, not 429)
+	rr := do(h, "POST", "/login", "198.51.100.7:1",
+		map[string]string{"user": "admin", "pass": "wrong"}, nil)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("fresh IP should not be pre-throttled: %d", rr.Code)
+	}
+}
+
+func TestAdminAllowIgnoresXFF(t *testing.T) {
+	// The admin CIDR gate must use the TCP peer, never a spoofable header.
+	h, _ := newHandler(t, mkConfig(t, `allow = ["127.0.0.0/8"]`))
+	req := httptest.NewRequest("GET", "/login", nil)
+	req.RemoteAddr = "8.8.8.8:1" // outside allow
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	req.Header.Set("X-Real-IP", "127.0.0.1")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("XFF spoof bypassed admin allowlist: %d", rr.Code)
 	}
 }
 
@@ -142,7 +195,7 @@ func TestLoginAndDashboard(t *testing.T) {
 func TestDDNSCrudWithCSRF(t *testing.T) {
 	h, st := newHandler(t, mkConfig(t, ""))
 	cookie := login(t, h)
-	csrf := csrfToken(h.secret, "admin")
+	csrf := h.csrfFor("admin")
 
 	// add without CSRF -> 400
 	if rr := do(h, "POST", "/ddns/add", "127.0.0.1:1",

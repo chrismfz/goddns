@@ -19,6 +19,11 @@ func render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	// Locked-down CSP: no scripts at all, inline styles only, forms only to
+	// self. Defence in depth behind html/template auto-escaping.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	if err := tmpls.ExecuteTemplate(w, name, data); err != nil {
 		log.Printf("admin: template %s: %v", name, err)
 	}

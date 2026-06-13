@@ -102,7 +102,6 @@ func (a *AdminConfig) IsAllowed(ip net.IP) bool {
 	return false
 }
 
-
 // ProxyRule routes one public hostname to one internal upstream.
 type ProxyRule struct {
 	Upstream       string   `toml:"upstream"`        // http(s)://ip-or-host[:port]
@@ -236,6 +235,11 @@ func Load(path string) (*Config, error) {
 			user, hash, ok := strings.Cut(cred, ":")
 			if !ok || user == "" || !strings.HasPrefix(hash, "$2") {
 				return nil, fmt.Errorf("admin: users/basic_auth entries must be \"user:bcrypt-hash\" (generate with: goddns passwd)")
+			}
+			// '|' is the session field separator and whitespace is a footgun;
+			// the username is everything before the first ':' so ':' is moot.
+			if strings.ContainsAny(user, "| \t") {
+				return nil, fmt.Errorf("admin: username %q must not contain '|' or whitespace", user)
 			}
 		}
 		for _, cidr := range c.Admin.Allow {
