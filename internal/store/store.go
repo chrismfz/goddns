@@ -151,6 +151,33 @@ func (s *Store) Del(name string) error {
 	return nil
 }
 
+// Rotate issues a fresh token for an existing FQDN (the old token stops
+// working immediately) and returns the new plaintext exactly once. last_ip
+// and history are preserved.
+func (s *Store) Rotate(name string) (Record, string, error) {
+	tok := newToken()
+	res, err := s.db.Exec(`UPDATE records SET token_hash=? WHERE fqdn=?`, hashToken(tok), FQDN(name))
+	if err != nil {
+		return Record{}, "", err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Record{}, "", ErrNotFound
+	}
+	row := s.db.QueryRow(`SELECT `+cols+` FROM records WHERE fqdn=?`, FQDN(name))
+	r, err := s.scan(row)
+	return r, tok, err
+}
+
+// Get returns the record for an FQDN (without exposing the token).
+func (s *Store) Get(name string) (Record, error) {
+	row := s.db.QueryRow(`SELECT `+cols+` FROM records WHERE fqdn=?`, FQDN(name))
+	r, err := s.scan(row)
+	if err == sql.ErrNoRows {
+		return Record{}, ErrNotFound
+	}
+	return r, err
+}
+
 func (s *Store) MarkUpdated(id int64, ip string) error {
 	_, err := s.db.Exec(`UPDATE records SET last_ip=?, last_update=? WHERE id=?`,
 		ip, time.Now().Unix(), id)

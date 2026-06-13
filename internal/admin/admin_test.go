@@ -205,7 +205,7 @@ func TestDDNSCrudWithCSRF(t *testing.T) {
 	// add with CSRF -> token shown
 	rr := do(h, "POST", "/ddns/add", "127.0.0.1:1",
 		map[string]string{"fqdn": "a.ddns.myip.gr", "zone": "ddns.myip.gr", "ttl": "60", "csrf": csrf}, cookie)
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "token created") {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "token for") {
 		t.Fatalf("add with csrf: %d %s", rr.Code, rr.Body.String())
 	}
 	if recs, _ := st.List(); len(recs) != 1 || recs[0].FQDN != "a.ddns.myip.gr." {
@@ -215,7 +215,7 @@ func TestDDNSCrudWithCSRF(t *testing.T) {
 	// delete step 1 (CSRF, no confirm) -> confirmation page, NOT deleted yet
 	rr = do(h, "POST", "/ddns/del", "127.0.0.1:1",
 		map[string]string{"fqdn": "a.ddns.myip.gr", "csrf": csrf}, cookie)
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "delete DDNS record") {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "yes, delete") {
 		t.Fatalf("del step1 should confirm: %d", rr.Code)
 	}
 	if recs, _ := st.List(); len(recs) != 1 {
@@ -246,5 +246,42 @@ func TestBasicAuthGate(t *testing.T) {
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("with basic creds login page should load: %d", rr.Code)
+	}
+}
+
+func TestRotateAndHelp(t *testing.T) {
+	h, st := newHandler(t, mkConfig(t, ""))
+	_, tok1, _ := st.Add("home.ddns.myip.gr", "ddns.myip.gr", 60)
+	cookie := login(t, h)
+	csrf := h.csrfFor("admin")
+
+	// help page (read-only) lists the client snippets with a placeholder
+	rr := do(h, "GET", "/ddns/help?fqdn=home.ddns.myip.gr", "127.0.0.1:1", nil, cookie)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "MikroTik") || !strings.Contains(rr.Body.String(), "&lt;token&gt;") {
+		t.Fatalf("help page: %d", rr.Code)
+	}
+
+	// rotate step1 (no confirm) -> confirm page, token unchanged
+	rr = do(h, "POST", "/ddns/rotate", "127.0.0.1:1",
+		map[string]string{"fqdn": "home.ddns.myip.gr", "csrf": csrf}, cookie)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "yes, rotate") {
+		t.Fatalf("rotate confirm: %d", rr.Code)
+	}
+	if _, err := st.Lookup(tok1); err != nil {
+		t.Fatal("token rotated before confirm")
+	}
+	// rotate step2 -> new token shown, old invalid
+	rr = do(h, "POST", "/ddns/rotate", "127.0.0.1:1",
+		map[string]string{"fqdn": "home.ddns.myip.gr", "csrf": csrf, "confirm": "1"}, cookie)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "token for") {
+		t.Fatalf("rotate result: %d", rr.Code)
+	}
+	if _, err := st.Lookup(tok1); err == nil {
+		t.Fatal("old token still valid after rotate")
+	}
+	// rotate without CSRF -> 400
+	if rr := do(h, "POST", "/ddns/rotate", "127.0.0.1:1",
+		map[string]string{"fqdn": "home.ddns.myip.gr", "confirm": "1"}, cookie); rr.Code != http.StatusBadRequest {
+		t.Fatalf("rotate without csrf: %d", rr.Code)
 	}
 }

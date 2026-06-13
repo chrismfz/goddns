@@ -29,6 +29,8 @@ type Store interface {
 	List() ([]store.Record, error)
 	Add(name, zone string, ttl uint32) (store.Record, string, error)
 	Del(name string) error
+	Rotate(name string) (store.Record, string, error)
+	Get(name string) (store.Record, error)
 }
 
 // Handler serves the admin UI. Construct with New.
@@ -124,6 +126,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdd(w, r, user, peerStr)
 	case "/ddns/del":
 		h.handleDel(w, r, user, peerStr)
+	case "/ddns/rotate":
+		h.handleRotate(w, r, user, peerStr)
+	case "/ddns/help":
+		h.handleHelp(w, r, user)
 	case "/logs":
 		h.handleLogs(w, r, user)
 	default:
@@ -259,9 +265,74 @@ func (h *Handler) handleAdd(w http.ResponseWriter, r *http.Request, user, peer s
 		return
 	}
 	h.audit(user, peer, "ddns-add fqdn=%s zone=%s ttl=%d", rec.FQDN, rec.Zone, rec.TTL)
-	render(w, resultTmpl, map[string]any{
-		"Version": h.version, "FQDN": rec.FQDN, "Zone": rec.Zone, "TTL": rec.TTL, "Token": tok,
+	h.renderHelp(w, rec, tok, true)
+}
+
+// endpoint returns the host:port clients use to reach the DDNS update
+// endpoint, for the copy-paste help. PublicHost fills it when set; the port
+// comes from the listen address.
+func (h *Handler) endpoint() (host, port string) {
+	cfg := h.cfg()
+	host = cfg.PublicHost
+	if host == "" {
+		host = "<your-goddns-host>"
+	}
+	if _, p, err := net.SplitHostPort(cfg.Listen); err == nil && p != "" {
+		port = p
+	} else {
+		port = "8245"
+	}
+	return host, port
+}
+
+// renderHelp shows the client setup snippets for a record. token is the
+// real value only right after add/rotate (fresh==true); otherwise it's a
+// "<token>" placeholder, because goddns stores only the hash.
+func (h *Handler) renderHelp(w http.ResponseWriter, rec store.Record, token string, fresh bool) {
+	host, port := h.endpoint()
+	render(w, helpTmpl, map[string]any{
+		"Version":  h.version,
+		"FQDN":     rec.FQDN,
+		"Name":     strings.TrimSuffix(rec.FQDN, "."),
+		"Zone":     rec.Zone,
+		"TTL":      rec.TTL,
+		"Host":     host,
+		"Port":     port,
+		"Token":    token,
+		"NewToken": fresh,
 	})
+}
+
+func (h *Handler) handleHelp(w http.ResponseWriter, r *http.Request, user string) {
+	rec, err := h.store.Get(strings.TrimSpace(r.URL.Query().Get("fqdn")))
+	if err != nil {
+		http.Error(w, "no such record", http.StatusNotFound)
+		return
+	}
+	h.renderHelp(w, rec, "<token>", false)
+}
+
+func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, user, peer string) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	fqdn := strings.TrimSpace(r.FormValue("fqdn"))
+	if r.FormValue("confirm") != "1" {
+		render(w, confirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "FQDN": store.FQDN(fqdn),
+			"Action": "/ddns/rotate", "Verb": "yes, rotate",
+			"Msg": "Rotate the token? The current token stops working immediately — update your client with the new one.",
+		})
+		return
+	}
+	rec, tok, err := h.store.Rotate(fqdn)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h.audit(user, peer, "ddns-rotate fqdn=%s", rec.FQDN)
+	h.renderHelp(w, rec, tok, true)
 }
 
 func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer string) {
@@ -276,6 +347,8 @@ func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer s
 	if r.FormValue("confirm") != "1" {
 		render(w, confirmTmpl, map[string]any{
 			"Version": h.version, "CSRF": h.csrfFor(user), "FQDN": store.FQDN(fqdn),
+			"Action": "/ddns/del", "Verb": "yes, delete",
+			"Msg": "Delete this record? Its token stops working immediately (you can re-add it later).",
 		})
 		return
 	}

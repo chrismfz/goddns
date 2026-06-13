@@ -29,6 +29,7 @@ type Config struct {
 	ReloadInterval int    `toml:"reload_interval"` // config re-check period, seconds
 	LogFile        string `toml:"log_file"`        // dedicated log file; empty = stderr/journald. Hot-swappable.
 	AccessLog      string `toml:"access_log"`      // separate file for proxy-access lines; empty = into log_file. Hot-swappable.
+	PublicHost     string `toml:"public_host"`     // hostname clients use to reach the DDNS endpoint (e.g. sdns.myip.gr); fills the admin help snippets. Optional.
 
 	// TLS
 	TLSMode  string `toml:"tls_mode"`  // "files" or "acme"

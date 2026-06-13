@@ -31,6 +31,7 @@ Usage:
   goddns serve  [-config %s]
   goddns token add  -fqdn home.myip.gr -zone myip.gr [-ttl 60] [-config ...]
   goddns token list [-config ...]
+  goddns token rotate -fqdn home.myip.gr [-config ...]  # new token, old stops
   goddns token del  -fqdn home.myip.gr [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth
   goddns version
@@ -159,6 +160,16 @@ func cmdToken(args []string) {
 		for _, r := range recs {
 			fmt.Println(r)
 		}
+	case "rotate":
+		if *fqdnArg == "" {
+			fatal("token rotate requires -fqdn")
+		}
+		rec, tok, err := st.Rotate(*fqdnArg)
+		if err != nil {
+			fatal("rotate: %v", err)
+		}
+		fmt.Printf("Rotated %s — the previous token no longer works.\n", rec.FQDN)
+		fmt.Printf("New token (store it now, shown once):\n  %s\n", tok)
 	case "del":
 		if *fqdnArg == "" {
 			fatal("token del requires -fqdn")

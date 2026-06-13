@@ -82,3 +82,37 @@ func TestList(t *testing.T) {
 		t.Fatalf("list: %+v", recs)
 	}
 }
+
+func TestRotateAndGet(t *testing.T) {
+	st := openTemp(t)
+	rec, tok1, err := st.Add("home.myip.gr", "myip.gr", 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.MarkUpdated(rec.ID, "1.2.3.4")
+	// rotate: old token stops, new works, history preserved
+	rec2, tok2, err := st.Rotate("home.myip.gr")
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if tok2 == tok1 {
+		t.Fatal("rotate returned the same token")
+	}
+	if rec2.LastIP != "1.2.3.4" {
+		t.Fatalf("rotate lost history: %q", rec2.LastIP)
+	}
+	if _, err := st.Lookup(tok1); err != ErrNotFound {
+		t.Fatal("old token still valid after rotate")
+	}
+	if r, err := st.Lookup(tok2); err != nil || r.FQDN != "home.myip.gr." {
+		t.Fatalf("new token invalid: %v", err)
+	}
+	// Get does not expose the token, returns the record
+	g, err := st.Get("home.myip.gr")
+	if err != nil || g.FQDN != "home.myip.gr." {
+		t.Fatalf("get: %v %+v", err, g)
+	}
+	if _, _, err := st.Rotate("nope.myip.gr"); err != ErrNotFound {
+		t.Fatalf("rotate missing: %v", err)
+	}
+}

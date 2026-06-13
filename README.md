@@ -224,10 +224,17 @@ the same TLS and port — no extra listener, no port games):
     users   = ["chris:$2a$10$..."]      # goddns passwd -user chris
 
 It shows the DDNS records (last IP / last seen), the proxy table, and a tail
-of the logs, and lets you **add/delete DDNS tokens** (proxy hosts stay
-read-only — edit `goddns.conf`, it hot-reloads). DDNS tokens live in SQLite,
-so CRUD there is natural; full proxy CRUD would mean moving proxy rules out
-of the hand-edited config, which is a deliberate non-goal for now.
+of the logs, and lets you **add / rotate / delete DDNS tokens** (proxy hosts
+stay read-only — edit `goddns.conf`, it hot-reloads). Each record has a
+**help** link with ready copy-paste client snippets (curl, cron, MikroTik,
+router DynDNS2) for that hostname — set `public_host` so they're filled in
+with your server name and port. Tokens are stored hashed and **can't be
+shown again**; if one is lost, **rotate** mints a fresh token (the old one
+stops working) and shows it once with the snippets filled in. The same is
+available on the CLI: `goddns token rotate -fqdn home.ddns.myip.gr`.
+DDNS tokens live in SQLite, so CRUD there is natural; full proxy CRUD would
+mean moving proxy rules out of the hand-edited config, a deliberate non-goal
+for now.
 
 **It can rewrite DNS, so it is gated in depth** — a custom port would be
 security theatre; layered auth is the real control:
