@@ -66,7 +66,16 @@ func (t *loginThrottle) fail(keys ...string) {
 		r.n++
 		r.seen = now
 		if r.n >= throttleThreshold {
-			d := time.Minute << uint(r.n-throttleThreshold) // 1m,2m,4m...
+			// Clamp the shift BEFORE computing the duration: an unclamped
+			// time.Minute << (n-threshold) overflows int64 around n=36 and
+			// wraps to a negative duration, which the cap below would not
+			// catch — silently disabling the lock. Shift 20 already far
+			// exceeds throttleWindow, so the cap always applies past it.
+			shift := r.n - throttleThreshold
+			if shift > 20 {
+				shift = 20
+			}
+			d := time.Minute << uint(shift) // 1m,2m,4m...
 			if d > throttleWindow {
 				d = throttleWindow
 			}

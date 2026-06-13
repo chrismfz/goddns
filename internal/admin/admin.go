@@ -270,6 +270,15 @@ func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer s
 		return
 	}
 	fqdn := strings.TrimSpace(r.FormValue("fqdn"))
+	// No-JS confirmation: the first POST (CSRF-checked) renders a confirm
+	// page; only confirm=1 actually deletes. Replaces an inline onsubmit
+	// confirm() that the page CSP (no scripts) would block anyway.
+	if r.FormValue("confirm") != "1" {
+		render(w, confirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "FQDN": store.FQDN(fqdn),
+		})
+		return
+	}
 	if err := h.store.Del(fqdn); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

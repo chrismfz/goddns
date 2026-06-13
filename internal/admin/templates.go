@@ -7,10 +7,11 @@ import (
 )
 
 const (
-	loginTmpl  = "login"
-	dashTmpl   = "dash"
-	resultTmpl = "result"
-	logsTmpl   = "logs"
+	loginTmpl   = "login"
+	dashTmpl    = "dash"
+	resultTmpl  = "result"
+	logsTmpl    = "logs"
+	confirmTmpl = "confirm"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -80,7 +81,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <td>{{if .LastIP}}{{.LastIP}}{{else}}<span class="muted">—</span>{{end}}</td>
 <td class="muted">{{.LastSeen}}</td>
 <td>{{if eq .State "enabled"}}<span class="ok">{{.State}}</span>{{else}}<span class="warn">{{.State}}</span>{{end}}</td>
-<td><form class="inline" method="post" action="/ddns/del" onsubmit="return confirm('Delete {{.FQDN}}? The token stops working.')">
+<td><form class="inline" method="post" action="/ddns/del">
 <input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fqdn" value="{{.FQDN}}">
 <button class="danger" type="submit">delete</button></form></td>
 </tr>{{else}}<tr><td colspan="7" class="muted">(no records)</td></tr>{{end}}
@@ -123,6 +124,19 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 </div>{{end}}
 <a href="/">&larr; back to dashboard</a>
 </main></body></html>{{end}}
+
+{{define "confirm"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span></div><div><a href="/">cancel</a></div></header>
+<main><h2>delete DDNS record</h2>
+<div class="card">
+<p>Delete <b>{{.FQDN}}</b>? Its token stops working immediately (you can re-add it later).</p>
+<form method="post" action="/ddns/del">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="fqdn" value="{{.FQDN}}">
+<input type="hidden" name="confirm" value="1">
+<button class="danger" type="submit">yes, delete</button>
+<a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a>
+</form></div></main></body></html>{{end}}
 
 {{define "logs"}}{{template "head" .}}
 <header><div><span class="b">goddns admin</span> <span class="muted">{{.Title}}</span></div>

@@ -212,11 +212,20 @@ func TestDDNSCrudWithCSRF(t *testing.T) {
 		t.Fatalf("record not stored: %+v", recs)
 	}
 
-	// delete with CSRF -> redirect, record gone
+	// delete step 1 (CSRF, no confirm) -> confirmation page, NOT deleted yet
 	rr = do(h, "POST", "/ddns/del", "127.0.0.1:1",
 		map[string]string{"fqdn": "a.ddns.myip.gr", "csrf": csrf}, cookie)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "delete DDNS record") {
+		t.Fatalf("del step1 should confirm: %d", rr.Code)
+	}
+	if recs, _ := st.List(); len(recs) != 1 {
+		t.Fatalf("record deleted before confirm: %+v", recs)
+	}
+	// delete step 2 (confirm=1) -> redirect, record gone
+	rr = do(h, "POST", "/ddns/del", "127.0.0.1:1",
+		map[string]string{"fqdn": "a.ddns.myip.gr", "csrf": csrf, "confirm": "1"}, cookie)
 	if rr.Code != http.StatusSeeOther {
-		t.Fatalf("del: %d", rr.Code)
+		t.Fatalf("del step2: %d", rr.Code)
 	}
 	if recs, _ := st.List(); len(recs) != 0 {
 		t.Fatalf("record not deleted: %+v", recs)
