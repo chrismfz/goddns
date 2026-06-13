@@ -23,12 +23,19 @@ out of v1 scope.
 Config sketch: `[zone "example.com"] backend = "cpanel" ...` sections —
 which also unlocks per-zone TSIG keys for the rfc2136 backend.
 
-## Admin HTTP API
+## Admin web UI — shipped (read-only + DDNS CRUD); follow-ups
 
-Token CRUD over HTTPS (what the CLI does today) guarded by a separate admin
-bearer token, so zones/records can be managed remotely / from provisioning
-scripts: `POST/GET/DELETE /api/v1/records`. Goes behind its own listener or
-path prefix; consider mTLS for server-to-server use.
+The `[admin]` dashboard (DDNS records, proxy table, log tail, DDNS token
+add/delete, login session + CIDR/Basic gates) is in. Still open:
+
+- **Proxy CRUD** from the UI — needs moving proxy rules out of the
+  hand-edited TOML into SQLite (or a managed `.d/` dir) so the daemon can
+  merge file-config + DB-config without clobbering comments. The real
+  design fork before this can happen.
+- A machine API (`POST/GET/DELETE /api/v1/records` + admin bearer token /
+  mTLS) for provisioning scripts, distinct from the human UI.
+- htmx polish (inline add/delete without full reloads), live log streaming.
+- Per-record disable/enable toggle in the UI (column already in the schema).
 
 ## termui dashboard
 

@@ -41,6 +41,7 @@ certificate, or access control on their own.
 | Put TLS + auth in front of internal consoles (iDRAC, NAS…) | [Reverse proxy mode](#reverse-proxy-mode-optional) |
 | Expose a home service on a dynamic IP | [DDNS + proxy together](#ddns--proxy-together-a-home-service-on-a-dynamic-ip) |
 | Expose a whole LAN with zero open ports | [SSH reverse tunnels](#zero-open-ports-ssh-reverse-tunnels-the-whole-lan-not-just-one-box) |
+| Manage records from a web dashboard | [Admin web UI](#admin-web-ui-optional) |
 | Build .deb/.rpm packages | [Build & packaging](#build--packaging-cfm-style-workflow) |
 | Something broke | [Troubleshooting](#troubleshooting) |
 
@@ -210,6 +211,42 @@ restarts anywhere. Verify with:
 Note there is no "fallback to ACME" in files mode: the configured pair is
 served for every SNI, matching or not. Per-host issuance is what
 `tls_mode = "acme"` does.
+
+## Admin web UI (optional)
+
+A built-in dashboard, served as a vhost on the proxy listener (so it shares
+the same TLS and port — no extra listener, no port games):
+
+    [admin]
+    enabled = true
+    host    = "admin.myip.gr"
+    allow   = ["84.54.49.0/24", "94.67.0.0/16"]
+    users   = ["chris:$2a$10$..."]      # goddns passwd -user chris
+
+It shows the DDNS records (last IP / last seen), the proxy table, and a tail
+of the logs, and lets you **add/delete DDNS tokens** (proxy hosts stay
+read-only — edit `goddns.conf`, it hot-reloads). DDNS tokens live in SQLite,
+so CRUD there is natural; full proxy CRUD would mean moving proxy rules out
+of the hand-edited config, which is a deliberate non-goal for now.
+
+**It can rewrite DNS, so it is gated in depth** — a custom port would be
+security theatre; layered auth is the real control:
+
+1. **`allow`** — client CIDRs. A genuine packet filter, not obscurity.
+2. **`basic_auth`** (optional) — an outer HTTP Basic gate so scanners never
+   reach the login form. bcrypt only.
+3. **login session** — `users` are the login credentials; a signed,
+   `SameSite=Strict`, HttpOnly cookie. CSRF tokens on every mutating form.
+
+So a single auth bug isn't game over, and every mutation is written to the
+event log as an `admin-audit` line. The session key is auto-created at
+`/var/lib/goddns/admin.secret` (or set `GODDNS_ADMIN_SECRET`) and persists
+across restarts. `users`/`allow`/`basic_auth` hot-reload; enabling or moving
+the vhost needs a restart.
+
+DNS for the admin name is just a static record at your goddns host — e.g.
+`admin.internal.myip.gr` already covered by the `*.internal` wildcard, or a
+plain `admin IN A <goddns-ip>`. Keep it on your LAN/VPN where you can.
 
 ## Logging
 

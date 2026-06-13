@@ -64,8 +64,44 @@ type Config struct {
 	ProxyRedirectListen string               `toml:"proxy_redirect_listen"` // optional plain-HTTP listener (e.g. ":80") that 308-redirects to https
 	Proxy               map[string]ProxyRule `toml:"proxy"`                 // host -> rule; hot-reloadable
 
+	// Admin web UI: a built-in vhost on the proxy listener that shows the
+	// DDNS records + proxy table + logs and allows DDNS token CRUD. Off by
+	// default; this is high-value (can rewrite DNS), so it stacks CIDR
+	// allow + optional HTTP Basic + a login session.
+	Admin AdminConfig `toml:"admin"`
+
 	trustedNets []*net.IPNet
 }
+
+// AdminConfig configures the admin web UI (see internal/admin).
+type AdminConfig struct {
+	Enabled    bool     `toml:"enabled"`
+	Host       string   `toml:"host"`        // vhost served on the proxy listener, e.g. admin.myip.gr
+	Allow      []string `toml:"allow"`       // client CIDRs (a real filter, not obscurity); empty = anywhere
+	BasicAuth  []string `toml:"basic_auth"`  // optional outer HTTP Basic gate ("user:bcrypt"); keeps scanners off the login form
+	Users      []string `toml:"users"`       // "user:bcrypt" for the login session (generate: goddns passwd)
+	SessionTTL int      `toml:"session_ttl"` // session lifetime in hours (default 8)
+
+	allowNets []*net.IPNet
+}
+
+// AllowNets returns the parsed admin allow CIDRs.
+func (a *AdminConfig) AllowNets() []*net.IPNet { return a.allowNets }
+
+// IsAllowed reports whether ip passes the admin CIDR allowlist. An empty
+// list allows everyone (the operator relies on auth instead).
+func (a *AdminConfig) IsAllowed(ip net.IP) bool {
+	if len(a.allowNets) == 0 {
+		return true
+	}
+	for _, n := range a.allowNets {
+		if ip != nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 
 // ProxyRule routes one public hostname to one internal upstream.
 type ProxyRule struct {
@@ -181,6 +217,38 @@ func Load(path string) (*Config, error) {
 		}
 		c.Proxy = norm
 	}
+
+	if c.Admin.Enabled {
+		if !c.ProxyEnabled {
+			return nil, fmt.Errorf("admin requires proxy_enabled = true (it is served as a vhost on proxy_listen)")
+		}
+		c.Admin.Host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Admin.Host)), ".")
+		if c.Admin.Host == "" || strings.ContainsAny(c.Admin.Host, "/: \t") {
+			return nil, fmt.Errorf("admin: host must be a hostname (e.g. admin.myip.gr)")
+		}
+		if _, dup := c.Proxy[c.Admin.Host]; dup {
+			return nil, fmt.Errorf("admin: host %q also has a [proxy] rule — pick a distinct name", c.Admin.Host)
+		}
+		if len(c.Admin.Users) == 0 {
+			return nil, fmt.Errorf("admin: at least one users entry is required (generate: goddns passwd)")
+		}
+		for _, cred := range append(append([]string{}, c.Admin.Users...), c.Admin.BasicAuth...) {
+			user, hash, ok := strings.Cut(cred, ":")
+			if !ok || user == "" || !strings.HasPrefix(hash, "$2") {
+				return nil, fmt.Errorf("admin: users/basic_auth entries must be \"user:bcrypt-hash\" (generate with: goddns passwd)")
+			}
+		}
+		for _, cidr := range c.Admin.Allow {
+			_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
+			if err != nil {
+				return nil, fmt.Errorf("admin: allow %q: %w", cidr, err)
+			}
+			c.Admin.allowNets = append(c.Admin.allowNets, n)
+		}
+		if c.Admin.SessionTTL <= 0 {
+			c.Admin.SessionTTL = 8
+		}
+	}
 	return &c, nil
 }
 
@@ -239,6 +307,11 @@ func (c *Config) NeedsRestart(old *Config) []string {
 	if c.ProxyEnabled != old.ProxyEnabled || c.ProxyListen != old.ProxyListen ||
 		c.ProxyRedirectListen != old.ProxyRedirectListen {
 		fields = append(fields, "proxy_enabled/proxy_listen")
+	}
+	// admin.users / allow / basic_auth hot-reload via the live config
+	// accessor; only enabling/disabling or moving the vhost needs a restart.
+	if c.Admin.Enabled != old.Admin.Enabled || c.Admin.Host != old.Admin.Host {
+		fields = append(fields, "admin.enabled/host")
 	}
 	return fields
 }

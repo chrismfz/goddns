@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/chrismfz/goddns/internal/admin"
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filewatch"
@@ -141,7 +143,16 @@ func cmdServe(args []string) {
 		if err := px.Update(cfg); err != nil {
 			fatal("proxy: %v", err)
 		}
-		go runProxy(cfg, px, src)
+		var adminH http.Handler
+		if cfg.Admin.Enabled {
+			secret, err := admin.LoadSecret(filepath.Join(filepath.Dir(cfg.DBPath), "admin.secret"))
+			if err != nil {
+				fatal("admin secret: %v", err)
+			}
+			adminH = admin.New(func() *config.Config { return cur.Load().cfg }, st, secret, Version)
+			log.Printf("admin UI enabled at https://%s%s", cfg.Admin.Host, cfg.ProxyListen)
+		}
+		go runProxy(cfg, px, src, adminH)
 	}
 
 	go reloadLoop(*cfgPath, &cur, px, src)
@@ -185,7 +196,24 @@ func buildTLS(cfg *config.Config) (*tlsSource, error) {
 // runProxy blocks serving the reverse-proxy listener; fatal on exit, same
 // contract as the DDNS listener. The optional plain-HTTP redirect listener
 // is a convenience: failure to bind logs and is otherwise ignored.
-func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
+func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource, adminH http.Handler) {
+	// The admin UI is a built-in vhost: requests for admin.Host go to it,
+	// everything else to the reverse proxy. Same TLS, same listener.
+	var handler http.Handler = px
+	if adminH != nil {
+		adminHost := cfg.Admin.Host
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host := strings.ToLower(r.Host)
+			if h, _, err := net.SplitHostPort(host); err == nil {
+				host = h
+			}
+			if strings.TrimSuffix(host, ".") == adminHost {
+				adminH.ServeHTTP(w, r)
+				return
+			}
+			px.ServeHTTP(w, r)
+		})
+	}
 	if cfg.ProxyRedirectListen != "" {
 		httpsPort := "443"
 		if _, p, err := net.SplitHostPort(cfg.ProxyListen); err == nil {
@@ -206,7 +234,7 @@ func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
 	}
 	ps := &http.Server{
 		Addr:              cfg.ProxyListen,
-		Handler:           px,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		// No WriteTimeout: BMC console sessions are long-lived streams.
