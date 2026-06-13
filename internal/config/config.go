@@ -130,10 +130,24 @@ func defaults() Config {
 func Load(path string) (*Config, error) {
 	c := defaults()
 	if path != "" {
-		if _, err := toml.DecodeFile(path, &c); err != nil {
+		md, err := toml.DecodeFile(path, &c)
+		if err != nil {
 			if !os.IsNotExist(err) {
 				return nil, fmt.Errorf("config %s: %w", path, err)
 			}
+		} else if undec := md.Undecoded(); len(undec) > 0 {
+			// Reject unrecognised keys loudly. The classic footgun is a
+			// top-level key placed AFTER a [section] header, which TOML then
+			// scopes into that section (e.g. proxy_enabled written under
+			// [admin] becomes admin.proxy_enabled and is silently ignored).
+			keys := make([]string, 0, len(undec))
+			for _, k := range undec {
+				keys = append(keys, k.String())
+			}
+			return nil, fmt.Errorf("config %s: unrecognised key(s): %s — in TOML every key "+
+				"after a [section] header belongs to that section, so put top-level keys "+
+				"(listen, proxy_enabled, proxy_listen, log_file, tsig_*, ...) ABOVE the first "+
+				"[admin] or [proxy.\"...\"] section", path, strings.Join(keys, ", "))
 		}
 	}
 	if v := os.Getenv("GODDNS_TSIG_SECRET"); v != "" {

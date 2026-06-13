@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -261,5 +262,50 @@ access_log = "/var/log/goddns-access.log"
 	}
 	if f := c.NeedsRestart(a); len(f) != 0 {
 		t.Fatalf("access_log change should be hot: %v", f)
+	}
+}
+
+func TestRejectsMisscopedKey(t *testing.T) {
+	// The exact footgun: proxy_enabled placed AFTER [admin] becomes
+	// admin.proxy_enabled and must now be a loud error, not silently ignored.
+	_, err := Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+[admin]
+enabled = true
+host    = "admin.x"
+users   = ["a:$2a$10$abc"]
+proxy_enabled = true
+`))
+	if err == nil {
+		t.Fatal("misscoped proxy_enabled under [admin] should error")
+	}
+	if !strings.Contains(err.Error(), "proxy_enabled") {
+		t.Fatalf("error should name the offending key: %v", err)
+	}
+	// A typo inside a proxy rule is caught too.
+	if _, err := Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+proxy_enabled = true
+[proxy."a.x"]
+upstream  = "https://10.0.0.1"
+upstreamm = "typo"
+`)); err == nil {
+		t.Fatal("typo'd key inside a proxy rule should error")
+	}
+	// A correctly-ordered config still loads clean.
+	if _, err := Load(write(t, `
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+proxy_enabled = true
+[admin]
+enabled = true
+host    = "admin.x"
+users   = ["a:$2a$10$abc"]
+[proxy."a.x"]
+upstream = "https://10.0.0.1"
+`)); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
 	}
 }
