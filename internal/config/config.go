@@ -30,6 +30,7 @@ type Config struct {
 	LogFile        string `toml:"log_file"`        // dedicated log file; empty = stderr/journald. Hot-swappable.
 	AccessLog      string `toml:"access_log"`      // separate file for proxy-access lines; empty = into log_file. Hot-swappable.
 	PublicHost     string `toml:"public_host"`     // hostname clients use to reach the DDNS endpoint (e.g. sdns.myip.gr); fills the admin help snippets. Optional.
+	NamedConf      string `toml:"named_conf"`      // path to named.conf for the read-only Zones view (default /etc/named.conf)
 
 	// TLS
 	TLSMode  string `toml:"tls_mode"`  // "files" or "acme"
@@ -123,6 +124,7 @@ func defaults() Config {
 		DNSServer:      "127.0.0.1:53",
 		TSIGName:       "ddns-update",
 		TSIGAlgo:       "hmac-sha256",
+		NamedConf:      "/etc/named.conf",
 	}
 }
 
