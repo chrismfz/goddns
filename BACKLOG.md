@@ -4,6 +4,89 @@ v1 is deliberately lean: serve + CLI token management + cfm-style config
 hot-reload + deb/rpm packaging. Everything below is planned but explicitly
 out of v1 scope.
 
+## Roadmap: from read-only introspection to a zone-management layer
+
+The read-only introspection shipped so far (zone viewer, AXFR export, SOA/NS
+and delegation checks, live per-nameserver serial check) is the ground floor of
+a bigger building: a zone-management layer over BIND — versioned history,
+scoped record CRUD, health-driven automation, and eventually a multi-tenant API
+(e.g. a zonecloud.io connector). It is built in phases so the blast radius and
+the trust model grow deliberately, not all at once.
+
+### Hard invariant (applies to EVERY phase): goddns never changes a zone's ownership model
+
+goddns MUST NOT convert a zone to dynamic on its own (i.e. never add an
+`update-policy` to a zone that doesn't have one). File-managed zones belong to
+other systems — **cPanel, DirectAdmin, Virtualmin, or the operator's own
+`nano` + `rndc reload`** — and those systems write the zone *file* directly.
+Turning such a zone dynamic makes BIND serve a file/journal mix, so the panel's
+(or operator's) file edits and goddns's journal updates diverge: it
+re-introduces the exact `rndc freeze/thaw`, `tmp-*` orphan and "journal out of
+range" foot-guns this project exists to remove, and silently fights the panel's
+own DNS management.
+
+Instead goddns DETECTS who owns each zone (it already classifies dynamic vs
+static-file from `named-checkconf -p`) and picks the matching mechanism — or
+refuses and stays read-only:
+
+- **dynamic zone** → RFC 2136 `UPDATE`, scoped by the zone's `update-policy`.
+- **panel-managed zone** → the panel's API backend (see "Write backends below"),
+  never the file/journal.
+- **hand-edited static zone** → strictly read-only (history/diff/audit only).
+
+Converting a zone to dynamic is always an explicit, informed operator decision
+— never something goddns does to "make CRUD work".
+
+### Phase 1 — History / diff / audit (read-only; highest value-to-risk)
+
+Snapshot each zone (canonical AXFR — exactly what `goddns zone <name> -export`
+already produces) on every detected change (SOA-serial bump), store the
+snapshots (the existing SQLite store, or a `.d/` of zone files), and show diffs.
+Answers "what changed in this zone, when, and from what" — the killer feature
+for the *cPanel client broke their DKIM / SPF / DMARC / MX (Outlook/Gmail
+stopped working)* scenario. 100% read-only, zero new write risk, and the
+foundation every later phase needs: it is the "undo" that makes CRUD safe.
+- trigger: poll SOA serials; on change, AXFR + store + diff vs the previous snapshot.
+- surface: per-zone history + diff in the admin UI and `goddns zone <name> -history` / `-diff`; retention/pruning policy.
+
+### Phase 2 — Scoped record CRUD via UPDATE (dynamic zones only)
+
+Add / edit / delete arbitrary RR types (A/AAAA/CNAME/MX/TXT/SRV…) on zones that
+are ALREADY dynamic, via RFC 2136 `UPDATE` — never file rewrites. Includes the
+already-sketched `rotate-key` (rotate goddns's own TSIG secret in its dedicated
+key include file + its own config + `rndc reconfig`). Every write is gated by
+admin auth + a confirmation/diff preview and takes an automatic Phase-1 snapshot
+first, so rollback is one click. Per the invariant it REFUSES on non-dynamic
+zones, pointing the operator at the panel backend or an explicit conversion.
+Blast radius stays bounded by what the key's `update-policy` grants.
+
+### Phase 3 — Health-driven automation (failover / round-robin / IP checks)
+
+A control loop: read (health-check an endpoint) → write (flip / rotate the
+A/CNAME via the Phase-2 `UPDATE` primitive) over a specific, configured record
+set. This is "DDNS driven by health checks instead of a client push" — it
+reuses the exact write engine, scoped to named records, with the same audit +
+snapshot. No full CRUD needed; just scoped writes plus the loop. Knobs: check
+type/interval, failover policy, round-robin member set, TTL discipline.
+
+### Phase 4 — Platform: backends, multi-tenant RBAC, external API
+
+The big step that changes the threat model — goddns now holds broad write power
+and becomes a high-value target, so it needs scoped keys, rate limits and an
+approval workflow on top of the audit/history substrate:
+
+- **Panel backends** (see "Write backends beyond RFC2136" below): cPanel
+  whmapi1/UAPI, DirectAdmin, Virtualmin — so panel-managed zones get CRUD
+  through the panel's own API (honouring the invariant), letting goddns run as a
+  standalone DNS + history layer *alongside* a panel.
+- **Multi-tenant authz / RBAC**: who may read/edit which zones and which record
+  types. goauth (or any SSO/2FA) gates the door; this is the app-level model
+  behind it, with per-tenant audit + history.
+- **External API / connectors**: a machine API (bearer / mTLS, rate-limited,
+  audited) and a **zonecloud.io** connector that syncs zones/records to/from
+  zonecloud over its API — a thin adapter on the clean internal record model +
+  history, not a special case.
+
 ## Write backends beyond RFC2136
 
 `internal/ddns.Backend` is the seam — one interface method:
