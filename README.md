@@ -292,6 +292,30 @@ to the `named` group once:
 
 `named_conf` in the config overrides the path (default `/etc/named.conf`).
 
+### Per-zone live view (AXFR)
+
+The zones list shows *metadata*; to see the **actual records** of one zone:
+
+    goddns zone home.myip.gr            # SOA/serial, NS, MX, every record + dynamic status
+    goddns zone myip.gr -export         # loadable zone-file snapshot (a backup)
+    # …or click a zone name in the admin "zones" page
+
+This reads the **live** zone straight from BIND over **AXFR** (zone transfer),
+so for a dynamic zone you see the journal-merged contents — exactly what the
+server answers — without `rndc freeze`/`thaw`. It's read-only: AXFR is a query.
+
+It needs BIND to allow the transfer. goddns runs locally, so the simplest
+one-time enablement covers every zone, in `options { }`:
+
+    allow-transfer { localhost; };
+    # or, key-only (no IP is opened — goddns authenticates with its TSIG key):
+    allow-transfer { key "ddns-update."; };
+
+goddns tries unauthenticated first, then falls back to the TSIG keys defined
+in named.conf automatically. If the transfer is refused, the command/page
+prints exactly what to add. goddns never edits named.conf — enabling the
+transfer is a deliberate one-line change you make yourself.
+
 ## Logging
 
 By default goddns logs to stderr (journald under systemd). On a busy DNS

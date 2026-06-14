@@ -7,13 +7,14 @@ import (
 )
 
 const (
-	loginTmpl   = "login"
-	dashTmpl    = "dash"
-	resultTmpl  = "result"
-	logsTmpl    = "logs"
-	confirmTmpl = "confirm"
-	helpTmpl    = "help"
-	zonesTmpl   = "zones"
+	loginTmpl    = "login"
+	dashTmpl     = "dash"
+	resultTmpl   = "result"
+	logsTmpl     = "logs"
+	confirmTmpl  = "confirm"
+	helpTmpl     = "help"
+	zonesTmpl    = "zones"
+	zoneViewTmpl = "zoneview"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -198,7 +199,7 @@ read-only view, add it to the named group:<br>
 <table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th></tr></thead><tbody>
 {{range .Zones}}<tr>
 {{if $.HasViews}}<td class="muted">{{if .View}}{{.View}}{{else}}_default{{end}}</td>{{end}}
-<td>{{.Name}}</td>
+<td><a href="/zone?name={{.Name}}">{{.Name}}</a></td>
 <td>{{if .Dynamic}}<span class="ok">{{.Kind}}</span>{{else}}<span class="muted">{{.Kind}}</span>{{end}}</td>
 <td>{{if .File}}{{.File}}{{if .Status}} <span class="{{if eq .Status "missing"}}err{{else if eq .Status "no journal yet"}}warn{{else}}muted{{end}}">({{.Status}})</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
 <td>{{if .Keys}}{{.Keys}}{{else}}<span class="muted">—</span>{{end}}</td>
@@ -218,6 +219,40 @@ read-only view, add it to the named group:<br>
 {{range .Findings}}<div class="{{if eq .Class "ok"}}ok{{else if eq .Class "error"}}err{{else if eq .Class "warn"}}warn{{else}}muted{{end}}" style="padding:.15rem 0">{{.Mark}} {{if .Zone}}<b>{{.Zone}}</b>: {{end}}{{.Message}}</div>
 {{else}}<div class="muted">(nothing to report)</div>{{end}}
 </div>
+{{end}}
+</main></body></html>{{end}}
+
+{{define "zoneview"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">zone {{.Name}} (read-only)</span></div>
+<div><a href="/zones">&larr; zones</a><a href="/zone?name={{.Name}}">refresh</a></div></header>
+<main>
+{{if .Error}}
+<div class="card" style="border-color:#5a2230">
+<div class="warn">Couldn't transfer <b>{{.Name}}</b> from BIND:</div>
+<pre style="margin:.5rem 0">{{.Error}}</pre>
+<div class="muted" style="font-size:.8rem">If this is REFUSED, the live view uses AXFR (zone transfer) and the server isn't
+allowing it. Add this once in BIND (covers every zone), then refresh:<br>
+&nbsp;&nbsp;<code>options { ... allow-transfer { localhost; }; };</code> &nbsp;or key-only:
+&nbsp;<code>allow-transfer { key "ddns-update."; };</code><br>
+This page never edits BIND — it only reads.</div>
+</div>
+{{else}}
+
+<h2>{{.Name}}
+{{if .InConf}}{{if .Dynamic}}<span class="ok" style="font-size:.8rem">{{.Kind}}</span>{{else}}<span class="muted" style="font-size:.8rem">{{.Kind}}</span>{{end}}{{else}}<span class="muted" style="font-size:.8rem">(not in named.conf)</span>{{end}}</h2>
+<div class="card" style="font-size:.84rem">
+{{if .Serial}}<div>serial <b>{{.Serial}}</b>{{if .Primary}} &middot; primary {{.Primary}}{{end}} &middot; {{.Count}} records</div>{{else}}<div>{{.Count}} records</div>{{end}}
+{{if .InConf}}{{if .Dynamic}}<div class="ok" style="margin-top:.3rem">DYNAMIC — updated live{{if .Keys}} via key(s): {{.Keys}}{{end}}. The records below are journal-merged (what BIND actually serves), so you don't need to freeze/thaw to see them.</div>
+{{else}}<div class="muted" style="margin-top:.3rem">static — edited by hand in the zone file (nano &rarr; serial+1 &rarr; rndc reload).</div>{{end}}{{end}}
+</div>
+
+<table><thead><tr><th>name</th><th>TTL</th><th>type</th><th>data</th></tr></thead><tbody>
+{{range .Records}}<tr>
+<td>{{.Name}}</td><td class="muted">{{.TTL}}</td>
+<td>{{.Type}}</td><td style="word-break:break-all">{{.Data}}</td>
+</tr>{{else}}<tr><td colspan="4" class="muted">(no records)</td></tr>{{end}}
+</tbody></table>
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR. CLI: <code>goddns zone {{.Name}}</code> (add <code>-export</code> for a backup snapshot). Read-only.</div>
 {{end}}
 </main></body></html>{{end}}
 

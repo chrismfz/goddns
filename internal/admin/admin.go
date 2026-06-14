@@ -135,6 +135,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleLogs(w, r, user)
 	case "/zones":
 		h.handleZones(w, r, user)
+	case "/zone":
+		h.handleZone(w, r, user)
 	default:
 		http.NotFound(w, r)
 	}
@@ -146,6 +148,66 @@ type zoneRow struct {
 }
 type keyRow struct{ Name, Algorithm string }
 type findRow struct{ Mark, Class, Zone, Message string }
+type rrRow struct {
+	Name, Type, Data string
+	TTL              uint32
+}
+
+// handleZone is the read-only per-zone viewer: it pulls the LIVE records from
+// BIND via AXFR (journal-merged) so the operator sees exactly what the server
+// answers, including anything written dynamically. Read-only: AXFR is a query.
+func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string) {
+	cfg := h.cfg()
+	name := strings.TrimSuffix(strings.TrimSpace(r.URL.Query().Get("name")), ".")
+	if name == "" {
+		http.Redirect(w, r, "/zones", http.StatusSeeOther)
+		return
+	}
+	nc := cfg.NamedConf
+	if nc == "" {
+		nc = "/etc/named.conf"
+	}
+	server := cfg.DNSServer
+	if server == "" {
+		server = "127.0.0.1:53"
+	}
+
+	// named.conf is best-effort: it supplies the dynamic flag and the TSIG
+	// keys to authenticate the transfer. Without it we still try unauthenticated.
+	inv := &named.Inventory{}
+	if data, err := named.CheckConf(nc); err == nil {
+		inv = named.Parse(data)
+	}
+	z := inv.ZoneByName(name)
+
+	records, err := named.TransferAuto(name, server, inv.AXFRKeys(z, cfg.TSIGName))
+	if err != nil {
+		render(w, zoneViewTmpl, map[string]any{
+			"Version": h.version, "User": user, "Name": name, "Error": err.Error(),
+		})
+		return
+	}
+	named.SortZone(records)
+
+	var rows []rrRow
+	for _, row := range named.Rows(records) {
+		rows = append(rows, rrRow{Name: row.Name, TTL: row.TTL, Type: row.Type, Data: row.Data})
+	}
+	data := map[string]any{
+		"Version": h.version, "User": user, "Name": name,
+		"InConf": z != nil, "Records": rows, "Count": len(records),
+	}
+	if z != nil {
+		data["Kind"] = z.Kind()
+		data["Dynamic"] = z.Dynamic
+		data["Keys"] = strings.Join(z.UpdateKeys, ", ")
+	}
+	if soa := named.SOAOf(records); soa != nil {
+		data["Serial"] = soa.Serial
+		data["Primary"] = strings.TrimSuffix(soa.Ns, ".")
+	}
+	render(w, zoneViewTmpl, data)
+}
 
 // handleZones is the read-only BIND introspection page (zones, dynamic flags,
 // TSIG health). It shells out to `named-checkconf -p`; if goddns can't read
