@@ -49,7 +49,10 @@ foundation every later phase needs: it is the "undo" that makes CRUD safe.
 - trigger: poll SOA serials; on change, AXFR + store + diff vs the previous snapshot.
 - surface: per-zone history + diff in the admin UI and `goddns zone <name> -history` / `-diff`; retention/pruning policy.
 
-### Phase 2 — Scoped record CRUD via UPDATE (dynamic zones only)
+Phase 2 has two distinct CRUD tracks that share the admin auth + audit
+substrate but write very different things, with different trust models:
+
+### Phase 2A — Scoped BIND record CRUD via UPDATE (dynamic zones only)
 
 Add / edit / delete arbitrary RR types (A/AAAA/CNAME/MX/TXT/SRV…) on zones that
 are ALREADY dynamic, via RFC 2136 `UPDATE` — never file rewrites. Includes the
@@ -58,7 +61,35 @@ key include file + its own config + `rndc reconfig`). Every write is gated by
 admin auth + a confirmation/diff preview and takes an automatic Phase-1 snapshot
 first, so rollback is one click. Per the invariant it REFUSES on non-dynamic
 zones, pointing the operator at the panel backend or an explicit conversion.
-Blast radius stays bounded by what the key's `update-policy` grants.
+The trust boundary is BIND's `update-policy`; blast radius stays bounded by what
+the key grants.
+
+### Phase 2B — goddns-owned object CRUD (proxy vhosts + tunnels)
+
+A SEPARATE track: CRUD of goddns's OWN config objects, not BIND records. It
+writes only goddns state, so the trust model is self-contained (admin auth, no
+BIND/panel invariant). DDNS tokens already work this way (SQLite, full CRUD);
+this brings the proxy vhosts and tunnels up to the same.
+
+- **Proxy vhosts → managed `proxy.d/` fragments** (the nginx `conf.d` model,
+  chosen to preserve hand-editing). The hand-authored `goddns.conf` stays
+  100% operator-owned — nano + comments untouched; the UI/CLI writes ONLY
+  `proxy.d/*.conf` TOML fragments; the daemon loads the main file + every
+  fragment at reload. No clobbering of comments, and both workflows (hand-edit
+  the base, UI-manage the fragments) coexist. Design points:
+  - loader merges `goddns.conf` + `proxy.d/*.conf` (deterministic order),
+    validates the whole as one unit — a broken fragment is rejected like any
+    bad reload and the previous config stays live;
+  - fragment writes are atomic (temp + rename) so a half-written file is never
+    loaded; the UI never touches the main file;
+  - conflict policy when a host is defined in both the base and a fragment
+    (e.g. surface it as an error in the UI, or last-wins with a clear marker of
+    which source a live rule came from).
+  This also unblocks the older "Proxy CRUD from the UI" backlog item below
+  without the "move everything into SQLite and lose the TOML" tradeoff.
+- **Tunnels → SQLite, tokens-style, CRUD-first** from day one (a tunnel is a
+  name + token + target, exactly the shape of a DDNS token), built together
+  with `goddns tunnel` (see below).
 
 ### Phase 3 — Health-driven automation (failover / round-robin / IP checks)
 
