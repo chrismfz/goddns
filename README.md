@@ -265,6 +265,33 @@ DNS for the admin name is just a static record at your goddns host — e.g.
 `admin.internal.myip.gr` already covered by the `*.internal` wildcard, or a
 plain `admin IN A <goddns-ip>`. Keep it on your LAN/VPN where you can.
 
+## Zones (read-only BIND introspection)
+
+A read-only view of the BIND config — what zones exist, which are dynamic,
+the TSIG keys, and a health check of the whole setup:
+
+    goddns zones                 # CLI table + checks
+    # …and the "zones" link in the admin dashboard
+
+It does **not** edit anything. To stay robust it doesn't parse raw
+named.conf (includes/views/comments make that fragile) — it runs
+`named-checkconf -p`, i.e. BIND's own parser, and reads the normalised
+output. The checks catch the exact foot-guns from day-to-day DDNS:
+
+- a zone that grants a TSIG key which isn't defined (updates would be REFUSED)
+- a zone that's dynamic via IP `allow-update` only (no key)
+- goddns's own `tsig_name`/`tsig_secret` vs the key in named.conf — flags a
+  missing key (REFUSED), a secret mismatch (NOTAUTH), or "✓ matches and is
+  granted". Secrets are never printed.
+
+The **CLI** run as root works out of the box. The **web page** needs the
+goddns service user to be able to read named.conf and its includes — add it
+to the `named` group once:
+
+    usermod -aG named goddns && systemctl restart goddns
+
+`named_conf` in the config overrides the path (default `/etc/named.conf`).
+
 ## Logging
 
 By default goddns logs to stderr (journald under systemd). On a busy DNS

@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/store"
 )
 
@@ -132,9 +133,63 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleHelp(w, r, user)
 	case "/logs":
 		h.handleLogs(w, r, user)
+	case "/zones":
+		h.handleZones(w, r, user)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+type zoneRow struct {
+	View, Name, Kind, File, Status, Keys string
+	Dynamic                              bool
+}
+type keyRow struct{ Name, Algorithm string }
+type findRow struct{ Mark, Class, Zone, Message string }
+
+// handleZones is the read-only BIND introspection page (zones, dynamic flags,
+// TSIG health). It shells out to `named-checkconf -p`; if goddns can't read
+// named.conf (it runs as the goddns user) the page explains how to allow it.
+func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user string) {
+	cfg := h.cfg()
+	nc := cfg.NamedConf
+	if nc == "" {
+		nc = "/etc/named.conf"
+	}
+	data, err := named.CheckConf(nc)
+	if err != nil {
+		render(w, zonesTmpl, map[string]any{"Version": h.version, "User": user, "Error": err.Error()})
+		return
+	}
+	inv := named.Parse(data)
+
+	var zr []zoneRow
+	hasViews := false
+	for _, z := range inv.UserZones() {
+		if z.View != "" {
+			hasViews = true
+		}
+		zr = append(zr, zoneRow{
+			View: z.View, Name: z.Name, Kind: z.Kind(), File: z.Path,
+			Status: named.FileStatus(z.Path, z.Dynamic),
+			Keys:   strings.Join(z.UpdateKeys, ", "), Dynamic: z.Dynamic,
+		})
+	}
+	var kr []keyRow
+	for _, k := range inv.Keys {
+		kr = append(kr, keyRow{Name: k.Name, Algorithm: k.Algorithm}) // secret never exposed
+	}
+	var fr []findRow
+	for _, f := range inv.Check(cfg.TSIGName, cfg.TSIGSecret) {
+		mark := map[named.Severity]string{named.OK: "✓", named.Info: "·", named.Warn: "⚠", named.Error: "✗"}[f.Severity]
+		fr = append(fr, findRow{Mark: mark, Class: f.Severity.String(), Zone: f.Zone, Message: f.Message})
+	}
+
+	render(w, zonesTmpl, map[string]any{
+		"Version": h.version, "User": user, "Directory": inv.Directory,
+		"Zones": zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
+		"Builtin": len(inv.Zones) - len(zr),
+	})
 }
 
 func (h *Handler) session(r *http.Request) (string, bool) {

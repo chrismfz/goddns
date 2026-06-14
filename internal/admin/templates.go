@@ -13,6 +13,7 @@ const (
 	logsTmpl    = "logs"
 	confirmTmpl = "confirm"
 	helpTmpl    = "help"
+	zonesTmpl   = "zones"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -49,7 +50,7 @@ tr:hover td{background:#141821}
 input,select{background:#0c0e12;color:#d7dae0;border:1px solid #2a313c;border-radius:4px;padding:.35rem .5rem;font:inherit}
 button{background:#18bcf2;color:#06222c;border:0;border-radius:4px;padding:.4rem .8rem;font:inherit;font-weight:bold;cursor:pointer}
 button.danger{background:#3a2230;color:#ff8aa6}
-.muted{color:#6b7280}.ok{color:#52d273}.warn{color:#e7b84b}
+.muted{color:#6b7280}.ok{color:#52d273}.warn{color:#e7b84b}.err{color:#ff8aa6}
 .card{background:#13171e;border:1px solid #232a34;border-radius:8px;padding:1rem;margin:1rem 0}
 .tok{background:#06222c;border:1px solid #18bcf2;border-radius:6px;padding:.6rem;word-break:break-all;color:#bfeefc}
 form.inline{display:inline}
@@ -72,7 +73,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 
 {{define "dash"}}{{template "head" .}}
 <header><div><span class="b">goddns admin</span> <span class="muted">{{.Version}}</span></div>
-<div><span class="muted">{{.User}}</span><a href="/logs?which=access">access log</a><a href="/logs?which=event">event log</a><a href="/logout">logout</a></div></header>
+<div><span class="muted">{{.User}}</span><a href="/zones">zones</a><a href="/logs?which=access">access log</a><a href="/logs?which=event">event log</a><a href="/logout">logout</a></div></header>
 <main>
 
 <h2>DDNS records</h2>
@@ -176,6 +177,48 @@ curl "https://{{.Host}}:{{.Port}}/nic/update?hostname={{.Name}}&token={{.Token}}
 
 <div class="muted" style="font-size:.74rem">Responses: good &lt;ip&gt; (updated), nochg &lt;ip&gt; (no change), badauth (bad token), nohost (hostname mismatch).{{if not .NewToken}} Replace <b>&lt;token&gt;</b> above with the record's token (or rotate to get a fresh one).{{end}}</div>
 <p style="margin-top:1rem"><a href="/">&larr; back to dashboard</a></p>
+</main></body></html>{{end}}
+
+{{define "zones"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">zones (read-only)</span></div>
+<div><a href="/">&larr; dashboard</a><a href="/zones">refresh</a></div></header>
+<main>
+{{if .Error}}
+<div class="card" style="border-color:#5a2230">
+<div class="warn">Can't read the BIND config:</div>
+<pre style="margin:.5rem 0">{{.Error}}</pre>
+<div class="muted" style="font-size:.8rem">goddns runs as the <code>goddns</code> user. To let it read named.conf for this
+read-only view, add it to the named group:<br>
+&nbsp;&nbsp;<code>usermod -aG named goddns &amp;&amp; systemctl restart goddns</code><br>
+(or just use the CLI as root: <code>goddns zones</code>). This page never edits anything.</div>
+</div>
+{{else}}
+
+<h2>zones{{if .Directory}} <span class="muted">(directory {{.Directory}})</span>{{end}}</h2>
+<table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th></tr></thead><tbody>
+{{range .Zones}}<tr>
+{{if $.HasViews}}<td class="muted">{{if .View}}{{.View}}{{else}}_default{{end}}</td>{{end}}
+<td>{{.Name}}</td>
+<td>{{if .Dynamic}}<span class="ok">{{.Kind}}</span>{{else}}<span class="muted">{{.Kind}}</span>{{end}}</td>
+<td>{{if .File}}{{.File}}{{if .Status}} <span class="{{if eq .Status "missing"}}err{{else if eq .Status "no journal yet"}}warn{{else}}muted{{end}}">({{.Status}})</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
+<td>{{if .Keys}}{{.Keys}}{{else}}<span class="muted">—</span>{{end}}</td>
+</tr>{{else}}<tr><td class="muted">(no zones)</td></tr>{{end}}
+</tbody></table>
+{{if .Builtin}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">(+ {{.Builtin}} built-in empty zones hidden; <code>goddns zones -all</code> on the CLI to show)</div>{{end}}
+
+<h2>TSIG keys</h2>
+<table><thead><tr><th>key</th><th>algorithm</th></tr></thead><tbody>
+{{range .Keys}}<tr><td>{{.Name}}</td><td class="muted">{{.Algorithm}}</td></tr>
+{{else}}<tr><td colspan="2" class="muted">(none)</td></tr>{{end}}
+</tbody></table>
+<div class="muted" style="font-size:.72rem;margin-top:.3rem">secrets are never read into this page</div>
+
+<h2>checks</h2>
+<div class="card">
+{{range .Findings}}<div class="{{if eq .Class "ok"}}ok{{else if eq .Class "error"}}err{{else if eq .Class "warn"}}warn{{else}}muted{{end}}" style="padding:.15rem 0">{{.Mark}} {{if .Zone}}<b>{{.Zone}}</b>: {{end}}{{.Message}}</div>
+{{else}}<div class="muted">(nothing to report)</div>{{end}}
+</div>
+{{end}}
 </main></body></html>{{end}}
 
 {{define "logs"}}{{template "head" .}}

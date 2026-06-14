@@ -35,6 +35,7 @@ Usage:
   goddns token rotate -fqdn home.myip.gr [-config ...]  # new token, old stops
   goddns token del  -fqdn home.myip.gr [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth
+  goddns zones [-named-conf /etc/named.conf]   # read-only: zones, dynamic, TSIG health
   goddns version
 `, Version, defaultConf)
 }
@@ -95,6 +96,8 @@ func main() {
 		cmdToken(os.Args[2:])
 	case "passwd":
 		cmdPasswd(os.Args[2:])
+	case "zones":
+		cmdZones(os.Args[2:])
 	case "version", "-v", "--version":
 		fmt.Printf("goddns %s (built %s)\n", Version, BuildTime)
 	case "-h", "--help", "help":
