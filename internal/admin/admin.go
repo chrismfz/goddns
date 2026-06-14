@@ -29,18 +29,43 @@ type Store interface {
 	List() ([]store.Record, error)
 	Add(name, zone string, ttl uint32) (store.Record, string, error)
 	Del(name string) error
+	Rotate(name string) (store.Record, string, error)
+	Get(name string) (store.Record, error)
 }
 
 // Handler serves the admin UI. Construct with New.
 type Handler struct {
-	cfg     func() *config.Config // live config (admin auth + proxy table)
-	store   Store
-	secret  []byte
-	version string
+	cfg      func() *config.Config // live config (admin auth + proxy table)
+	store    Store
+	secret   []byte
+	version  string
+	throttle *loginThrottle
 }
 
 func New(cfg func() *config.Config, st Store, secret []byte, version string) *Handler {
-	return &Handler{cfg: cfg, store: st, secret: secret, version: version}
+	return &Handler{cfg: cfg, store: st, secret: secret, version: version, throttle: newLoginThrottle()}
+}
+
+// adminCred returns the bcrypt hash configured for user (the credential
+// fingerprint that sessions/CSRF are bound to), and whether it exists.
+func adminCred(ad *config.AdminConfig, user string) (string, bool) {
+	for _, c := range ad.Users {
+		u, hash, ok := strings.Cut(c, ":")
+		if ok && u == user {
+			return hash, true
+		}
+	}
+	return "", false
+}
+
+func (h *Handler) csrfFor(user string) string {
+	fp, _ := adminCred(&h.cfg().Admin, user)
+	return csrfToken(h.secret, fp, user)
+}
+
+func (h *Handler) csrfOK(user, got string) bool {
+	fp, _ := adminCred(&h.cfg().Admin, user)
+	return csrfValid(h.secret, fp, user, got)
 }
 
 func clientIP(r *http.Request) net.IP {
@@ -101,6 +126,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdd(w, r, user, peerStr)
 	case "/ddns/del":
 		h.handleDel(w, r, user, peerStr)
+	case "/ddns/rotate":
+		h.handleRotate(w, r, user, peerStr)
+	case "/ddns/help":
+		h.handleHelp(w, r, user)
 	case "/logs":
 		h.handleLogs(w, r, user)
 	default:
@@ -113,7 +142,8 @@ func (h *Handler) session(r *http.Request) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	return parseSession(h.secret, c.Value)
+	ad := &h.cfg().Admin
+	return parseSession(h.secret, c.Value, func(u string) (string, bool) { return adminCred(ad, u) })
 }
 
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, ad *config.AdminConfig, peer string) {
@@ -128,15 +158,30 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, ad *config
 	// POST
 	user := strings.TrimSpace(r.FormValue("user"))
 	pass := r.FormValue("pass")
+	// Throttle by client IP only (fail2ban-style): this locks an attacking
+	// source without letting anyone lock out a legit account by failing its
+	// login. Throttling runs BEFORE the (expensive) bcrypt compare so a
+	// flood can't pin the CPU, regardless of whether basic_auth is set.
+	ipKey := "ip:" + peer
+	if until := h.throttle.blockedUntil(ipKey); !until.IsZero() {
+		w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(until).Seconds())+1))
+		w.WriteHeader(http.StatusTooManyRequests)
+		render(w, loginTmpl, map[string]any{"Version": h.version, "Error": "too many attempts — wait a minute"})
+		h.audit(user, peer, "login-throttled")
+		return
+	}
 	if !verifyCred(ad.Users, user, pass) {
+		h.throttle.fail(ipKey)
 		h.audit(user, peer, "login-failed")
 		w.WriteHeader(http.StatusUnauthorized)
 		render(w, loginTmpl, map[string]any{"Version": h.version, "Error": "invalid credentials"})
 		return
 	}
+	h.throttle.ok(ipKey)
+	fp, _ := adminCred(ad, user)
 	ttl := time.Duration(ad.SessionTTL) * time.Hour
 	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: newSession(h.secret, user, ttl), Path: "/",
+		Name: cookieName, Value: newSession(h.secret, fp, user, ttl), Path: "/",
 		MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	})
 	h.audit(user, peer, "login-ok")
@@ -190,7 +235,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 	render(w, dashTmpl, map[string]any{
 		"Version":   h.version,
 		"User":      user,
-		"CSRF":      csrfToken(h.secret, user),
+		"CSRF":      h.csrfFor(user),
 		"Records":   rv,
 		"Proxies":   pv,
 		"ProxyOn":   cfg.ProxyEnabled,
@@ -200,7 +245,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 }
 
 func (h *Handler) handleAdd(w http.ResponseWriter, r *http.Request, user, peer string) {
-	if r.Method != http.MethodPost || !csrfValid(h.secret, user, r.FormValue("csrf")) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -220,17 +265,93 @@ func (h *Handler) handleAdd(w http.ResponseWriter, r *http.Request, user, peer s
 		return
 	}
 	h.audit(user, peer, "ddns-add fqdn=%s zone=%s ttl=%d", rec.FQDN, rec.Zone, rec.TTL)
-	render(w, resultTmpl, map[string]any{
-		"Version": h.version, "FQDN": rec.FQDN, "Zone": rec.Zone, "TTL": rec.TTL, "Token": tok,
+	h.renderHelp(w, rec, tok, true)
+}
+
+// endpoint returns the host:port clients use to reach the DDNS update
+// endpoint, for the copy-paste help. PublicHost fills it when set; the port
+// comes from the listen address.
+func (h *Handler) endpoint() (host, port string) {
+	cfg := h.cfg()
+	host = cfg.PublicHost
+	if host == "" {
+		host = "<your-goddns-host>"
+	}
+	if _, p, err := net.SplitHostPort(cfg.Listen); err == nil && p != "" {
+		port = p
+	} else {
+		port = "8245"
+	}
+	return host, port
+}
+
+// renderHelp shows the client setup snippets for a record. token is the
+// real value only right after add/rotate (fresh==true); otherwise it's a
+// "<token>" placeholder, because goddns stores only the hash.
+func (h *Handler) renderHelp(w http.ResponseWriter, rec store.Record, token string, fresh bool) {
+	host, port := h.endpoint()
+	render(w, helpTmpl, map[string]any{
+		"Version":  h.version,
+		"FQDN":     rec.FQDN,
+		"Name":     strings.TrimSuffix(rec.FQDN, "."),
+		"Zone":     rec.Zone,
+		"TTL":      rec.TTL,
+		"Host":     host,
+		"Port":     port,
+		"Token":    token,
+		"NewToken": fresh,
 	})
 }
 
-func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer string) {
-	if r.Method != http.MethodPost || !csrfValid(h.secret, user, r.FormValue("csrf")) {
+func (h *Handler) handleHelp(w http.ResponseWriter, r *http.Request, user string) {
+	rec, err := h.store.Get(strings.TrimSpace(r.URL.Query().Get("fqdn")))
+	if err != nil {
+		http.Error(w, "no such record", http.StatusNotFound)
+		return
+	}
+	h.renderHelp(w, rec, "<token>", false)
+}
+
+func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, user, peer string) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	fqdn := strings.TrimSpace(r.FormValue("fqdn"))
+	if r.FormValue("confirm") != "1" {
+		render(w, confirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "FQDN": store.FQDN(fqdn),
+			"Action": "/ddns/rotate", "Verb": "yes, rotate",
+			"Msg": "Rotate the token? The current token stops working immediately — update your client with the new one.",
+		})
+		return
+	}
+	rec, tok, err := h.store.Rotate(fqdn)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	h.audit(user, peer, "ddns-rotate fqdn=%s", rec.FQDN)
+	h.renderHelp(w, rec, tok, true)
+}
+
+func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer string) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	fqdn := strings.TrimSpace(r.FormValue("fqdn"))
+	// No-JS confirmation: the first POST (CSRF-checked) renders a confirm
+	// page; only confirm=1 actually deletes. Replaces an inline onsubmit
+	// confirm() that the page CSP (no scripts) would block anyway.
+	if r.FormValue("confirm") != "1" {
+		render(w, confirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "FQDN": store.FQDN(fqdn),
+			"Action": "/ddns/del", "Verb": "yes, delete",
+			"Msg": "Delete this record? Its token stops working immediately (you can re-add it later).",
+		})
+		return
+	}
 	if err := h.store.Del(fqdn); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -268,17 +389,25 @@ func checkBasic(r *http.Request, creds []string) bool {
 	return verifyCred(creds, u, p)
 }
 
-// verifyCred matches user+pass against a "user:bcrypt" list, burning a dummy
-// compare on unknown users to flatten timing.
+// verifyCred matches user+pass against a "user:bcrypt" list. On an unknown
+// user it still runs exactly one bcrypt compare, against a REAL entry's hash
+// so the cost (and therefore the timing) matches an existing-user wrong-
+// password attempt — closing the username-enumeration channel.
 func verifyCred(creds []string, user, pass string) bool {
-	for _, c := range creds {
+	dummy := "$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"
+	for i, c := range creds {
 		u, hash, ok := strings.Cut(c, ":")
-		if ok && u == user {
+		if !ok {
+			continue
+		}
+		if i == 0 || dummy == "" {
+			dummy = hash // first real entry sets the dummy cost
+		}
+		if u == user {
 			return bcrypt.CompareHashAndPassword([]byte(hash), []byte(pass)) == nil
 		}
 	}
-	_ = bcrypt.CompareHashAndPassword(
-		[]byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy"), []byte(pass))
+	_ = bcrypt.CompareHashAndPassword([]byte(dummy), []byte(pass))
 	return false
 }
 

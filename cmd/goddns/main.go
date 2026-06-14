@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -31,6 +32,7 @@ Usage:
   goddns serve  [-config %s]
   goddns token add  -fqdn home.myip.gr -zone myip.gr [-ttl 60] [-config ...]
   goddns token list [-config ...]
+  goddns token rotate -fqdn home.myip.gr [-config ...]  # new token, old stops
   goddns token del  -fqdn home.myip.gr [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth
   goddns version
@@ -103,6 +105,27 @@ func main() {
 	}
 }
 
+// healDBOwnership keeps the SQLite files owned by the data dir's owner (the
+// goddns service user). Running the CLI as root otherwise leaves the WAL/SHM
+// files root-owned, after which the unprivileged daemon can't persist
+// last-seen updates. No-op unless we're root and can chown.
+func healDBOwnership(dbPath string) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	fi, err := os.Stat(filepath.Dir(dbPath))
+	if err != nil {
+		return
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Chown(dbPath+suffix, int(st.Uid), int(st.Gid))
+	}
+}
+
 func openStore(cfg *config.Config) *store.Store {
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
 		fatal("create db dir: %v", err)
@@ -132,6 +155,8 @@ func cmdToken(args []string) {
 		fatal("%v", err)
 	}
 	st := openStore(cfg)
+	// LIFO: Close first, then heal ownership of the (now-flushed) db files.
+	defer healDBOwnership(cfg.DBPath)
 	defer st.Close()
 
 	switch sub {
@@ -159,6 +184,16 @@ func cmdToken(args []string) {
 		for _, r := range recs {
 			fmt.Println(r)
 		}
+	case "rotate":
+		if *fqdnArg == "" {
+			fatal("token rotate requires -fqdn")
+		}
+		rec, tok, err := st.Rotate(*fqdnArg)
+		if err != nil {
+			fatal("rotate: %v", err)
+		}
+		fmt.Printf("Rotated %s — the previous token no longer works.\n", rec.FQDN)
+		fmt.Printf("New token (store it now, shown once):\n  %s\n", tok)
 	case "del":
 		if *fqdnArg == "" {
 			fatal("token del requires -fqdn")

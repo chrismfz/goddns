@@ -7,10 +7,12 @@ import (
 )
 
 const (
-	loginTmpl  = "login"
-	dashTmpl   = "dash"
-	resultTmpl = "result"
-	logsTmpl   = "logs"
+	loginTmpl   = "login"
+	dashTmpl    = "dash"
+	resultTmpl  = "result"
+	logsTmpl    = "logs"
+	confirmTmpl = "confirm"
+	helpTmpl    = "help"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -19,6 +21,11 @@ func render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	// Locked-down CSP: no scripts at all, inline styles only, forms only to
+	// self. Defence in depth behind html/template auto-escaping.
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 	if err := tmpls.ExecuteTemplate(w, name, data); err != nil {
 		log.Printf("admin: template %s: %v", name, err)
 	}
@@ -75,9 +82,11 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <td>{{if .LastIP}}{{.LastIP}}{{else}}<span class="muted">—</span>{{end}}</td>
 <td class="muted">{{.LastSeen}}</td>
 <td>{{if eq .State "enabled"}}<span class="ok">{{.State}}</span>{{else}}<span class="warn">{{.State}}</span>{{end}}</td>
-<td><form class="inline" method="post" action="/ddns/del" onsubmit="return confirm('Delete {{.FQDN}}? The token stops working.')">
-<input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fqdn" value="{{.FQDN}}">
-<button class="danger" type="submit">delete</button></form></td>
+<td style="white-space:nowrap">
+<a href="/ddns/help?fqdn={{.FQDN}}">help</a>
+<form class="inline" method="post" action="/ddns/rotate"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fqdn" value="{{.FQDN}}"><button type="submit">rotate</button></form>
+<form class="inline" method="post" action="/ddns/del"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fqdn" value="{{.FQDN}}"><button class="danger" type="submit">delete</button></form>
+</td>
 </tr>{{else}}<tr><td colspan="7" class="muted">(no records)</td></tr>{{end}}
 </tbody></table>
 
@@ -117,6 +126,56 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div class="warn" style="margin-top:.5rem;font-size:.78rem">The URL is the credential — never paste it into chats (link previews will fetch it).</div>
 </div>{{end}}
 <a href="/">&larr; back to dashboard</a>
+</main></body></html>{{end}}
+
+{{define "confirm"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span></div><div><a href="/">cancel</a></div></header>
+<main><h2>{{.FQDN}}</h2>
+<div class="card">
+<p>{{.Msg}}</p>
+<form method="post" action="{{.Action}}">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="fqdn" value="{{.FQDN}}">
+<input type="hidden" name="confirm" value="1">
+<button class="danger" type="submit">{{.Verb}}</button>
+<a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a>
+</form></div></main></body></html>{{end}}
+
+{{define "help"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">{{.Name}}</span></div><div><a href="/">&larr; dashboard</a></div></header>
+<main>
+{{if .NewToken}}<h2>token for {{.Name}}</h2>
+<div class="card"><div class="warn" style="margin-bottom:.4rem">Save it now — shown once, only the hash is stored:</div>
+<div class="tok">{{.Token}}</div>
+<div class="warn" style="margin-top:.5rem;font-size:.78rem">The URL below IS the credential — never paste it into chats (link previews will fetch it and flip your record).</div></div>
+{{else}}<h2>client setup for {{.Name}}</h2>
+<div class="muted" style="margin-bottom:.6rem">goddns stores only the token's hash, so it can't be shown again. Lost it? Use <b>rotate</b> on the dashboard to mint a new one — then this page fills in below.</div>
+{{end}}
+
+<h2>curl (one-shot / cron)</h2>
+<pre># server uses the source IP of the connection — the client needn't know its own
+curl "https://{{.Host}}:{{.Port}}/update/{{.Token}}"
+
+# explicit IP instead
+curl "https://{{.Host}}:{{.Port}}/update/{{.Token}}?ip=203.0.113.10"
+
+# cron, every 3 minutes (nochg responses cost nothing):
+*/3 * * * * curl -fsS "https://{{.Host}}:{{.Port}}/update/{{.Token}}" >/dev/null 2>&1</pre>
+
+<h2>MikroTik RouterOS (one import)</h2>
+<pre>/system script add name=goddns source="/tool fetch url=\"https://{{.Host}}:{{.Port}}/update/{{.Token}}\" output=none"
+/system scheduler add name=goddns interval=3m on-event=goddns comment="goddns DDNS"</pre>
+
+<h2>Router with "Custom DDNS" (DynDNS2)</h2>
+<pre>server / hostname : {{.Host}}:{{.Port}}
+update URL        : /nic/update?hostname={{.Name}}&myip=&lt;ip&gt;
+username          : (anything)
+password          : {{.Token}}
+# or as a plain URL with the token in the query:
+curl "https://{{.Host}}:{{.Port}}/nic/update?hostname={{.Name}}&token={{.Token}}&myip=203.0.113.10"</pre>
+
+<div class="muted" style="font-size:.74rem">Responses: good &lt;ip&gt; (updated), nochg &lt;ip&gt; (no change), badauth (bad token), nohost (hostname mismatch).{{if not .NewToken}} Replace <b>&lt;token&gt;</b> above with the record's token (or rotate to get a fresh one).{{end}}</div>
+<p style="margin-top:1rem"><a href="/">&larr; back to dashboard</a></p>
 </main></body></html>{{end}}
 
 {{define "logs"}}{{template "head" .}}

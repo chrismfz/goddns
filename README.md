@@ -224,10 +224,17 @@ the same TLS and port — no extra listener, no port games):
     users   = ["chris:$2a$10$..."]      # goddns passwd -user chris
 
 It shows the DDNS records (last IP / last seen), the proxy table, and a tail
-of the logs, and lets you **add/delete DDNS tokens** (proxy hosts stay
-read-only — edit `goddns.conf`, it hot-reloads). DDNS tokens live in SQLite,
-so CRUD there is natural; full proxy CRUD would mean moving proxy rules out
-of the hand-edited config, which is a deliberate non-goal for now.
+of the logs, and lets you **add / rotate / delete DDNS tokens** (proxy hosts
+stay read-only — edit `goddns.conf`, it hot-reloads). Each record has a
+**help** link with ready copy-paste client snippets (curl, cron, MikroTik,
+router DynDNS2) for that hostname — set `public_host` so they're filled in
+with your server name and port. Tokens are stored hashed and **can't be
+shown again**; if one is lost, **rotate** mints a fresh token (the old one
+stops working) and shows it once with the snippets filled in. The same is
+available on the CLI: `goddns token rotate -fqdn home.ddns.myip.gr`.
+DDNS tokens live in SQLite, so CRUD there is natural; full proxy CRUD would
+mean moving proxy rules out of the hand-edited config, a deliberate non-goal
+for now.
 
 **It can rewrite DNS, so it is gated in depth** — a custom port would be
 security theatre; layered auth is the real control:
@@ -239,10 +246,20 @@ security theatre; layered auth is the real control:
    `SameSite=Strict`, HttpOnly cookie. CSRF tokens on every mutating form.
 
 So a single auth bug isn't game over, and every mutation is written to the
-event log as an `admin-audit` line. The session key is auto-created at
-`/var/lib/goddns/admin.secret` (or set `GODDNS_ADMIN_SECRET`) and persists
-across restarts. `users`/`allow`/`basic_auth` hot-reload; enabling or moving
-the vhost needs a restart.
+event log as an `admin-audit` line. The login form is **rate-limited per
+client IP** (fail2ban-style: an attacking source locks itself out with
+exponential backoff; legit accounts can't be locked out by others), on top
+of bcrypt. Sessions are bound to the user's current credential, so changing
+a password — or removing the user — invalidates their outstanding sessions
+immediately. The session key is auto-created at `/var/lib/goddns/admin.secret`
+(or set `GODDNS_ADMIN_SECRET`, min 16 bytes) and persists across restarts.
+`users`/`allow`/`basic_auth` hot-reload; enabling or moving the vhost needs
+a restart.
+
+For an **internet-facing** admin host, set a restrictive `allow` and/or
+`basic_auth` (goddns logs a warning at startup if both are empty) — the
+login throttle protects the form, but a CIDR/Basic gate keeps unauthenticated
+traffic away from it entirely.
 
 DNS for the admin name is just a static record at your goddns host — e.g.
 `admin.internal.myip.gr` already covered by the `*.internal` wildcard, or a

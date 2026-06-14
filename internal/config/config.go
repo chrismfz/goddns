@@ -29,6 +29,7 @@ type Config struct {
 	ReloadInterval int    `toml:"reload_interval"` // config re-check period, seconds
 	LogFile        string `toml:"log_file"`        // dedicated log file; empty = stderr/journald. Hot-swappable.
 	AccessLog      string `toml:"access_log"`      // separate file for proxy-access lines; empty = into log_file. Hot-swappable.
+	PublicHost     string `toml:"public_host"`     // hostname clients use to reach the DDNS endpoint (e.g. sdns.myip.gr); fills the admin help snippets. Optional.
 
 	// TLS
 	TLSMode  string `toml:"tls_mode"`  // "files" or "acme"
@@ -102,7 +103,6 @@ func (a *AdminConfig) IsAllowed(ip net.IP) bool {
 	return false
 }
 
-
 // ProxyRule routes one public hostname to one internal upstream.
 type ProxyRule struct {
 	Upstream       string   `toml:"upstream"`        // http(s)://ip-or-host[:port]
@@ -131,10 +131,24 @@ func defaults() Config {
 func Load(path string) (*Config, error) {
 	c := defaults()
 	if path != "" {
-		if _, err := toml.DecodeFile(path, &c); err != nil {
+		md, err := toml.DecodeFile(path, &c)
+		if err != nil {
 			if !os.IsNotExist(err) {
 				return nil, fmt.Errorf("config %s: %w", path, err)
 			}
+		} else if undec := md.Undecoded(); len(undec) > 0 {
+			// Reject unrecognised keys loudly. The classic footgun is a
+			// top-level key placed AFTER a [section] header, which TOML then
+			// scopes into that section (e.g. proxy_enabled written under
+			// [admin] becomes admin.proxy_enabled and is silently ignored).
+			keys := make([]string, 0, len(undec))
+			for _, k := range undec {
+				keys = append(keys, k.String())
+			}
+			return nil, fmt.Errorf("config %s: unrecognised key(s): %s — in TOML every key "+
+				"after a [section] header belongs to that section, so put top-level keys "+
+				"(listen, proxy_enabled, proxy_listen, log_file, tsig_*, ...) ABOVE the first "+
+				"[admin] or [proxy.\"...\"] section", path, strings.Join(keys, ", "))
 		}
 	}
 	if v := os.Getenv("GODDNS_TSIG_SECRET"); v != "" {
@@ -236,6 +250,11 @@ func Load(path string) (*Config, error) {
 			user, hash, ok := strings.Cut(cred, ":")
 			if !ok || user == "" || !strings.HasPrefix(hash, "$2") {
 				return nil, fmt.Errorf("admin: users/basic_auth entries must be \"user:bcrypt-hash\" (generate with: goddns passwd)")
+			}
+			// '|' is the session field separator and whitespace is a footgun;
+			// the username is everything before the first ':' so ':' is moot.
+			if strings.ContainsAny(user, "| \t") {
+				return nil, fmt.Errorf("admin: username %q must not contain '|' or whitespace", user)
 			}
 		}
 		for _, cidr := range c.Admin.Allow {
