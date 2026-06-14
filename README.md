@@ -298,7 +298,15 @@ The zones list shows *metadata*; to see the **actual records** of one zone:
 
     goddns zone home.myip.gr            # SOA/serial, NS, MX, every record + dynamic status
     goddns zone myip.gr -export         # loadable zone-file snapshot (a backup)
+    goddns zone myip.gr -check          # + probe each NS live for the serial it serves
     # …or click a zone name in the admin "zones" page
+
+The view always runs the offline **SOA-vs-NS** checks (is the SOA primary in the
+NS set? do in-zone nameservers have glue?). `-check` (and the "check nameservers"
+link in the admin page) adds the live probe: it queries every apex nameserver
+directly for the zone's SOA and reports which serial each one serves — so a
+secondary stuck on an old serial (the classic propagation foot-gun) shows up at
+a glance instead of via manual `dig`.
 
 This reads the **live** zone straight from BIND over **AXFR** (zone transfer),
 so for a dynamic zone you see the journal-merged contents — exactly what the
