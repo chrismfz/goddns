@@ -436,6 +436,20 @@ iDRAC/iLO/IPMI consoles, switches, UPSes.
     allow      = ["84.54.49.0/24"]           # client CIDRs — ALWAYS set for BMCs
     rate_limit = 10                          # req/s per client IP (burst 2x)
 
+### Drop-in vhost fragments (`proxy.d/`)
+
+Besides the inline `[proxy."..."]` blocks above, goddns merges every
+`/etc/goddns/proxy.d/*.conf` fragment into the config at load — the nginx
+`conf.d` model. A fragment contains only `[proxy."..."]` sections; a host
+defined twice (base file or another fragment) is rejected, and a broken
+fragment fails the whole reload so the previous config keeps running. Your
+hand-edited `goddns.conf` is never touched. The package installs a template at
+`/etc/goddns/proxy.d/vhost.conf.example`:
+
+    cp /etc/goddns/proxy.d/vhost.conf.example /etc/goddns/proxy.d/idrac.conf
+    $EDITOR /etc/goddns/proxy.d/idrac.conf
+    systemctl reload goddns      # SIGHUP — re-reads goddns.conf + proxy.d/
+
 ### DNS + certificates for the proxied names
 
 The records never point at the 10.x addresses — every proxied name

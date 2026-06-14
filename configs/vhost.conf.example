@@ -1,0 +1,22 @@
+# goddns proxy vhost fragment — a drop-in for /etc/goddns/proxy.d/
+#
+# Copy this to e.g. /etc/goddns/proxy.d/idrac.conf, edit, then reload goddns:
+#     systemctl reload goddns        # (sends SIGHUP; or: kill -HUP <pid>)
+#
+# The daemon loads goddns.conf and then merges every proxy.d/*.conf fragment.
+# Rules:
+#   - a fragment may contain ONLY [proxy."<host>"] sections (nothing else);
+#   - a host defined in two places (base file or another fragment) is rejected;
+#   - a syntactically broken fragment fails the whole reload, and the previous
+#     config keeps running — so a typo never takes the proxy down.
+# Your hand-edited goddns.conf is never modified by this mechanism.
+#
+# Generate a bcrypt basic_auth entry with:  goddns passwd -user chris
+
+[proxy."idrac.internal.myip.gr"]
+upstream        = "https://10.23.0.5"     # the internal service (https/http, self-signed OK)
+upstream_verify = false                   # verify the upstream's TLS cert (BMCs are self-signed -> false)
+preserve_host   = false                   # keep the inbound Host header instead of the upstream's
+allow           = ["10.23.0.0/16"]        # client CIDRs allowed to reach this host (set it for BMCs!)
+rate_limit      = 5                        # max requests/sec per client IP (burst 2x); 0 = unlimited
+# basic_auth    = ["chris:$2a$..."]        # extra gate for CGNAT/mobile clients where CIDRs can't work
