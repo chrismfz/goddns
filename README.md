@@ -271,7 +271,8 @@ A read-only view of the BIND config — what zones exist, which are dynamic,
 the TSIG keys, and a health check of the whole setup:
 
     goddns zones                 # CLI table + checks
-    # …and the "zones" link in the admin dashboard
+    goddns zones -check          # + probe every zone's nameservers for serial agreement
+    # …and the "zones" link in the admin dashboard ("check nameservers live" adds the same)
 
 It does **not** edit anything. To stay robust it doesn't parse raw
 named.conf (includes/views/comments make that fragile) — it runs

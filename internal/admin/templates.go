@@ -196,15 +196,18 @@ read-only view, add it to the named group:<br>
 {{else}}
 
 <h2>zones{{if .Directory}} <span class="muted">(directory {{.Directory}})</span>{{end}}</h2>
-<table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th></tr></thead><tbody>
+<table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th>{{if .Checked}}<th>NS (live)</th>{{end}}</tr></thead><tbody>
 {{range .Zones}}<tr>
 {{if $.HasViews}}<td class="muted">{{if .View}}{{.View}}{{else}}_default{{end}}</td>{{end}}
 <td><a href="/zone?name={{.Name}}">{{.Name}}</a></td>
 <td>{{if .Dynamic}}<span class="ok">{{.Kind}}</span>{{else}}<span class="muted">{{.Kind}}</span>{{end}}</td>
 <td>{{if .File}}{{.File}}{{if .Status}} <span class="{{if eq .Status "missing"}}err{{else if eq .Status "no journal yet"}}warn{{else}}muted{{end}}">({{.Status}})</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
 <td>{{if .Keys}}{{.Keys}}{{else}}<span class="muted">—</span>{{end}}</td>
+{{if $.Checked}}<td>{{if .NS}}<span class="{{.NSClass}}">{{.NS}}</span>{{else}}<span class="muted">—</span>{{end}}</td>{{end}}
 </tr>{{else}}<tr><td class="muted">(no zones)</td></tr>{{end}}
 </tbody></table>
+{{if .Checked}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">live NS check: <span class="ok">✓ serial</span> = all nameservers agree · <span class="err">✗ mismatch</span> = a secondary is out of sync · <a href="/zones?check=1">re-check</a> · <a href="/zones">clear</a></div>
+{{else}}<div style="font-size:.78rem;margin-top:.3rem"><a href="/zones?check=1">▸ check nameservers live</a> <span class="muted">(probe every zone's NS for serial agreement)</span></div>{{end}}
 {{if .Builtin}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">(+ {{.Builtin}} built-in empty zones hidden; <code>goddns zones -all</code> on the CLI to show)</div>{{end}}
 
 <h2>TSIG keys</h2>
