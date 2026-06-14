@@ -160,6 +160,40 @@ func login(t *testing.T, h *Handler) *http.Cookie {
 	return nil
 }
 
+func TestZoneHistoryDiffAndEscaping(t *testing.T) {
+	h, st := newHandler(t, mkConfig(t, ""))
+	// Two snapshots: a record changes A -> TXT, and the new TXT rdata carries
+	// an XSS payload (as a hostile panel client could).
+	if _, err := st.SnapshotPut("evil.example", 1,
+		"evil.example. 60 IN SOA ns. h. 1 3600 600 1209600 60\nx.evil.example. 60 IN A 1.1.1.1\n", 50); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SnapshotPut("evil.example", 2,
+		"evil.example. 60 IN SOA ns. h. 2 3600 600 1209600 60\nx.evil.example. 60 IN TXT \"</span><script>alert(1)</script>\"\n", 50); err != nil {
+		t.Fatal(err)
+	}
+
+	cookie := login(t, h)
+	rr := do(h, "GET", "/zone?name=evil.example&history=1", "127.0.0.1:1", nil, cookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("history page: %d", rr.Code)
+	}
+	body := rr.Body.String()
+
+	if !strings.Contains(body, "+ x.evil.example. 60 IN TXT") {
+		t.Errorf("added record missing from diff:\n%s", body)
+	}
+	if !strings.Contains(body, "- x.evil.example. 60 IN A 1.1.1.1") {
+		t.Errorf("removed record missing from diff")
+	}
+	if strings.Contains(body, "IN SOA") {
+		t.Errorf("SOA line should be filtered out of the diff")
+	}
+	if strings.Contains(body, "<script>alert(1)</script>") {
+		t.Errorf("record rdata was rendered unescaped (XSS)")
+	}
+}
+
 func TestAllowListDenies(t *testing.T) {
 	h, _ := newHandler(t, mkConfig(t, `allow = ["127.0.0.0/8"]`))
 	if rr := do(h, "GET", "/", "8.8.8.8:1", nil, nil); rr.Code != http.StatusForbidden {
