@@ -6,9 +6,11 @@ import (
 )
 
 var (
-	reType   = regexp.MustCompile(`(?m)\btype\s+([a-z-]+)\s*;`)
-	reFile   = regexp.MustCompile(`(?m)\bfile\s+"([^"]*)"`)
-	reAlgo   = regexp.MustCompile(`(?m)\balgorithm\s+([A-Za-z0-9-]+)\s*;`)
+	reType = regexp.MustCompile(`(?m)\btype\s+([a-z-]+)\s*;`)
+	reFile = regexp.MustCompile(`(?m)\bfile\s+"([^"]*)"`)
+	// named-checkconf -p quotes the algorithm (algorithm "hmac-sha256";) —
+	// accept it with or without the surrounding quotes (same as reGrant).
+	reAlgo   = regexp.MustCompile(`(?m)\balgorithm\s+"?([A-Za-z0-9-]+)"?\s*;`)
 	reSecret = regexp.MustCompile(`(?m)\bsecret\s+"([^"]*)"`)
 	// named-checkconf -p quotes the grant identity, e.g. grant "ddns-update."
 	// — capture the name without the surrounding quotes (the trailing dot is

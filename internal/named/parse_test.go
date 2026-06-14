@@ -53,15 +53,15 @@ view "_default" {
 	};
 };
 key "ddns-update" {
-	algorithm hmac-sha256;
-	secret "X1PlWPmG2wWAtUOOoET95+mBh+fg9WldWqp9R8kZr0w=";
+	algorithm "hmac-sha256";
+	secret "ZGRuc2Zha2VzZWNyZXRkZG5zZmFrZXNlY3JldDAwMDA=";
 };
 key "acme-key" {
-	algorithm hmac-sha256;
+	algorithm "hmac-sha256";
 	secret "AcMeSeCrEtAcMeSeCrEtAcMeSeCrEtAcMeSeCrEt0000=";
 };
 key "rndc-key" {
-	algorithm hmac-sha256;
+	algorithm "hmac-sha256";
 	secret "rndcsecretrndcsecretrndcsecretrndcsecret000=";
 };
 `
@@ -125,7 +125,7 @@ func TestCheckFindings(t *testing.T) {
 	inv := Parse([]byte(dump))
 
 	// goddns key matches and is granted -> an OK finding present
-	fs := inv.Check("ddns-update", "X1PlWPmG2wWAtUOOoET95+mBh+fg9WldWqp9R8kZr0w=")
+	fs := inv.Check("ddns-update", "ZGRuc2Zha2VzZWNyZXRkZG5zZmFrZXNlY3JldDAwMDA=")
 	var sawOK, sawGhost, sawIP bool
 	for _, f := range fs {
 		if f.Severity == OK {
@@ -203,8 +203,8 @@ view "_default" {
 		file "static.hosts";
 	};
 };
-key "acme-key" { algorithm hmac-sha256; secret "a="; };
-key "ddns-update" { algorithm hmac-sha256; secret "b="; };
+key "acme-key" { algorithm "hmac-sha256"; secret "a="; };
+key "ddns-update" { algorithm "hmac-sha256"; secret "b="; };
 `
 	inv := Parse([]byte(d))
 	if inv.Directory != "/var/named" {
@@ -352,8 +352,8 @@ view "_default" {
 		};
 	};
 };
-key "acme-key" { algorithm hmac-sha256; secret "a="; };
-key "ddns-update" { algorithm hmac-sha256; secret "X1Pl="; };
+key "acme-key" { algorithm "hmac-sha256"; secret "a="; };
+key "ddns-update" { algorithm "hmac-sha256"; secret "ZGRuc2Zha2U="; };
 `
 	inv := Parse([]byte(d))
 	myip := find(inv, "myip.gr")
@@ -367,7 +367,7 @@ key "ddns-update" { algorithm hmac-sha256; secret "X1Pl="; };
 	// the keys ARE defined -> no "not defined" error, and the goddns key
 	// matches AND is granted -> an OK finding (not the bogus REFUSED warning).
 	var sawNotDefined, sawOK bool
-	for _, f := range inv.Check("ddns-update.", "X1Pl=") {
+	for _, f := range inv.Check("ddns-update.", "ZGRuc2Zha2U=") {
 		if f.Severity == Error && contains(f.Message, "not defined") {
 			sawNotDefined = true
 		}
