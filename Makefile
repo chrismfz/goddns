@@ -160,8 +160,9 @@ deb: build ## Δημιουργεί .deb
 		"$(PKGROOT)/usr/share/goddns/configs" \
 		"$(PKGROOT)/usr/share/goddns/scripts" \
 		"$(PKGROOT)/etc/goddns" \
+		"$(PKGROOT)/etc/goddns/proxy.d" \
 		"$(OUTDIR)"
-	@chmod 0750 "$(PKGROOT)/etc/goddns"
+	@chmod 0750 "$(PKGROOT)/etc/goddns" "$(PKGROOT)/etc/goddns/proxy.d"
 
 	# copy DEBIAN metadata/scripts
 	@cp -a "$(DEB_SRC)/." "$(PKGROOT)/DEBIAN/"

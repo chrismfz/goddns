@@ -76,11 +76,15 @@ fi
 
 install -Dm644 %{projectroot}/LICENSE %{buildroot}/usr/share/licenses/goddns/LICENSE
 
+# drop-in dir for proxy vhost fragments (proxy.d/*.conf merged into the config)
+mkdir -p "%{buildroot}/etc/goddns/proxy.d"
+
 %files
 %license /usr/share/licenses/goddns/LICENSE
 %{_bindir}/goddns
 %{_unitdir}/goddns.service
 %attr(0750,root,goddns) %dir /etc/goddns
+%attr(0750,root,goddns) %dir /etc/goddns/proxy.d
 %attr(0640,root,goddns) %config(noreplace) /etc/goddns/goddns.conf
 %config(noreplace) /etc/logrotate.d/goddns
 
@@ -102,6 +106,16 @@ fi
 if [ -f /etc/goddns/goddns.conf ]; then
     chown root:goddns /etc/goddns/goddns.conf || true
     chmod 0640 /etc/goddns/goddns.conf || true
+fi
+# proxy vhost drop-in dir + seed the example template in place
+mkdir -p /etc/goddns/proxy.d
+chown root:goddns /etc/goddns/proxy.d || true
+chmod 0750 /etc/goddns/proxy.d || true
+if [ -f %{_datadir}/goddns/configs/vhost.conf.example ] && \
+   [ ! -f /etc/goddns/proxy.d/vhost.conf.example ]; then
+    install -m0640 -o root -g goddns \
+        %{_datadir}/goddns/configs/vhost.conf.example \
+        /etc/goddns/proxy.d/vhost.conf.example || true
 fi
 
 # secrets env file (GODDNS_TSIG_SECRET, GODDNS_ACME_TSIG_SECRET)

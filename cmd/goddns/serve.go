@@ -259,6 +259,21 @@ func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource, adminH http.H
 	}
 }
 
+// proxyDSig is a cheap signature of the proxy.d/*.conf drop-in fragments next
+// to the config file (sorted name+size+mtime), so the reload poll picks up a
+// fragment change even though filewatch only watches the main config file.
+func proxyDSig(confPath string) string {
+	files, _ := filepath.Glob(filepath.Join(filepath.Dir(confPath), "proxy.d", "*.conf"))
+	slices.Sort(files)
+	var b strings.Builder
+	for _, f := range files {
+		if fi, err := os.Stat(f); err == nil {
+			fmt.Fprintf(&b, "%s:%d:%d\n", f, fi.Size(), fi.ModTime().UnixNano())
+		}
+	}
+	return b.String()
+}
+
 // reloadLoop polls the config file (mtime+sha256, like cfm's main tick loop)
 // and swaps the runtime bundle on change. SIGHUP forces an immediate check.
 func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src *tlsSource) {
@@ -315,18 +330,26 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
+	// proxy.d/ fragments aren't the watched file, so track their signature
+	// separately and reload when it changes (matches inline-edit ergonomics).
+	lastSig := proxyDSig(path)
+
 	for {
 		select {
 		case <-t.C:
-			if _, ok := w.Changed(); !ok {
+			_, mainChanged := w.Changed()
+			sig := proxyDSig(path)
+			if !mainChanged && sig == lastSig {
 				if proxyDirty {
 					applyProxy(cur.Load().cfg)
 				}
 				continue
 			}
+			lastSig = sig
 		case <-hup:
 			log.Printf("SIGHUP: re-reading config")
 			w.Changed() // refresh watcher state so the ticker doesn't re-fire
+			lastSig = proxyDSig(path)
 		}
 
 		old := cur.Load()

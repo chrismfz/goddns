@@ -318,3 +318,57 @@ func TestShippedExampleLoads(t *testing.T) {
 		t.Fatalf("shipped configs/goddns.conf does not load: %v", err)
 	}
 }
+
+func mustWrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProxyFragments(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "goddns.conf")
+	mustWrite(t, main, `
+tls_mode = "files"
+cert_file = "/x/c.pem"
+key_file = "/x/k.pem"
+[proxy."a.example"]
+upstream = "https://10.0.0.1"
+`)
+	pd := filepath.Join(dir, "proxy.d")
+	if err := os.MkdirAll(pd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(pd, "b.conf"), `
+[proxy."b.example"]
+upstream = "http://10.0.0.2"
+allow = ["10.0.0.0/8"]
+`)
+
+	c, err := Load(main)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if _, ok := c.Proxy["a.example"]; !ok {
+		t.Error("base proxy host missing after merge")
+	}
+	if _, ok := c.Proxy["b.example"]; !ok {
+		t.Error("fragment proxy host missing after merge")
+	}
+
+	// a host defined in both base and a fragment is rejected
+	dup := filepath.Join(pd, "dup.conf")
+	mustWrite(t, dup, "[proxy.\"a.example\"]\nupstream = \"http://10.0.0.9\"\n")
+	if _, err := Load(main); err == nil || !strings.Contains(err.Error(), "already defined") {
+		t.Errorf("expected duplicate-host error, got %v", err)
+	}
+	os.Remove(dup)
+
+	// a fragment may contain only [proxy."..."] sections
+	bad := filepath.Join(pd, "bad.conf")
+	mustWrite(t, bad, "listen = \":9999\"\n")
+	if _, err := Load(main); err == nil || !strings.Contains(err.Error(), "only [proxy") {
+		t.Errorf("expected fragment-scope error, got %v", err)
+	}
+}

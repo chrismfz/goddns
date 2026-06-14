@@ -436,6 +436,29 @@ iDRAC/iLO/IPMI consoles, switches, UPSes.
     allow      = ["84.54.49.0/24"]           # client CIDRs — ALWAYS set for BMCs
     rate_limit = 10                          # req/s per client IP (burst 2x)
 
+### Drop-in vhost fragments (`proxy.d/`)
+
+Besides the inline `[proxy."..."]` blocks above, goddns merges every
+`/etc/goddns/proxy.d/*.conf` fragment into the config at load — the nginx
+`conf.d` model. A fragment contains only `[proxy."..."]` sections; a host
+defined twice (base file or another fragment) is rejected, and a broken
+fragment fails the whole reload so the previous config keeps running. Your
+hand-edited `goddns.conf` is never touched. The package installs a template at
+`/etc/goddns/proxy.d/vhost.conf.example`:
+
+    cp /etc/goddns/proxy.d/vhost.conf.example /etc/goddns/proxy.d/idrac.conf
+    $EDITOR /etc/goddns/proxy.d/idrac.conf
+    # picked up automatically within reload_interval (~20s), or now:
+    systemctl reload goddns
+
+The reload poll watches `proxy.d/` as well as `goddns.conf`, so adding or
+editing a fragment is applied like an inline edit. A fragment that fails to
+parse or validate is rejected as a whole and the **running config is kept** —
+so a typo never takes the proxy (or DDNS) down on reload. One caveat: that
+all-or-nothing applies at **startup** too — a broken fragment will stop
+`goddns` from booting, so fix fragment errors via a reload (which keeps the old
+config live and logs the offending file) before relying on a restart.
+
 ### DNS + certificates for the proxied names
 
 The records never point at the 10.x addresses — every proxied name

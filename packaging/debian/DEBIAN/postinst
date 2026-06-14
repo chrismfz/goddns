@@ -34,6 +34,18 @@ if [ -f /etc/goddns/goddns.conf ]; then
     chmod 0640 /etc/goddns/goddns.conf
 fi
 
+# drop-in dir for proxy vhost fragments (proxy.d/*.conf merged into the config);
+# seed it with the example template so the format is discoverable in place.
+mkdir -p /etc/goddns/proxy.d
+chown root:goddns /etc/goddns/proxy.d
+chmod 0750 /etc/goddns/proxy.d
+if [ -f /usr/share/goddns/configs/vhost.conf.example ] && \
+   [ ! -f /etc/goddns/proxy.d/vhost.conf.example ]; then
+    install -m0640 -o root -g goddns \
+        /usr/share/goddns/configs/vhost.conf.example \
+        /etc/goddns/proxy.d/vhost.conf.example
+fi
+
 # secrets env file (GODDNS_TSIG_SECRET, GODDNS_ACME_TSIG_SECRET); created
 # empty so the operator only has to edit it, never to remember its perms.
 if [ ! -f /etc/goddns/goddns.env ]; then

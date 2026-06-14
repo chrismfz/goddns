@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -206,6 +207,15 @@ func Load(path string) (*Config, error) {
 	if c.ProxyListen == "" {
 		c.ProxyListen = ":443"
 	}
+	// Merge drop-in proxy vhost fragments from proxy.d/ next to the config
+	// file. Each fragment may contain ONLY [proxy."..."] sections; they are
+	// validated together with the main file below, so a broken fragment fails
+	// the whole load and the previous config stays live.
+	if path != "" {
+		if err := mergeProxyFragments(&c, filepath.Dir(path)); err != nil {
+			return nil, err
+		}
+	}
 	// Normalise host keys (lowercase, no trailing dot) and validate rules so
 	// a broken reload is rejected as a whole and the old config stays live.
 	if len(c.Proxy) > 0 {
@@ -289,6 +299,46 @@ func (c *Config) ProxyHosts() []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+// mergeProxyFragments folds every proxy.d/*.conf fragment (next to the main
+// config) into c.Proxy. Fragments may contain ONLY [proxy."..."] sections; a
+// host defined in two places is rejected so the UI/CLI and a hand-edited base
+// never silently clobber each other. The main goddns.conf is never touched.
+func mergeProxyFragments(c *Config, dir string) error {
+	files, err := filepath.Glob(filepath.Join(dir, "proxy.d", "*.conf"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(files) // deterministic merge order
+	for _, f := range files {
+		var frag struct {
+			Proxy map[string]ProxyRule `toml:"proxy"`
+		}
+		md, err := toml.DecodeFile(f, &frag)
+		if err != nil {
+			return fmt.Errorf("proxy.d/%s: %w", filepath.Base(f), err)
+		}
+		if undec := md.Undecoded(); len(undec) > 0 {
+			keys := make([]string, 0, len(undec))
+			for _, k := range undec {
+				keys = append(keys, k.String())
+			}
+			return fmt.Errorf("proxy.d/%s: only [proxy.\"...\"] sections are allowed (got: %s)",
+				filepath.Base(f), strings.Join(keys, ", "))
+		}
+		if c.Proxy == nil && len(frag.Proxy) > 0 {
+			c.Proxy = map[string]ProxyRule{}
+		}
+		for host, rule := range frag.Proxy {
+			if _, dup := c.Proxy[host]; dup {
+				return fmt.Errorf("proxy.d/%s: host %q is already defined (in goddns.conf or another fragment)",
+					filepath.Base(f), host)
+			}
+			c.Proxy[host] = rule
+		}
+	}
+	return nil
 }
 
 func canonKeyName(s string) string {
