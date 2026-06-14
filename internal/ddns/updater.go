@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/miekg/dns"
 )
 
-// Backend replaces the A or AAAA RRset of fqdn (chosen by the IP family)
-// with a single record pointing at ip.
+// Backend replaces the A or AAAA RRset of fqdn (chosen by the IP family) with
+// a single record pointing at ip — the narrow DDNS hot path. The general write
+// seam is Mutator (see mutate.go); RFC2136 implements both.
 type Backend interface {
 	Update(fqdn, zone string, ip net.IP, ttl uint32) error
 }
@@ -60,43 +60,23 @@ func NewRFC2136(server, keyName, algo, secret string) (*RFC2136, error) {
 }
 
 // Update replaces the A or AAAA RRset for fqdn with a single record pointing
-// at ip, inside zone, using a signed RFC 2136 UPDATE.
+// at ip — a thin caller of Apply. It removes BOTH address families at the name
+// first, so a client flipping IPv4<->IPv6 never leaves the other family's stale
+// record answering alongside the new one.
 func (u *RFC2136) Update(fqdn, zone string, ip net.IP, ttl uint32) error {
-	rrType := dns.TypeA
-	if ip.To4() == nil {
-		rrType = dns.TypeAAAA
-	}
-
-	m := new(dns.Msg)
-	m.SetUpdate(dns.Fqdn(zone))
-
-	// Remove BOTH address RRsets at this name, then add ours: a client
-	// flipping IPv4<->IPv6 must not leave the other family's stale record
-	// answering alongside the new one.
-	m.RemoveRRset([]dns.RR{
-		&dns.A{Hdr: dns.RR_Header{Name: dns.Fqdn(fqdn), Rrtype: dns.TypeA, Class: dns.ClassINET}},
-		&dns.AAAA{Hdr: dns.RR_Header{Name: dns.Fqdn(fqdn), Rrtype: dns.TypeAAAA, Class: dns.ClassINET}},
-	})
-
-	hdr := dns.RR_Header{Name: dns.Fqdn(fqdn), Rrtype: rrType, Class: dns.ClassINET, Ttl: ttl}
-	if rrType == dns.TypeA {
-		m.Insert([]dns.RR{&dns.A{Hdr: hdr, A: ip.To4()}})
+	name := dns.Fqdn(fqdn)
+	hdr := dns.RR_Header{Name: name, Class: dns.ClassINET, Ttl: ttl}
+	var add dns.RR
+	if v4 := ip.To4(); v4 != nil {
+		hdr.Rrtype = dns.TypeA
+		add = &dns.A{Hdr: hdr, A: v4}
 	} else {
-		m.Insert([]dns.RR{&dns.AAAA{Hdr: hdr, AAAA: ip.To16()}})
+		hdr.Rrtype = dns.TypeAAAA
+		add = &dns.AAAA{Hdr: hdr, AAAA: ip.To16()}
 	}
-
-	m.SetTsig(u.keyName, u.algo, 300, time.Now().Unix())
-
-	c := &dns.Client{
-		TsigSecret: map[string]string{u.keyName: u.secret},
-		Timeout:    5 * time.Second,
-	}
-	resp, _, err := c.Exchange(m, u.server)
-	if err != nil {
-		return fmt.Errorf("dns exchange: %w", err)
-	}
-	if resp.Rcode != dns.RcodeSuccess {
-		return fmt.Errorf("dns update rejected: %s", dns.RcodeToString[resp.Rcode])
-	}
-	return nil
+	return u.Apply(zone, []Op{
+		{Action: DelRRset, RR: &dns.A{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET}}},
+		{Action: DelRRset, RR: &dns.AAAA{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET}}},
+		{Action: AddRR, RR: add},
+	})
 }
