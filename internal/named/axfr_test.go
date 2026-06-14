@@ -86,8 +86,8 @@ func TestTransferUnauthenticated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("transfer: %v", err)
 	}
-	if len(rrs) != 6 {
-		t.Fatalf("got %d records, want 6", len(rrs))
+	if len(rrs) != 5 {
+		t.Fatalf("got %d records, want 5", len(rrs))
 	}
 	if soa := SOAOf(rrs); soa == nil || soa.Serial != 2026061401 {
 		t.Fatalf("SOA serial wrong: %v", soa)
@@ -107,8 +107,8 @@ func TestTransferTSIG(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tsig transfer: %v", err)
 	}
-	if len(rrs) != 6 {
-		t.Fatalf("got %d records, want 6", len(rrs))
+	if len(rrs) != 5 {
+		t.Fatalf("got %d records, want 5", len(rrs))
 	}
 }
 
@@ -119,10 +119,42 @@ func TestTransferAutoFallsBackToKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auto transfer: %v", err)
 	}
-	if len(rrs) != 6 {
-		t.Fatalf("got %d records, want 6", len(rrs))
+	if len(rrs) != 5 {
+		t.Fatalf("got %d records, want 5", len(rrs))
 	}
 }
+
+func TestTransferDropsTrailingSOA(t *testing.T) {
+	addr := startAXFRServer(t, &axfrHandler{records: sampleZone(t)})
+	rrs, err := Transfer("myip.gr", addr, nil)
+	if err != nil {
+		t.Fatalf("transfer: %v", err)
+	}
+	soas := 0
+	for _, rr := range rrs {
+		if _, ok := rr.(*dns.SOA); ok {
+			soas++
+		}
+	}
+	if soas != 1 {
+		t.Fatalf("got %d SOA records, want exactly 1 (trailing duplicate must be dropped)", soas)
+	}
+}
+
+func TestServerRefused(t *testing.T) {
+	// An rcode-bearing error = the server answered and refused -> try keys.
+	if !serverRefused(errString("axfr myip.gr. from 127.0.0.1:53: dns: bad xfr rcode: 5")) {
+		t.Fatal("REFUSED rcode not recognised as a refusal")
+	}
+	// A dial failure = never reached the server -> don't fan out over keys.
+	if serverRefused(errString("axfr myip.gr. from 127.0.0.1:53: dial tcp 127.0.0.1:53: connect: connection refused")) {
+		t.Fatal("dial error misclassified as a refusal")
+	}
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
 
 func TestSortZoneOrder(t *testing.T) {
 	rrs := sampleZone(t)[:5] // drop the trailing SOA so each name is unique

@@ -47,8 +47,16 @@ func withPort(server string) string {
 // read-only query: it never changes anything on the server. The records are
 // the LIVE contents as the server serves them — for a dynamic zone that means
 // journal-merged data, not the (possibly stale) on-disk zone file.
+// maxRecords caps how many RRs a single transfer will buffer. It's a memory
+// guard for the per-request admin handler against a pathological/hostile
+// primary; it sits far above any realistic hand-run zone.
+const maxRecords = 1_000_000
+
 func Transfer(zone, server string, key *TSIGKey) ([]dns.RR, error) {
 	zone = dns.Fqdn(zone)
+	if len(zone) > 255 {
+		return nil, fmt.Errorf("axfr: zone name too long (%d > 255 octets)", len(zone))
+	}
 	server = withPort(server)
 
 	m := new(dns.Msg)
@@ -71,9 +79,22 @@ func Transfer(zone, server string, key *TSIGKey) ([]dns.RR, error) {
 			return nil, fmt.Errorf("axfr %s from %s: %w", zone, server, e.Error)
 		}
 		rrs = append(rrs, e.RR...)
+		if len(rrs) > maxRecords {
+			return nil, fmt.Errorf("axfr %s from %s: zone exceeds %d records — refusing to buffer", zone, server, maxRecords)
+		}
 	}
 	if len(rrs) == 0 {
 		return nil, fmt.Errorf("axfr %s from %s: empty transfer", zone, server)
+	}
+	// AXFR frames the zone as SOA ... SOA: the closing SOA repeats the opening
+	// one only to mark the end. Drop that trailing duplicate so callers (and a
+	// -export dump) see the SOA exactly once.
+	if len(rrs) >= 2 {
+		if _, first := rrs[0].(*dns.SOA); first {
+			if _, last := rrs[len(rrs)-1].(*dns.SOA); last {
+				rrs = rrs[:len(rrs)-1]
+			}
+		}
 	}
 	return rrs, nil
 }
@@ -88,12 +109,31 @@ func TransferAuto(zone, server string, keys []TSIGKey) ([]dns.RR, error) {
 	if firstErr == nil {
 		return rrs, nil
 	}
+	// Only fall back to keys if the server ANSWERED and refused (REFUSED/
+	// NOTAUTH come back as an xfr rcode). A dial/timeout error means we never
+	// reached BIND, so authenticating won't help — fail fast instead of
+	// fanning out one connection per key. Bound the whole fallback by a wall
+	// clock so a slow server can't stack (K+1) full timeouts on one request.
+	if !serverRefused(firstErr) {
+		return nil, firstErr
+	}
+	deadline := time.Now().Add(20 * time.Second)
 	for i := range keys {
+		if time.Now().After(deadline) {
+			break
+		}
 		if rrs, err := Transfer(zone, server, &keys[i]); err == nil {
 			return rrs, nil
 		}
 	}
 	return nil, firstErr
+}
+
+// serverRefused reports whether err is a transfer the server actively rejected
+// (an rcode), as opposed to a connection/timeout failure where it never got to
+// answer. miekg/dns reports the former as "bad xfr rcode: N".
+func serverRefused(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "rcode")
 }
 
 // AXFRKeys builds the candidate keys to try for transferring z, most likely

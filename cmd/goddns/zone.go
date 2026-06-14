@@ -3,9 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -76,12 +78,7 @@ func cmdZone(args []string) {
 	named.SortZone(records)
 
 	if *export {
-		// A canonical, loadable snapshot. Comments/$ORIGIN from the original
-		// file are not preserved (AXFR carries records, not source text), but
-		// it reloads cleanly and is a fine backup of the live state.
-		for _, rr := range records {
-			fmt.Println(rr.String())
-		}
+		writeExport(os.Stdout, name, srv, z, records)
 		return
 	}
 
@@ -108,6 +105,74 @@ func transfer(inv *named.Inventory, z *named.Zone, name, server, goddnsKey, forc
 		return nil, fmt.Errorf("key %q not found in named.conf", forceKey)
 	}
 	return named.TransferAuto(name, server, inv.AXFRKeys(z, goddnsKey))
+}
+
+// writeExport emits a canonical, loadable zone-file snapshot prefixed with a
+// comment header that records what the zone is (dynamic vs static) and how to
+// restore it BY HAND — because goddns never writes BIND files, the operator
+// re-imports, and the safe procedure differs for dynamic vs static zones.
+// The header is all comments (lines starting with ';'), so the file still
+// loads cleanly as a zone file.
+func writeExport(w io.Writer, name, server string, z *named.Zone, records []dns.RR) {
+	path := "/var/named/" + name + ".hosts"
+	if z != nil && z.Path != "" {
+		path = z.Path
+	}
+
+	fmt.Fprintf(w, "; goddns export of zone %s\n", name)
+	fmt.Fprintf(w, "; taken %s from %s via AXFR (live; for a dynamic zone this is journal-merged)\n",
+		time.Now().UTC().Format(time.RFC3339), server)
+	if soa := named.SOAOf(records); soa != nil {
+		fmt.Fprintf(w, "; serial %d, %d records\n", soa.Serial, len(records))
+	}
+	fmt.Fprint(w, ";\n; NOTE: this is a record snapshot. Comments / $ORIGIN / $INCLUDE / record\n")
+	fmt.Fprint(w, "; ordering from the original source file are NOT preserved (AXFR carries\n")
+	fmt.Fprint(w, "; records, not source text). It reloads cleanly as-is.\n;\n")
+	fmt.Fprint(w, "; ---- restore by hand (goddns never writes BIND files) ----\n")
+
+	switch {
+	case z == nil:
+		fmt.Fprintf(w, "; kind: UNKNOWN — %s is not in named.conf. If it's a normal static\n", name)
+		fmt.Fprint(w, ";   zone, follow the STATIC steps; if it accepts dynamic updates, the\n")
+		fmt.Fprint(w, ";   DYNAMIC steps. Both are below.\n;\n")
+		writeStaticRestore(w, name, path)
+		fmt.Fprint(w, ";\n")
+		writeDynamicRestore(w, name, path)
+	case z.Dynamic:
+		keys := strings.Join(z.UpdateKeys, ", ")
+		if keys == "" {
+			keys = z.AllowUpdate
+		}
+		fmt.Fprintf(w, "; kind: DYNAMIC (updates via: %s)\n;\n", keys)
+		writeDynamicRestore(w, name, path)
+	default:
+		fmt.Fprint(w, "; kind: static (hand-edited zone file)\n;\n")
+		writeStaticRestore(w, name, path)
+	}
+	fmt.Fprint(w, "; ----------------------------------------------------------\n")
+	fmt.Fprint(w, "$ORIGIN .\n")
+
+	for _, rr := range records {
+		fmt.Fprintln(w, rr.String())
+	}
+}
+
+func writeStaticRestore(w io.Writer, name, path string) {
+	fmt.Fprint(w, "; STATIC restore:\n")
+	fmt.Fprintf(w, ";   1. save this file as the zone file, e.g. %s\n", path)
+	fmt.Fprintf(w, ";   2. named-checkzone %s %s\n", name, path)
+	fmt.Fprintf(w, ";   3. rndc reload %s     (bump the SOA serial first if it refuses)\n", name)
+}
+
+func writeDynamicRestore(w io.Writer, name, path string) {
+	fmt.Fprint(w, "; DYNAMIC restore — do NOT just overwrite the live file (journal foot-gun):\n")
+	fmt.Fprint(w, ";   option A — replace the file, keep the zone dynamic:\n")
+	fmt.Fprintf(w, ";     rndc freeze %s\n", name)
+	fmt.Fprintf(w, ";     install this snapshot as %s\n", path)
+	fmt.Fprintf(w, ";     named-checkzone %s %s\n", name, path)
+	fmt.Fprintf(w, ";     rndc thaw %s     (rebuilds; a fresh journal starts on the next update)\n", name)
+	fmt.Fprint(w, ";   option B — re-inject records via dynamic update, no freeze:\n")
+	fmt.Fprintf(w, ";     nsupdate -k <keyfile>  ->  zone %s; update add <each record>; send\n", name)
 }
 
 // printZoneHeader writes the one-line summary: zone kind, dynamic status, the
