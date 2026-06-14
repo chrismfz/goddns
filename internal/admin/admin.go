@@ -7,6 +7,7 @@ package admin
 
 import (
 	"bufio"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -144,6 +146,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 type zoneRow struct {
 	View, Name, Kind, File, Status, Keys string
+	NS, NSClass                          string // on-demand live NS-serial verdict
 	Dynamic                              bool
 }
 type keyRow struct{ Name, Algorithm string }
@@ -253,6 +256,12 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 	if nc == "" {
 		nc = "/etc/named.conf"
 	}
+	server := cfg.DNSServer
+	if server == "" {
+		server = "127.0.0.1:53"
+	}
+	check := r.URL.Query().Get("check") == "1"
+
 	data, err := named.CheckConf(nc)
 	if err != nil {
 		render(w, zonesTmpl, map[string]any{"Version": h.version, "User": user, "Error": err.Error()})
@@ -260,17 +269,37 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 	}
 	inv := named.Parse(data)
 
-	var zr []zoneRow
+	zones := inv.UserZones()
+	zr := make([]zoneRow, len(zones))
 	hasViews := false
-	for _, z := range inv.UserZones() {
+	for i, z := range zones {
 		if z.View != "" {
 			hasViews = true
 		}
-		zr = append(zr, zoneRow{
+		zr[i] = zoneRow{
 			View: z.View, Name: z.Name, Kind: z.Kind(), File: z.Path,
 			Status: named.FileStatus(z.Path, z.Dynamic),
 			Keys:   strings.Join(z.UpdateKeys, ", "), Dynamic: z.Dynamic,
-		})
+		}
+	}
+
+	// On demand: probe every zone's nameservers for serial agreement. Each
+	// zone is a cheap NS query + a few SOA probes (no AXFR), run with a small
+	// concurrency cap so a host with many zones can't be made to open a flood
+	// of sockets from one click. Off by default to keep the list snappy.
+	if check {
+		sem := make(chan struct{}, nsCheckConcurrency)
+		var wg sync.WaitGroup
+		for i := range zones {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				zr[i].NS, zr[i].NSClass = zoneNSVerdict(zones[i], server)
+			}(i)
+		}
+		wg.Wait()
 	}
 	var kr []keyRow
 	for _, k := range inv.Keys {
@@ -285,8 +314,33 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 	render(w, zonesTmpl, map[string]any{
 		"Version": h.version, "User": user, "Directory": inv.Directory,
 		"Zones": zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
-		"Builtin": len(inv.Zones) - len(zr),
+		"Builtin": len(inv.Zones) - len(zr), "Checked": check,
 	})
+}
+
+// nsCheckConcurrency bounds how many zones are probed at once on /zones?check=1.
+const nsCheckConcurrency = 8
+
+// zoneNSVerdict runs the on-demand live NS-serial check for one zone (a cheap
+// apex NS query, then a direct SOA probe to each nameserver). Returns a short
+// status and a CSS class. Non-master zones (hint/slave/forward) return blank —
+// there's no apex NS set to compare. Read-only.
+func zoneNSVerdict(z named.Zone, server string) (status, class string) {
+	switch z.Kind() {
+	case "static file", "dynamic":
+	default:
+		return "", ""
+	}
+	switch st, serial := named.ZoneSerialCheck(z.Name, server); st {
+	case named.SerialAgree:
+		return fmt.Sprintf("✓ %d", serial), "ok"
+	case named.SerialMismatch:
+		return "✗ mismatch", "err"
+	case named.SerialUnreachable:
+		return "unreachable", "warn"
+	default:
+		return "no NS", "muted"
+	}
 }
 
 func (h *Handler) session(r *http.Request) (string, bool) {

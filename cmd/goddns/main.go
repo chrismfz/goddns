@@ -35,7 +35,7 @@ Usage:
   goddns token rotate -fqdn home.myip.gr [-config ...]  # new token, old stops
   goddns token del  -fqdn home.myip.gr [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth
-  goddns zones [-named-conf /etc/named.conf]   # read-only: zones, dynamic, TSIG health
+  goddns zones [-check]                        # read-only: zones, dynamic, TSIG health (-check: NS serials)
   goddns zone home.myip.gr [-export]           # read-only: live records via AXFR (+ backup)
   goddns version
 `, Version, defaultConf)
