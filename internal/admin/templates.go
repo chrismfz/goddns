@@ -194,11 +194,12 @@ read-only view, add it to the named group:<br>
 </div>
 {{else}}
 
-<h2>zones</h2>
-<table><thead><tr><th>zone</th><th>type</th><th>dynamic</th><th>update key(s)</th></tr></thead><tbody>
+<h2>zones{{if .Directory}} <span class="muted">(directory {{.Directory}})</span>{{end}}</h2>
+<table><thead><tr><th>zone</th><th>kind</th><th>file</th><th>update key(s)</th></tr></thead><tbody>
 {{range .Zones}}<tr>
-<td>{{.Name}}</td><td class="muted">{{.Type}}</td>
-<td>{{if .Dynamic}}<span class="ok">yes</span>{{else}}<span class="muted">—</span>{{end}}</td>
+<td>{{.Name}}</td>
+<td>{{if .Dynamic}}<span class="ok">{{.Kind}}</span>{{else}}<span class="muted">{{.Kind}}</span>{{end}}</td>
+<td>{{if .File}}{{.File}}{{if .Status}} <span class="{{if eq .Status "missing"}}err{{else if eq .Status "no journal yet"}}warn{{else}}muted{{end}}">({{.Status}})</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
 <td>{{if .Keys}}{{.Keys}}{{else}}<span class="muted">—</span>{{end}}</td>
 </tr>{{else}}<tr><td colspan="4" class="muted">(no zones)</td></tr>{{end}}
 </tbody></table>

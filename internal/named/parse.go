@@ -6,13 +6,23 @@ import (
 )
 
 var (
-	reType     = regexp.MustCompile(`(?m)\btype\s+([a-z-]+)\s*;`)
-	reFile     = regexp.MustCompile(`(?m)\bfile\s+"([^"]*)"`)
-	reAlgo     = regexp.MustCompile(`(?m)\balgorithm\s+([A-Za-z0-9-]+)\s*;`)
-	reSecret   = regexp.MustCompile(`(?m)\bsecret\s+"([^"]*)"`)
-	reGrant    = regexp.MustCompile(`(?m)\b(?:grant|deny)\s+(\S+)\s+`)
-	reAllowKey = regexp.MustCompile(`\bkey\s+"?([^";{}\s]+)"?`)
+	reType      = regexp.MustCompile(`(?m)\btype\s+([a-z-]+)\s*;`)
+	reFile      = regexp.MustCompile(`(?m)\bfile\s+"([^"]*)"`)
+	reAlgo      = regexp.MustCompile(`(?m)\balgorithm\s+([A-Za-z0-9-]+)\s*;`)
+	reSecret    = regexp.MustCompile(`(?m)\bsecret\s+"([^"]*)"`)
+	reGrant     = regexp.MustCompile(`(?m)\b(?:grant|deny)\s+(\S+)\s+`)
+	reAllowKey  = regexp.MustCompile(`\bkey\s+"?([^";{}\s]+)"?`)
+	reDirectory = regexp.MustCompile(`(?m)^\s*directory\s+"([^"]*)"\s*;`)
 )
+
+// resolvePath makes an absolute zone-file path from a (possibly relative)
+// file and the directory option.
+func resolvePath(dir, file string) string {
+	if file == "" || strings.HasPrefix(file, "/") || dir == "" {
+		return file
+	}
+	return strings.TrimRight(dir, "/") + "/" + file
+}
 
 type block struct{ name, body string }
 
@@ -21,7 +31,7 @@ type block struct{ name, body string }
 // view), so it is view-agnostic.
 func Parse(dump []byte) *Inventory {
 	src := string(dump)
-	inv := &Inventory{}
+	inv := &Inventory{Directory: firstSubmatch(reDirectory, src)}
 
 	for _, b := range extractBlocks(src, "key") {
 		inv.Keys = append(inv.Keys, Key{
@@ -36,10 +46,12 @@ func Parse(dump []byte) *Inventory {
 		if name == "" {
 			name = "." // root zone, don't strip to empty
 		}
+		file := firstSubmatch(reFile, b.body)
 		z := Zone{
 			Name: name,
 			Type: firstSubmatch(reType, b.body),
-			File: firstSubmatch(reFile, b.body),
+			File: file,
+			Path: resolvePath(inv.Directory, file),
 		}
 		if up, ok := namedBlock(b.body, "update-policy"); ok {
 			for _, m := range reGrant.FindAllStringSubmatch(up, -1) {

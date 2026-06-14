@@ -1,6 +1,9 @@
 package named
 
-import "testing"
+import (
+	"os"
+	"testing"
+)
 
 // A realistic `named-checkconf -p` dump: implicit view, a static zone, a
 // dynamic delegated zone, an IP-based dynamic zone, the root hint, a couple
@@ -177,4 +180,89 @@ func contains(s, sub string) bool {
 		}
 	}
 	return false
+}
+
+func TestPathResolutionAndKind(t *testing.T) {
+	d := `
+options {
+	directory "/var/named";
+};
+view "_default" {
+	zone "myip.gr" {
+		type master;
+		file "/var/named/myip.gr.hosts";
+		update-policy { grant acme-key name _acme-challenge.myip.gr. TXT; };
+	};
+	zone "ddns.myip.gr" {
+		type master;
+		file "dynamic/ddns.myip.gr.hosts";
+		update-policy { grant ddns-update wildcard *.ddns.myip.gr. A AAAA; };
+	};
+	zone "static.example" {
+		type master;
+		file "static.hosts";
+	};
+};
+key "acme-key" { algorithm hmac-sha256; secret "a="; };
+key "ddns-update" { algorithm hmac-sha256; secret "b="; };
+`
+	inv := Parse([]byte(d))
+	if inv.Directory != "/var/named" {
+		t.Fatalf("directory: %q", inv.Directory)
+	}
+	// absolute file stays as-is
+	myip := find(inv, "myip.gr")
+	if myip.Path != "/var/named/myip.gr.hosts" || myip.Kind() != "dynamic" {
+		t.Fatalf("myip: path=%q kind=%q", myip.Path, myip.Kind())
+	}
+	// relative file resolved against directory
+	ddns := find(inv, "ddns.myip.gr")
+	if ddns.Path != "/var/named/dynamic/ddns.myip.gr.hosts" {
+		t.Fatalf("ddns path: %q", ddns.Path)
+	}
+	// static (no update-policy) -> "static file"
+	st := find(inv, "static.example")
+	if st.Kind() != "static file" || st.Path != "/var/named/static.hosts" {
+		t.Fatalf("static: kind=%q path=%q", st.Kind(), st.Path)
+	}
+
+	// the EL journal foot-gun: myip.gr is dynamic with its file directly in
+	// /var/named (not dynamic/) -> warn; ddns.myip.gr under dynamic/ -> no warn.
+	var warnMyip, warnDdns bool
+	for _, f := range inv.Check("", "") {
+		if f.Severity == Warn && f.Zone == "myip.gr" && contains(f.Message, "journal") {
+			warnMyip = true
+		}
+		if f.Zone == "ddns.myip.gr" && contains(f.Message, "journal") {
+			warnDdns = true
+		}
+	}
+	if !warnMyip {
+		t.Error("expected a journal-location warning for myip.gr (file directly in /var/named)")
+	}
+	if warnDdns {
+		t.Error("ddns.myip.gr (under dynamic/) should NOT get the journal warning")
+	}
+}
+
+func TestFileStatus(t *testing.T) {
+	dir := t.TempDir()
+	if FileStatus("", false) != "" {
+		t.Fatal("empty path should be blank")
+	}
+	if FileStatus(dir+"/nope.hosts", false) != "missing" {
+		t.Fatal("nonexistent file should be 'missing'")
+	}
+	f := dir + "/z.hosts"
+	os.WriteFile(f, []byte("x"), 0o644)
+	if FileStatus(f, false) != "ok" {
+		t.Fatal("static existing file should be 'ok'")
+	}
+	if FileStatus(f, true) != "no journal yet" {
+		t.Fatal("dynamic file without .jnl should be 'no journal yet'")
+	}
+	os.WriteFile(f+".jnl", []byte("j"), 0o644)
+	if FileStatus(f, true) != "+journal" {
+		t.Fatal("dynamic file with .jnl should be '+journal'")
+	}
 }

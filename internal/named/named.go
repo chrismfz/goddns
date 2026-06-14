@@ -11,6 +11,7 @@ package named
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -19,10 +20,27 @@ import (
 type Zone struct {
 	Name        string   // trailing dot stripped
 	Type        string   // master, slave, forward, hint, stub, ...
-	File        string   // zone file path as configured
+	File        string   // zone file path as configured (may be relative)
+	Path        string   // File resolved against the directory option (absolute when possible)
 	Dynamic     bool     // accepts dynamic updates (update-policy or non-none allow-update)
 	UpdateKeys  []string // TSIG key names granted update rights
 	AllowUpdate string   // "policy", "none", "addresses/keys", or "" if unset
+}
+
+// Kind classifies the zone the way an operator thinks about it: a hand-edited
+// static file, a journal-managed dynamic zone, a slave, etc.
+func (z Zone) Kind() string {
+	switch z.Type {
+	case "master", "primary":
+		if z.Dynamic {
+			return "dynamic"
+		}
+		return "static file"
+	case "slave", "secondary":
+		return "slave"
+	default:
+		return z.Type
+	}
 }
 
 // Key is a TSIG key definition. Secret is captured for the optional match
@@ -35,8 +53,31 @@ type Key struct {
 
 // Inventory is the parsed, read-only view of the BIND config.
 type Inventory struct {
-	Zones []Zone
-	Keys  []Key
+	Directory string // the options { directory "..." } used to resolve relative zone files
+	Zones     []Zone
+	Keys      []Key
+}
+
+// FileStatus stats a zone file (best-effort; the daemon may lack read access).
+// Returns a short marker: "missing", "ok", "+journal", "static", or "" when
+// the path is unknown or unreadable.
+func FileStatus(path string, dynamic bool) string {
+	if path == "" {
+		return ""
+	}
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "missing" // named-checkconf lists it but the file isn't there
+		}
+		return "" // permission denied etc. — say nothing rather than mislead
+	}
+	if dynamic {
+		if _, err := os.Stat(path + ".jnl"); err == nil {
+			return "+journal"
+		}
+		return "no journal yet"
+	}
+	return "ok"
 }
 
 // Severity of a Finding.

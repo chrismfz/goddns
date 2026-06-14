@@ -50,18 +50,23 @@ func cmdZones(args []string) {
 		zones = inv.UserZones()
 	}
 
+	if inv.Directory != "" {
+		fmt.Printf("directory: %s\n\n", inv.Directory)
+	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ZONE\tTYPE\tDYNAMIC\tKEY(S)")
+	fmt.Fprintln(w, "ZONE\tKIND\tFILE\tKEY(S)")
 	for _, z := range zones {
-		dyn := "-"
-		if z.Dynamic {
-			dyn = "yes"
-		}
 		keys := strings.Join(z.UpdateKeys, ", ")
 		if keys == "" {
 			keys = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", z.Name, z.Type, dyn, keys)
+		file := z.Path
+		if file == "" {
+			file = "-"
+		} else if st := named.FileStatus(z.Path, z.Dynamic); st != "" {
+			file += " (" + st + ")"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", z.Name, z.Kind(), file, keys)
 	}
 	w.Flush()
 	if !*all {

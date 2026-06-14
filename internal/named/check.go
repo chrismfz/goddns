@@ -1,6 +1,9 @@
 package named
 
-import "crypto/subtle"
+import (
+	"crypto/subtle"
+	"strings"
+)
 
 // Check cross-checks the inventory for the common DDNS foot-guns and, when
 // goddns's own TSIG name/secret are supplied, whether they match a key in
@@ -21,6 +24,16 @@ func (inv *Inventory) Check(goddnsTSIGName, goddnsTSIGSecret string) []Finding {
 		if z.Dynamic && len(z.UpdateKeys) == 0 {
 			f = append(f, Finding{Warn, z.Name,
 				"is dynamic via IP allow-update only (no TSIG key) — anyone from those IPs can update it"})
+		}
+		// Predict the EL journal foot-gun: a dynamic zone whose file sits
+		// directly in the BIND directory (not a writable subdir like
+		// dynamic/) often can't create its .jnl on EL, where /var/named is
+		// root:named and not group-writable.
+		if z.Dynamic && (z.Type == "master" || z.Type == "primary") &&
+			z.Path != "" && inv.Directory != "" &&
+			dirOf(z.Path) == strings.TrimRight(inv.Directory, "/") {
+			f = append(f, Finding{Warn, z.Name,
+				"dynamic zone file is directly in " + inv.Directory + " — on EL the journal often can't be created there; conventionally dynamic zone files live under " + strings.TrimRight(inv.Directory, "/") + "/dynamic/"})
 		}
 	}
 
@@ -62,4 +75,12 @@ func (inv *Inventory) Check(goddnsTSIGName, goddnsTSIGSecret string) []Finding {
 		}
 	}
 	return f
+}
+
+// dirOf returns the directory portion of a path (no trailing slash).
+func dirOf(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return ""
 }
