@@ -306,7 +306,12 @@ NS set? do in-zone nameservers have glue?). `-check` (and the "check nameservers
 link in the admin page) adds the live probe: it queries every apex nameserver
 directly for the zone's SOA and reports which serial each one serves — so a
 secondary stuck on an old serial (the classic propagation foot-gun) shows up at
-a glance instead of via manual `dig`.
+a glance instead of via manual `dig`. The nameservers are probed concurrently
+with short timeouts. In-zone nameservers are reached via their glue; an
+out-of-zone nameserver without glue is resolved through the configured
+`dns_server`, so on a pure authoritative host (no recursion) such a nameserver
+may show "no address" — point `dns_server` at a recursive resolver if you need
+those resolved.
 
 This reads the **live** zone straight from BIND over **AXFR** (zone transfer),
 so for a dynamic zone you see the journal-merged contents — exactly what the

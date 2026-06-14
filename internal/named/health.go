@@ -3,6 +3,7 @@ package named
 import (
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -107,44 +108,65 @@ func CheckDelegation(zone string, rrs []dns.RR) []Finding {
 // stuck on an old serial (the classic propagation foot-gun). Read-only.
 func CheckNameservers(zone string, rrs []dns.RR, resolver string) []NSCheck {
 	idx := addressIndex(rrs)
-	var out []NSCheck
-	for _, nsName := range apexNS(zone, rrs) {
-		c := NSCheck{Name: nsName}
-		addrs := idx[nsName]
-		if len(addrs) == 0 && resolver != "" {
-			addrs = resolveHost(nsName, resolver)
-		}
-		c.Addrs = addrs
-		if len(addrs) == 0 {
-			c.Note = "no address (couldn't resolve)"
-			out = append(out, c)
+	names := apexNS(zone, rrs)
+	// Probe nameservers concurrently so the wall clock is ~the slowest single
+	// server, not the sum — a request can't be made to hang for K×timeout by
+	// several slow/blackholing nameservers.
+	out := make([]NSCheck, len(names))
+	var wg sync.WaitGroup
+	for i, nsName := range names {
+		wg.Add(1)
+		go func(i int, nsName string) {
+			defer wg.Done()
+			out[i] = probeNS(zone, nsName, idx[nsName], resolver)
+		}(i, nsName)
+	}
+	wg.Wait()
+	return out
+}
+
+// probeNS resolves one nameserver (in-zone glue first, else via resolver) and
+// queries it for the zone SOA. At most a few addresses are tried so a server
+// with many dead addresses can't burn the whole budget.
+func probeNS(zone, nsName string, glue []string, resolver string) NSCheck {
+	c := NSCheck{Name: nsName}
+	addrs := glue
+	if len(addrs) == 0 && resolver != "" {
+		addrs = resolveHost(nsName, resolver)
+	}
+	c.Addrs = addrs
+	if len(addrs) == 0 {
+		c.Note = "no address (couldn't resolve)"
+		return c
+	}
+	if len(addrs) > 3 {
+		addrs = addrs[:3]
+	}
+	for _, a := range addrs {
+		serial, aa, err := probeSOA(zone, a)
+		if err != nil {
+			c.Note = "unreachable"
 			continue
 		}
-		for _, a := range addrs {
-			serial, aa, err := probeSOA(zone, a)
-			if err != nil {
-				c.Note = "unreachable"
-				continue
-			}
-			c.Serial, c.AA = serial, aa
-			switch {
-			case !aa:
-				c.Note = "not authoritative (lame delegation?)"
-			case serial == 0:
-				c.Note = "no SOA in answer"
-			default:
-				c.OK = true
-				c.Note = ""
-			}
-			break
+		c.Serial, c.AA = serial, aa
+		switch {
+		case !aa:
+			c.Note = "not authoritative (lame delegation?)"
+		case serial == 0:
+			c.Note = "no SOA in answer"
+		default:
+			c.OK = true
+			c.Note = ""
 		}
-		out = append(out, c)
+		break
 	}
-	return out
+	return c
 }
 
 // SerialsAgree reports whether all reachable, authoritative nameservers serve
 // the same SOA serial, and returns the distinct serials seen (serial -> count).
+// Note: with zero reachable nameservers it returns true with an empty map;
+// callers should treat len(seen)==0 as "nobody answered", not as agreement.
 func SerialsAgree(checks []NSCheck) (bool, map[uint32]int) {
 	seen := map[uint32]int{}
 	for _, c := range checks {
@@ -158,7 +180,7 @@ func SerialsAgree(checks []NSCheck) (bool, map[uint32]int) {
 // resolveHost recursively resolves a hostname's A/AAAA via resolver (used only
 // for out-of-zone nameservers that have no glue in the zone).
 func resolveHost(name, resolver string) []string {
-	c := &dns.Client{Timeout: 4 * time.Second}
+	c := &dns.Client{Timeout: 2 * time.Second}
 	var addrs []string
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		m := new(dns.Msg)
@@ -183,13 +205,22 @@ func resolveHost(name, resolver string) []string {
 // probeSOA queries addr directly (non-recursive) for the zone SOA and returns
 // the serial and whether the answer was authoritative.
 func probeSOA(zone, addr string) (uint32, bool, error) {
-	c := &dns.Client{Timeout: 4 * time.Second}
+	c := &dns.Client{Timeout: 2 * time.Second}
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
 	m.RecursionDesired = false
 	resp, _, err := c.Exchange(m, withPort(addr))
 	if err != nil || resp == nil {
 		return 0, false, errUnreachable
+	}
+	// A truncated UDP answer (e.g. a DNSSEC-signed SOA) would otherwise look
+	// like "no SOA" — retry over TCP so a healthy signed secondary isn't
+	// falsely reported as a mismatch.
+	if resp.Truncated {
+		c.Net = "tcp"
+		if r2, _, err2 := c.Exchange(m, withPort(addr)); err2 == nil && r2 != nil {
+			resp = r2
+		}
 	}
 	var serial uint32
 	for _, rr := range resp.Answer {
