@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
@@ -104,6 +105,27 @@ func main() {
 	}
 }
 
+// healDBOwnership keeps the SQLite files owned by the data dir's owner (the
+// goddns service user). Running the CLI as root otherwise leaves the WAL/SHM
+// files root-owned, after which the unprivileged daemon can't persist
+// last-seen updates. No-op unless we're root and can chown.
+func healDBOwnership(dbPath string) {
+	if os.Geteuid() != 0 {
+		return
+	}
+	fi, err := os.Stat(filepath.Dir(dbPath))
+	if err != nil {
+		return
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		_ = os.Chown(dbPath+suffix, int(st.Uid), int(st.Gid))
+	}
+}
+
 func openStore(cfg *config.Config) *store.Store {
 	if err := os.MkdirAll(filepath.Dir(cfg.DBPath), 0o750); err != nil {
 		fatal("create db dir: %v", err)
@@ -133,6 +155,8 @@ func cmdToken(args []string) {
 		fatal("%v", err)
 	}
 	st := openStore(cfg)
+	// LIFO: Close first, then heal ownership of the (now-flushed) db files.
+	defer healDBOwnership(cfg.DBPath)
 	defer st.Close()
 
 	switch sub {

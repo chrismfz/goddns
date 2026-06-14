@@ -114,7 +114,16 @@ func (s *Server) doUpdate(rec store.Record, ip net.IP) (changed bool, err error)
 	if err := s.Backend().Update(rec.FQDN, rec.Zone, ip, rec.TTL); err != nil {
 		return false, err
 	}
-	_ = s.Store.MarkUpdated(rec.ID, ip.String())
+	// The DNS update succeeded; persist last-seen for the dashboard/CLI.
+	// A failure here is NOT fatal (DNS is already updated) but must be
+	// surfaced: a silent write failure (e.g. a root-owned WAL when the
+	// daemon runs as goddns) leaves the record permanently "changed", so
+	// every poll re-writes DNS and the dashboard shows stale "never".
+	if err := s.Store.MarkUpdated(rec.ID, ip.String()); err != nil {
+		log.Printf("warning: DNS updated but could not persist last-seen for %s "+
+			"(dashboard will show stale data; check /var/lib/goddns ownership — the "+
+			"daemon runs as the goddns user): %v", rec.FQDN, err)
+	}
 	return true, nil
 }
 
