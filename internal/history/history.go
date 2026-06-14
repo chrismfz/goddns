@@ -117,7 +117,15 @@ func (p *Poller) capture(z named.Zone, inv *named.Inventory, server, tsigName st
 	if !ok {
 		return
 	}
-	if latest, has, err := p.Store.SnapshotLatest(z.Name); err == nil && has && latest.Serial == serial {
+	latest, has, err := p.Store.SnapshotLatest(z.Name)
+	if err != nil {
+		// Don't fall through to capture on a read error (e.g. a transient
+		// "database is locked"): that would AXFR + write every cycle and
+		// amplify the very contention that caused the error.
+		log.Printf("history: read latest %s: %v", z.Name, err)
+		return
+	}
+	if has && latest.Serial == serial {
 		return // unchanged since the last snapshot
 	}
 	records, _, err := named.TransferAuto(z.Name, server, inv.AXFRKeys(&z, tsigName))

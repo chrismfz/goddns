@@ -38,10 +38,18 @@ func (s *Store) SnapshotByID(id int64) (Snapshot, bool, error) {
 }
 
 // SnapshotPut stores a new snapshot for zone and prunes the zone's history to
-// at most keep rows (keep<=0 means unlimited). Returns the new row id.
+// at most keep rows (keep<=0 means unlimited). The insert and prune run in one
+// transaction so a concurrent reader never sees keep+1 rows and the write lock
+// is taken once. Returns the new row id.
 func (s *Store) SnapshotPut(zone string, serial uint32, content string, keep int) (int64, error) {
 	z := snapZone(zone)
-	res, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	res, err := tx.Exec(
 		`INSERT INTO snapshots (zone, serial, taken_at, content) VALUES (?,?,?,?)`,
 		z, serial, time.Now().Unix(), content)
 	if err != nil {
@@ -50,10 +58,15 @@ func (s *Store) SnapshotPut(zone string, serial uint32, content string, keep int
 	id, _ := res.LastInsertId()
 	if keep > 0 {
 		// Delete everything older than the newest `keep` rows for this zone.
-		_, _ = s.db.Exec(
+		if _, err := tx.Exec(
 			`DELETE FROM snapshots WHERE zone=? AND id NOT IN
 			 (SELECT id FROM snapshots WHERE zone=? ORDER BY id DESC LIMIT ?)`,
-			z, z, keep)
+			z, z, keep); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return id, nil
 }

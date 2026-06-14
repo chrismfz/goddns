@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"io"
@@ -55,9 +56,19 @@ func cmdZoneHistory(name, cfgPath string, list bool) {
 		fmt.Printf("need at least two snapshots of %s to diff (have %d)\n", name, len(snaps))
 		return
 	}
-	newer, _, _ := st.SnapshotByID(snaps[0].ID)
-	older, _, _ := st.SnapshotByID(snaps[1].ID)
+	newer, okN, errN := st.SnapshotByID(snaps[0].ID)
+	older, okO, errO := st.SnapshotByID(snaps[1].ID)
+	if errN != nil || errO != nil {
+		fatal("history: %v", cmp.Or(errN, errO))
+	}
+	if !okN || !okO {
+		fmt.Println("snapshots changed while reading (pruned concurrently) — try again")
+		return
+	}
 	added, removed := history.Diff(older.Content, newer.Content)
+	// The SOA serial bumps on every change, so its line always differs — drop
+	// it from the diff (the serial transition is already in the header).
+	added, removed = dropSOA(added), dropSOA(removed)
 	fmt.Printf("zone %s: serial %d → %d   (%s → %s)\n\n",
 		name, older.Serial, newer.Serial,
 		older.TakenAt.Format("2006-01-02 15:04"), newer.TakenAt.Format("2006-01-02 15:04"))
@@ -70,6 +81,18 @@ func cmdZoneHistory(name, cfgPath string, list bool) {
 	if len(added) == 0 && len(removed) == 0 {
 		fmt.Println("(no record changes between these two snapshots)")
 	}
+}
+
+// dropSOA removes SOA-record lines (the type is the 4th field: name TTL CLASS TYPE …).
+func dropSOA(lines []string) []string {
+	out := lines[:0:0]
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) >= 4 && f[3] == "SOA" {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
 }
 
 // cmdZone is the read-only per-zone viewer: it pulls the LIVE zone contents
