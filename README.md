@@ -312,9 +312,15 @@ one-time enablement covers every zone, in `options { }`:
     allow-transfer { key "ddns-update."; };
 
 goddns tries unauthenticated first, then falls back to the TSIG keys defined
-in named.conf automatically. If the transfer is refused, the command/page
-prints exactly what to add. goddns never edits named.conf — enabling the
-transfer is a deliberate one-line change you make yourself.
+in named.conf automatically (only when the server actually refuses, and
+bounded by a deadline). If the transfer is refused, the command/page prints
+exactly what to add. goddns never edits named.conf — enabling the transfer
+is a deliberate one-line change you make yourself.
+
+If a zone is **DNSSEC-signed**, the view flags it and the `-export` header
+warns: the dump includes RRSIG/DNSKEY/NSEC(3), which expire and are managed
+by BIND (inline-signing) — restore the unsigned source and let BIND re-sign
+rather than re-importing the signed records by hand.
 
 ## Logging
 

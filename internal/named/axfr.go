@@ -218,6 +218,23 @@ func SOAOf(rrs []dns.RR) *dns.SOA {
 	return nil
 }
 
+// Signed reports whether the transfer carries DNSSEC material and how many
+// such records there are (RRSIG/DNSKEY/NSEC/NSEC3/NSEC3PARAM/CDS/CDNSKEY). For
+// a signed zone these are normally generated and rotated by BIND itself
+// (inline-signing / auto-dnssec); they expire, so restoring them by hand from
+// an AXFR dump is usually wrong — the export header warns about this.
+func Signed(rrs []dns.RR) (bool, int) {
+	n := 0
+	for _, rr := range rrs {
+		switch rr.Header().Rrtype {
+		case dns.TypeRRSIG, dns.TypeDNSKEY, dns.TypeNSEC, dns.TypeNSEC3,
+			dns.TypeNSEC3PARAM, dns.TypeCDS, dns.TypeCDNSKEY:
+			n++
+		}
+	}
+	return n > 0, n
+}
+
 // SortZone orders records the way an operator reads a zone file: apex first,
 // then subdomains in hierarchical order; within a name SOA, then NS, then MX,
 // then the rest by type and rdata.

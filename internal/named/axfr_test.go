@@ -170,6 +170,19 @@ func TestSortZoneOrder(t *testing.T) {
 	}
 }
 
+func TestSigned(t *testing.T) {
+	if s, n := Signed(sampleZone(t)); s || n != 0 {
+		t.Fatalf("unsigned zone reported signed=%v count=%d", s, n)
+	}
+	signed := append(sampleZone(t)[:5],
+		mustRR(t, "myip.gr. 3600 IN DNSKEY 257 3 13 AwEAAa=="),
+		mustRR(t, "www.myip.gr. 60 IN RRSIG A 13 3 60 20260701000000 20260601000000 1234 myip.gr. abcd=="),
+	)
+	if s, n := Signed(signed); !s || n != 2 {
+		t.Fatalf("signed zone reported signed=%v count=%d, want true/2", s, n)
+	}
+}
+
 func TestZoneByName(t *testing.T) {
 	inv := &Inventory{Zones: []Zone{{Name: "myip.gr"}, {Name: "ddns.myip.gr"}}}
 	if z := inv.ZoneByName("MyIP.gr."); z == nil || z.Name != "myip.gr" {

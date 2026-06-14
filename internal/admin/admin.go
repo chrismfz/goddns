@@ -206,6 +206,10 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 		data["Serial"] = soa.Serial
 		data["Primary"] = strings.TrimSuffix(soa.Ns, ".")
 	}
+	if signed, n := named.Signed(records); signed {
+		data["Signed"] = true
+		data["SignedCount"] = n
+	}
 	render(w, zoneViewTmpl, data)
 }
 

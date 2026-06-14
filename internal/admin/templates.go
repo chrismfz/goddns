@@ -241,7 +241,8 @@ This page never edits BIND — it only reads.</div>
 <h2>{{.Name}}
 {{if .InConf}}{{if .Dynamic}}<span class="ok" style="font-size:.8rem">{{.Kind}}</span>{{else}}<span class="muted" style="font-size:.8rem">{{.Kind}}</span>{{end}}{{else}}<span class="muted" style="font-size:.8rem">(not in named.conf)</span>{{end}}</h2>
 <div class="card" style="font-size:.84rem">
-{{if .Serial}}<div>serial <b>{{.Serial}}</b>{{if .Primary}} &middot; primary {{.Primary}}{{end}} &middot; {{.Count}} records</div>{{else}}<div>{{.Count}} records</div>{{end}}
+{{if .Serial}}<div>serial <b>{{.Serial}}</b>{{if .Primary}} &middot; primary {{.Primary}}{{end}} &middot; {{.Count}} records{{if .Signed}} &middot; <span class="warn">DNSSEC-signed</span>{{end}}</div>{{else}}<div>{{.Count}} records</div>{{end}}
+{{if .Signed}}<div class="warn" style="margin-top:.3rem;font-size:.8rem">DNSSEC-signed ({{.SignedCount}} signing records). RRSIG/DNSKEY/NSEC are managed by BIND and expire — an <code>-export</code> dump of them is not a hand-restorable backup; restore the unsigned source and let BIND re-sign.</div>{{end}}
 {{if .InConf}}{{if .Dynamic}}<div class="ok" style="margin-top:.3rem">DYNAMIC — updated live{{if .Keys}} via key(s): {{.Keys}}{{end}}. The records below are journal-merged (what BIND actually serves), so you don't need to freeze/thaw to see them.</div>
 {{else}}<div class="muted" style="margin-top:.3rem">static — edited by hand in the zone file (nano &rarr; serial+1 &rarr; rndc reload).</div>{{end}}{{end}}
 </div>

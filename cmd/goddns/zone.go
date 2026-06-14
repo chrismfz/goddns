@@ -125,6 +125,14 @@ func writeExport(w io.Writer, name, server string, z *named.Zone, records []dns.
 	if soa := named.SOAOf(records); soa != nil {
 		fmt.Fprintf(w, "; serial %d, %d records\n", soa.Serial, len(records))
 	}
+	if signed, n := named.Signed(records); signed {
+		fmt.Fprintf(w, ";\n; *** DNSSEC-SIGNED ZONE (%d signing records) ***\n", n)
+		fmt.Fprint(w, "; This dump INCLUDES RRSIG/DNSKEY/NSEC(3) records. They expire and are\n")
+		fmt.Fprint(w, "; normally generated and rotated by BIND (inline-signing / auto-dnssec),\n")
+		fmt.Fprint(w, "; so restoring them by hand is usually WRONG: prefer restoring the\n")
+		fmt.Fprint(w, "; UNSIGNED source zone and letting BIND re-sign, or use dnssec tooling.\n")
+		fmt.Fprint(w, "; The signatures in this snapshot may already be near expiry.\n")
+	}
 	fmt.Fprint(w, ";\n; NOTE: this is a record snapshot. Comments / $ORIGIN / $INCLUDE / record\n")
 	fmt.Fprint(w, "; ordering from the original source file are NOT preserved (AXFR carries\n")
 	fmt.Fprint(w, "; records, not source text). It reloads cleanly as-is.\n;\n")
@@ -193,8 +201,12 @@ func printZoneHeader(name string, z *named.Zone, records []dns.RR) {
 	}
 	fmt.Printf("zone: %s   [%s]%s\n", name, kind, dyn)
 	if soa := named.SOAOf(records); soa != nil {
-		fmt.Printf("serial: %d   primary: %s   %d records\n\n", soa.Serial, strings.TrimSuffix(soa.Ns, "."), len(records))
+		fmt.Printf("serial: %d   primary: %s   %d records\n", soa.Serial, strings.TrimSuffix(soa.Ns, "."), len(records))
 	} else {
-		fmt.Printf("%d records\n\n", len(records))
+		fmt.Printf("%d records\n", len(records))
 	}
+	if signed, n := named.Signed(records); signed {
+		fmt.Printf("DNSSEC: signed (%d signing records — managed by BIND, not hand-restorable)\n", n)
+	}
+	fmt.Println()
 }
