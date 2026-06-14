@@ -448,7 +448,16 @@ hand-edited `goddns.conf` is never touched. The package installs a template at
 
     cp /etc/goddns/proxy.d/vhost.conf.example /etc/goddns/proxy.d/idrac.conf
     $EDITOR /etc/goddns/proxy.d/idrac.conf
-    systemctl reload goddns      # SIGHUP — re-reads goddns.conf + proxy.d/
+    # picked up automatically within reload_interval (~20s), or now:
+    systemctl reload goddns
+
+The reload poll watches `proxy.d/` as well as `goddns.conf`, so adding or
+editing a fragment is applied like an inline edit. A fragment that fails to
+parse or validate is rejected as a whole and the **running config is kept** —
+so a typo never takes the proxy (or DDNS) down on reload. One caveat: that
+all-or-nothing applies at **startup** too — a broken fragment will stop
+`goddns` from booting, so fix fragment errors via a reload (which keeps the old
+config live and logs the offending file) before relying on a restart.
 
 ### DNS + certificates for the proxied names
 

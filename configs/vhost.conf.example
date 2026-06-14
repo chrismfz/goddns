@@ -1,7 +1,8 @@
 # goddns proxy vhost fragment — a drop-in for /etc/goddns/proxy.d/
 #
-# Copy this to e.g. /etc/goddns/proxy.d/idrac.conf, edit, then reload goddns:
-#     systemctl reload goddns        # (sends SIGHUP; or: kill -HUP <pid>)
+# Copy this to e.g. /etc/goddns/proxy.d/idrac.conf and edit. The daemon's
+# reload poll watches proxy.d/, so the change is applied within reload_interval
+# (~20s) — or apply it now with:  systemctl reload goddns
 #
 # The daemon loads goddns.conf and then merges every proxy.d/*.conf fragment.
 # Rules:
