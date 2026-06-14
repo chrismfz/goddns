@@ -38,7 +38,10 @@ type Mutator interface {
 func (u *RFC2136) Apply(zone string, ops []Op) error {
 	m := new(dns.Msg)
 	m.SetUpdate(dns.Fqdn(zone))
-	for _, op := range ops {
+	for i, op := range ops {
+		if op.RR == nil {
+			return fmt.Errorf("ddns: op %d has a nil RR", i)
+		}
 		switch op.Action {
 		case AddRR:
 			m.Insert([]dns.RR{op.RR})
