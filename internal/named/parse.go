@@ -6,11 +6,14 @@ import (
 )
 
 var (
-	reType      = regexp.MustCompile(`(?m)\btype\s+([a-z-]+)\s*;`)
-	reFile      = regexp.MustCompile(`(?m)\bfile\s+"([^"]*)"`)
-	reAlgo      = regexp.MustCompile(`(?m)\balgorithm\s+([A-Za-z0-9-]+)\s*;`)
-	reSecret    = regexp.MustCompile(`(?m)\bsecret\s+"([^"]*)"`)
-	reGrant     = regexp.MustCompile(`(?m)\b(?:grant|deny)\s+(\S+)\s+`)
+	reType   = regexp.MustCompile(`(?m)\btype\s+([a-z-]+)\s*;`)
+	reFile   = regexp.MustCompile(`(?m)\bfile\s+"([^"]*)"`)
+	reAlgo   = regexp.MustCompile(`(?m)\balgorithm\s+([A-Za-z0-9-]+)\s*;`)
+	reSecret = regexp.MustCompile(`(?m)\bsecret\s+"([^"]*)"`)
+	// named-checkconf -p quotes the grant identity, e.g. grant "ddns-update."
+	// — capture the name without the surrounding quotes (the trailing dot is
+	// stripped separately).
+	reGrant     = regexp.MustCompile(`(?m)\b(?:grant|deny)\s+"?([^"\s]+)"?`)
 	reAllowKey  = regexp.MustCompile(`\bkey\s+"?([^";{}\s]+)"?`)
 	reDirectory = regexp.MustCompile(`(?m)^\s*directory\s+"([^"]*)"\s*;`)
 	rePolicyLcl = regexp.MustCompile(`(?m)\bupdate-policy\s+local\s*;`) // BIND shorthand, no brace block

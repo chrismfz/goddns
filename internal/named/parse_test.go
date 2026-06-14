@@ -18,15 +18,15 @@ view "_default" {
 			"none";
 		};
 		update-policy {
-			grant acme-key name _acme-challenge.myip.gr. TXT;
-			grant ddns-update wildcard *.ddns.myip.gr. A AAAA;
+			grant "acme-key" name "_acme-challenge.myip.gr." TXT;
+			grant "ddns-update." wildcard "*.ddns.myip.gr." A AAAA;
 		};
 	};
 	zone "ddns.myip.gr" {
 		type master;
 		file "dynamic/ddns.myip.gr.hosts";
 		update-policy {
-			grant ddns-update wildcard *.ddns.myip.gr. A AAAA;
+			grant "ddns-update." wildcard "*.ddns.myip.gr." A AAAA;
 		};
 	};
 	zone "legacy.example" {
@@ -40,7 +40,7 @@ view "_default" {
 		type master;
 		file "/var/named/broken.hosts";
 		update-policy {
-			grant ghost-key name x.broken.example. A;
+			grant "ghost-key" name "x.broken.example." A;
 		};
 	};
 	zone "10.in-addr.arpa" {
@@ -328,5 +328,57 @@ view "_default" {
 	}
 	if plain == nil || plain.Name != "plain.example" {
 		t.Fatalf("plain (default view tagged ''): %+v", plain)
+	}
+}
+
+// TestQuotedGrantIdentity reproduces the real `named-checkconf -p` form: the
+// grant identity is quoted, and may carry a trailing dot. Both must be
+// stripped so it matches the (unquoted, dotless) key definition.
+func TestQuotedGrantIdentity(t *testing.T) {
+	d := `
+view "_default" {
+	zone "myip.gr" {
+		type master;
+		file "/var/named/myip.gr.hosts";
+		update-policy {
+			grant "acme-key" name "_acme-challenge.myip.gr." TXT;
+		};
+	};
+	zone "ddns.myip.gr" {
+		type master;
+		file "dynamic/ddns.myip.gr.hosts";
+		update-policy {
+			grant "ddns-update." wildcard "*.ddns.myip.gr." A AAAA;
+		};
+	};
+};
+key "acme-key" { algorithm hmac-sha256; secret "a="; };
+key "ddns-update" { algorithm hmac-sha256; secret "X1Pl="; };
+`
+	inv := Parse([]byte(d))
+	myip := find(inv, "myip.gr")
+	if myip == nil || len(myip.UpdateKeys) != 1 || myip.UpdateKeys[0] != "acme-key" {
+		t.Fatalf("quoted identity not stripped: %+v", myip)
+	}
+	ddns := find(inv, "ddns.myip.gr")
+	if ddns == nil || len(ddns.UpdateKeys) != 1 || ddns.UpdateKeys[0] != "ddns-update" {
+		t.Fatalf("quoted+dotted identity not normalised: %+v", ddns)
+	}
+	// the keys ARE defined -> no "not defined" error, and the goddns key
+	// matches AND is granted -> an OK finding (not the bogus REFUSED warning).
+	var sawNotDefined, sawOK bool
+	for _, f := range inv.Check("ddns-update.", "X1Pl=") {
+		if f.Severity == Error && contains(f.Message, "not defined") {
+			sawNotDefined = true
+		}
+		if f.Severity == OK {
+			sawOK = true
+		}
+	}
+	if sawNotDefined {
+		t.Error("false 'key not defined' error on quoted grant identity")
+	}
+	if !sawOK {
+		t.Error("expected OK: goddns key matches and is granted")
 	}
 }
