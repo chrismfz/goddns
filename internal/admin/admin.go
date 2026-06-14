@@ -180,7 +180,7 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 	}
 	z := inv.ZoneByName(name)
 
-	records, err := named.TransferAuto(name, server, inv.AXFRKeys(z, cfg.TSIGName))
+	records, auth, err := named.TransferAuto(name, server, inv.AXFRKeys(z, cfg.TSIGName))
 	if err != nil {
 		render(w, zoneViewTmpl, map[string]any{
 			"Version": h.version, "User": user, "Name": name, "Error": err.Error(),
@@ -195,7 +195,7 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 	}
 	data := map[string]any{
 		"Version": h.version, "User": user, "Name": name,
-		"InConf": z != nil, "Records": rows, "Count": len(records),
+		"InConf": z != nil, "Records": rows, "Count": len(records), "Auth": auth,
 	}
 	if z != nil {
 		data["Kind"] = z.Kind()

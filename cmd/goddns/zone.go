@@ -70,7 +70,7 @@ func cmdZone(args []string) {
 	}
 	z := inv.ZoneByName(name)
 
-	records, err := transfer(inv, z, name, srv, tsigName, *keyName)
+	records, auth, err := transfer(inv, z, name, srv, tsigName, *keyName)
 	if err != nil {
 		fatal("%v\n\nIf this is REFUSED, allow the transfer on the server, e.g. in the zone or options:\n  allow-transfer { localhost; };   (goddns runs locally)\nor force a key with -key <name>.", err)
 	}
@@ -78,11 +78,11 @@ func cmdZone(args []string) {
 	named.SortZone(records)
 
 	if *export {
-		writeExport(os.Stdout, name, srv, z, records)
+		writeExport(os.Stdout, name, srv, auth, z, records)
 		return
 	}
 
-	printZoneHeader(name, z, records)
+	printZoneHeader(name, auth, z, records)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(w, "NAME\tTTL\tTYPE\tDATA")
@@ -94,15 +94,16 @@ func cmdZone(args []string) {
 
 // transfer picks the authentication path: a forced key, or the automatic
 // fallback (unauthenticated, then each candidate key from named.conf).
-func transfer(inv *named.Inventory, z *named.Zone, name, server, goddnsKey, forceKey string) ([]dns.RR, error) {
+func transfer(inv *named.Inventory, z *named.Zone, name, server, goddnsKey, forceKey string) ([]dns.RR, string, error) {
 	if forceKey != "" {
 		want := strings.TrimSuffix(forceKey, ".")
 		for _, k := range inv.Keys {
 			if k.Name == want {
-				return named.Transfer(name, server, &named.TSIGKey{Name: k.Name, Algo: k.Algorithm, Secret: k.Secret})
+				rrs, err := named.Transfer(name, server, &named.TSIGKey{Name: k.Name, Algo: k.Algorithm, Secret: k.Secret})
+				return rrs, `key "` + k.Name + `"`, err
 			}
 		}
-		return nil, fmt.Errorf("key %q not found in named.conf", forceKey)
+		return nil, "", fmt.Errorf("key %q not found in named.conf", forceKey)
 	}
 	return named.TransferAuto(name, server, inv.AXFRKeys(z, goddnsKey))
 }
@@ -113,15 +114,15 @@ func transfer(inv *named.Inventory, z *named.Zone, name, server, goddnsKey, forc
 // re-imports, and the safe procedure differs for dynamic vs static zones.
 // The header is all comments (lines starting with ';'), so the file still
 // loads cleanly as a zone file.
-func writeExport(w io.Writer, name, server string, z *named.Zone, records []dns.RR) {
+func writeExport(w io.Writer, name, server, auth string, z *named.Zone, records []dns.RR) {
 	path := "/var/named/" + name + ".hosts"
 	if z != nil && z.Path != "" {
 		path = z.Path
 	}
 
 	fmt.Fprintf(w, "; goddns export of zone %s\n", name)
-	fmt.Fprintf(w, "; taken %s from %s via AXFR (live; for a dynamic zone this is journal-merged)\n",
-		time.Now().UTC().Format(time.RFC3339), server)
+	fmt.Fprintf(w, "; taken %s from %s via AXFR (%s; for a dynamic zone this is journal-merged)\n",
+		time.Now().UTC().Format(time.RFC3339), server, auth)
 	if soa := named.SOAOf(records); soa != nil {
 		fmt.Fprintf(w, "; serial %d, %d records\n", soa.Serial, len(records))
 	}
@@ -185,7 +186,7 @@ func writeDynamicRestore(w io.Writer, name, path string) {
 
 // printZoneHeader writes the one-line summary: zone kind, dynamic status, the
 // update keys, and the SOA serial — the "is this dynamic?" answer up front.
-func printZoneHeader(name string, z *named.Zone, records []dns.RR) {
+func printZoneHeader(name, auth string, z *named.Zone, records []dns.RR) {
 	kind, dyn := "(not in named.conf)", ""
 	if z != nil {
 		kind = z.Kind()
@@ -208,5 +209,5 @@ func printZoneHeader(name string, z *named.Zone, records []dns.RR) {
 	if signed, n := named.Signed(records); signed {
 		fmt.Printf("DNSSEC: signed (%d signing records — managed by BIND, not hand-restorable)\n", n)
 	}
-	fmt.Println()
+	fmt.Printf("transfer: %s\n\n", auth)
 }

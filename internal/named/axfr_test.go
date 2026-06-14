@@ -115,12 +115,26 @@ func TestTransferTSIG(t *testing.T) {
 func TestTransferAutoFallsBackToKey(t *testing.T) {
 	addr := startAXFRServer(t, &axfrHandler{records: sampleZone(t), requireTSIG: true})
 	keys := []TSIGKey{{Name: axfrKeyName, Algo: "hmac-sha256", Secret: axfrSecret}}
-	rrs, err := TransferAuto("myip.gr", addr, keys)
+	rrs, auth, err := TransferAuto("myip.gr", addr, keys)
 	if err != nil {
 		t.Fatalf("auto transfer: %v", err)
 	}
 	if len(rrs) != 5 {
 		t.Fatalf("got %d records, want 5", len(rrs))
+	}
+	if auth != `key "ddns-update"` {
+		t.Fatalf("auth label = %q, want key \"ddns-update\"", auth)
+	}
+}
+
+func TestTransferAutoUnauthenticatedLabel(t *testing.T) {
+	addr := startAXFRServer(t, &axfrHandler{records: sampleZone(t)})
+	_, auth, err := TransferAuto("myip.gr", addr, nil)
+	if err != nil {
+		t.Fatalf("auto transfer: %v", err)
+	}
+	if auth != "unauthenticated" {
+		t.Fatalf("auth label = %q, want unauthenticated", auth)
 	}
 }
 

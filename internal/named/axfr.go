@@ -104,10 +104,12 @@ func Transfer(zone, server string, key *TSIGKey) ([]dns.RR, error) {
 // candidate key in turn. It returns the records from the first method that
 // works, or the original (unauthenticated) error — which is the most useful
 // one to show ("REFUSED" → tell the operator to allow-transfer).
-func TransferAuto(zone, server string, keys []TSIGKey) ([]dns.RR, error) {
+// It also returns a human label for the method that worked ("unauthenticated"
+// or `key "<name>"`), for display/troubleshooting.
+func TransferAuto(zone, server string, keys []TSIGKey) ([]dns.RR, string, error) {
 	rrs, firstErr := Transfer(zone, server, nil)
 	if firstErr == nil {
-		return rrs, nil
+		return rrs, "unauthenticated", nil
 	}
 	// Only fall back to keys if the server ANSWERED and refused (REFUSED/
 	// NOTAUTH come back as an xfr rcode). A dial/timeout error means we never
@@ -115,7 +117,7 @@ func TransferAuto(zone, server string, keys []TSIGKey) ([]dns.RR, error) {
 	// fanning out one connection per key. Bound the whole fallback by a wall
 	// clock so a slow server can't stack (K+1) full timeouts on one request.
 	if !serverRefused(firstErr) {
-		return nil, firstErr
+		return nil, "", firstErr
 	}
 	deadline := time.Now().Add(20 * time.Second)
 	for i := range keys {
@@ -123,10 +125,10 @@ func TransferAuto(zone, server string, keys []TSIGKey) ([]dns.RR, error) {
 			break
 		}
 		if rrs, err := Transfer(zone, server, &keys[i]); err == nil {
-			return rrs, nil
+			return rrs, `key "` + strings.TrimSuffix(keys[i].Name, ".") + `"`, nil
 		}
 	}
-	return nil, firstErr
+	return nil, "", firstErr
 }
 
 // serverRefused reports whether err is a transfer the server actively rejected

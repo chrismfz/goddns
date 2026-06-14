@@ -253,7 +253,7 @@ This page never edits BIND — it only reads.</div>
 <td>{{.Type}}</td><td style="word-break:break-all">{{.Data}}</td>
 </tr>{{else}}<tr><td colspan="4" class="muted">(no records)</td></tr>{{end}}
 </tbody></table>
-<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR. CLI: <code>goddns zone {{.Name}}</code> (add <code>-export</code> for a backup snapshot). Read-only.</div>
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR ({{.Auth}}). CLI: <code>goddns zone {{.Name}}</code> (add <code>-export</code> for a backup snapshot). Read-only.</div>
 {{end}}
 </main></body></html>{{end}}
 
