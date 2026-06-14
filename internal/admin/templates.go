@@ -254,6 +254,28 @@ This page never edits BIND — it only reads.</div>
 </tr>{{else}}<tr><td colspan="4" class="muted">(no records)</td></tr>{{end}}
 </tbody></table>
 <div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR ({{.Auth}}). CLI: <code>goddns zone {{.Name}}</code> (add <code>-export</code> for a backup snapshot). Read-only.</div>
+
+<h2>SOA / NS checks</h2>
+<div class="card">
+{{range .Delegation}}<div class="{{if eq .Class "ok"}}ok{{else if eq .Class "error"}}err{{else if eq .Class "warn"}}warn{{else}}muted{{end}}" style="padding:.15rem 0">{{.Mark}} {{.Message}}</div>
+{{else}}<div class="muted">(no NS findings)</div>{{end}}
+</div>
+
+{{if .Checked}}
+<h2>nameservers <span class="muted">(live)</span></h2>
+<table><thead><tr><th>NS</th><th>address</th><th>serial</th><th>status</th></tr></thead><tbody>
+{{range .NS}}<tr>
+<td>{{.Name}}</td><td class="muted">{{if .Addr}}{{.Addr}}{{else}}—{{end}}</td>
+<td>{{if .Serial}}{{.Serial}}{{else}}<span class="muted">—</span>{{end}}</td>
+<td>{{if .OK}}<span class="ok">ok</span>{{else}}<span class="warn">{{if .Note}}{{.Note}}{{else}}?{{end}}</span>{{end}}</td>
+</tr>{{else}}<tr><td colspan="4" class="muted">(no nameservers)</td></tr>{{end}}
+</tbody></table>
+{{if .NoAuth}}<div class="warn" style="margin-top:.3rem">⚠ no nameserver answered authoritatively</div>
+{{else if .Agree}}<div class="ok" style="margin-top:.3rem">✓ all nameservers agree on the serial</div>
+{{else}}<div class="err" style="margin-top:.3rem">✗ serial MISMATCH across nameservers — a secondary is out of sync</div>{{end}}
+{{else}}
+<p style="margin-top:.6rem"><a href="/zone?name={{.Name}}&amp;check=1">▸ check nameservers live (probe each NS for the serial it serves)</a></p>
+{{end}}
 {{end}}
 </main></body></html>{{end}}
 

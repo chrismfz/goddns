@@ -152,6 +152,11 @@ type rrRow struct {
 	Name, Type, Data string
 	TTL              uint32
 }
+type nsRow struct {
+	Name, Addr, Note string
+	Serial           uint32
+	OK               bool
+}
 
 // handleZone is the read-only per-zone viewer: it pulls the LIVE records from
 // BIND via AXFR (journal-merged) so the operator sees exactly what the server
@@ -209,6 +214,32 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 	if signed, n := named.Signed(records); signed {
 		data["Signed"] = true
 		data["SignedCount"] = n
+	}
+
+	// Tier 1: offline SOA-vs-NS checks (always, no network).
+	mark := map[named.Severity]string{named.OK: "✓", named.Info: "·", named.Warn: "⚠", named.Error: "✗"}
+	var dr []findRow
+	for _, f := range named.CheckDelegation(name, records) {
+		dr = append(dr, findRow{Mark: mark[f.Severity], Class: f.Severity.String(), Message: f.Message})
+	}
+	data["Delegation"] = dr
+
+	// Tier 2: live per-nameserver SOA probe (only on demand — N DNS queries).
+	if r.URL.Query().Get("check") == "1" {
+		checks := named.CheckNameservers(name, records, server)
+		var nsr []nsRow
+		for _, c := range checks {
+			addr := ""
+			if len(c.Addrs) > 0 {
+				addr = c.Addrs[0]
+			}
+			nsr = append(nsr, nsRow{Name: c.Name, Addr: addr, Serial: c.Serial, OK: c.OK, Note: c.Note})
+		}
+		agree, seen := named.SerialsAgree(checks)
+		data["Checked"] = true
+		data["NS"] = nsr
+		data["Agree"] = agree && len(seen) == 1
+		data["NoAuth"] = len(seen) == 0
 	}
 	render(w, zoneViewTmpl, data)
 }

@@ -33,6 +33,7 @@ func cmdZone(args []string) {
 	server := fs.String("server", "", "DNS server to AXFR from (default: dns_server from goddns.conf)")
 	keyName := fs.String("key", "", "force a specific named.conf TSIG key for the transfer")
 	export := fs.Bool("export", false, "print a zone-file snapshot (loadable backup) instead of a table")
+	check := fs.Bool("check", false, "also probe each apex nameserver live for the SOA serial they serve")
 	fs.Parse(args)
 	if name == "" {
 		name = fs.Arg(0)
@@ -90,6 +91,63 @@ func cmdZone(args []string) {
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\n", row.Name, row.TTL, row.Type, row.Data)
 	}
 	w.Flush()
+
+	printChecks(name, srv, records, *check)
+}
+
+// printChecks renders the Tier 1 (offline SOA-vs-NS) findings always, and the
+// Tier 2 (live per-nameserver SOA serial) probe when requested.
+func printChecks(name, resolver string, records []dns.RR, live bool) {
+	mark := map[named.Severity]string{named.OK: "✓", named.Info: "·", named.Warn: "⚠", named.Error: "✗"}
+	fmt.Println("\nSOA / NS checks:")
+	for _, f := range named.CheckDelegation(name, records) {
+		fmt.Printf("  %s %s\n", mark[f.Severity], f.Message)
+	}
+	if !live {
+		fmt.Println("  (add -check to probe each nameserver's live serial)")
+		return
+	}
+
+	checks := named.CheckNameservers(name, records, resolver)
+	if len(checks) == 0 {
+		return
+	}
+	fmt.Println("\nNameservers (live):")
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "  NS\tADDRESS\tSERIAL\tSTATUS")
+	for _, c := range checks {
+		addr, serial, status := "-", "-", "ok"
+		if len(c.Addrs) > 0 {
+			addr = c.Addrs[0]
+		}
+		if c.Serial != 0 {
+			serial = fmt.Sprintf("%d", c.Serial)
+		}
+		if !c.OK {
+			if status = c.Note; status == "" {
+				status = "?"
+			}
+		}
+		fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", c.Name, addr, serial, status)
+	}
+	w.Flush()
+
+	agree, seen := named.SerialsAgree(checks)
+	switch {
+	case len(seen) == 0:
+		fmt.Println("  ⚠ no nameserver answered authoritatively")
+	case agree:
+		for s := range seen {
+			fmt.Printf("  ✓ all nameservers agree on serial %d\n", s)
+		}
+	default:
+		fmt.Println("  ✗ SERIAL MISMATCH across nameservers:")
+		for _, c := range checks {
+			if c.OK {
+				fmt.Printf("      %s → %d\n", c.Name, c.Serial)
+			}
+		}
+	}
 }
 
 // transfer picks the authentication path: a forced key, or the automatic
