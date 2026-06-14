@@ -36,7 +36,8 @@ Usage:
   goddns token del  -fqdn home.myip.gr [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth
   goddns zones [-check]                        # read-only: zones, dynamic, TSIG health (-check: NS serials)
-  goddns zone home.myip.gr [-export]           # read-only: live records via AXFR (+ backup)
+  goddns zone home.myip.gr [-export|-check]    # read-only: live records via AXFR (+ backup, NS serials)
+  goddns zone myip.gr -history | -diff         # zone snapshot history / what changed last
   goddns version
 `, Version, defaultConf)
 }

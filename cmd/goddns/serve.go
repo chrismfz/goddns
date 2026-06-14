@@ -22,6 +22,7 @@ import (
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filewatch"
+	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/proxy"
 	"github.com/chrismfz/goddns/internal/server"
 	"github.com/chrismfz/goddns/internal/tlsmgr"
@@ -124,6 +125,10 @@ func cmdServe(args []string) {
 
 	st := openStore(cfg)
 	defer st.Close()
+
+	// Zone history poller (read-only): snapshots zones on SOA-serial change.
+	// Self-disables when history_interval <= 0, re-checked at reload.
+	go (&history.Poller{Cfg: func() *config.Config { return cur.Load().cfg }, Store: st}).Run(context.Background())
 
 	src, err := buildTLS(cfg)
 	if err != nil {

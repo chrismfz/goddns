@@ -32,6 +32,11 @@ type Config struct {
 	PublicHost     string `toml:"public_host"`     // hostname clients use to reach the DDNS endpoint (e.g. sdns.myip.gr); fills the admin help snippets. Optional.
 	NamedConf      string `toml:"named_conf"`      // path to named.conf for the read-only Zones view (default /etc/named.conf)
 
+	// Zone history (Phase 1): the serve loop snapshots every master zone whose
+	// SOA serial moved, for diff/rollback. Read-only (AXFR + SOA queries).
+	HistoryInterval int `toml:"history_interval"` // poll period in seconds; 0 disables. Default 300.
+	HistoryKeep     int `toml:"history_keep"`     // snapshots retained per zone. Default 50.
+
 	// TLS
 	TLSMode  string `toml:"tls_mode"`  // "files" or "acme"
 	CertFile string `toml:"cert_file"` // files mode: TLS cert (fullchain)
@@ -116,15 +121,17 @@ type ProxyRule struct {
 
 func defaults() Config {
 	return Config{
-		Listen:         ":8245",
-		DBPath:         "/var/lib/goddns/goddns.db",
-		ReloadInterval: 20,
-		TLSMode:        TLSFiles,
-		ACMEStorage:    "/var/lib/goddns/acme",
-		DNSServer:      "127.0.0.1:53",
-		TSIGName:       "ddns-update",
-		TSIGAlgo:       "hmac-sha256",
-		NamedConf:      "/etc/named.conf",
+		Listen:          ":8245",
+		DBPath:          "/var/lib/goddns/goddns.db",
+		ReloadInterval:  20,
+		TLSMode:         TLSFiles,
+		ACMEStorage:     "/var/lib/goddns/acme",
+		DNSServer:       "127.0.0.1:53",
+		TSIGName:        "ddns-update",
+		TSIGAlgo:        "hmac-sha256",
+		NamedConf:       "/etc/named.conf",
+		HistoryInterval: 300,
+		HistoryKeep:     50,
 	}
 }
 

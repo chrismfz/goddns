@@ -336,6 +336,28 @@ warns: the dump includes RRSIG/DNSKEY/NSEC(3), which expire and are managed
 by BIND (inline-signing) — restore the unsigned source and let BIND re-sign
 rather than re-importing the signed records by hand.
 
+### Zone history (snapshots + diff)
+
+The `serve` loop keeps a versioned history of **every** zone (not just the ones
+goddns updates): it watches each zone's SOA serial and, whenever it moves,
+transfers the zone and stores a canonical snapshot in the SQLite DB. Strictly
+read-only — AXFR + SOA queries, never a write.
+
+    goddns zone myip.gr -history     # list snapshots (serial, time)
+    goddns zone myip.gr -diff        # what changed in the most recent snapshot
+
+The admin per-zone page has a **history** link showing the same snapshot list
+and the latest change inline.
+
+This answers "who changed what, when" — e.g. a panel client editing their
+MX/SPF/DKIM/DMARC and breaking mail: the diff shows exactly which records moved,
+and the snapshot is the basis for a future rollback. It captures any master zone
+BIND will transfer, including cPanel/DirectAdmin/Virtualmin file-managed ones,
+without ever touching how they're managed. Tunables (defaults shown):
+
+    history_interval = 300   # SOA poll period in seconds; 0 disables
+    history_keep     = 50    # snapshots retained per zone
+
 ## Logging
 
 By default goddns logs to stderr (journald under systemd). On a busy DNS
