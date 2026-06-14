@@ -123,6 +123,44 @@ func TestUpdateAAAA(t *testing.T) {
 	}
 }
 
+func TestApplyOps(t *testing.T) {
+	addr, h := startTestServer(t)
+	u, err := NewRFC2136(addr, testKeyName, "hmac-sha256", testSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	add, _ := dns.NewRR("www.myip.gr. 60 IN A 203.0.113.5")
+	ops := []Op{
+		{Action: AddRR, RR: add},
+		{Action: DelRRset, RR: &dns.TXT{Hdr: dns.RR_Header{Name: "old.myip.gr.", Rrtype: dns.TypeTXT, Class: dns.ClassINET}}},
+		{Action: DelName, RR: &dns.A{Hdr: dns.RR_Header{Name: "gone.myip.gr.", Class: dns.ClassINET}}},
+	}
+	if err := u.Apply("myip.gr", ops); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.badTSIG {
+		t.Fatal("server saw a bad/missing TSIG")
+	}
+	if len(h.updates) != 1 {
+		t.Fatalf("got %d updates, want 1", len(h.updates))
+	}
+	var inserted *dns.A
+	for _, rr := range h.updates[0].Ns {
+		if a, ok := rr.(*dns.A); ok && a.Hdr.Class == dns.ClassINET {
+			inserted = a
+		}
+	}
+	if inserted == nil || inserted.Hdr.Name != "www.myip.gr." || !inserted.A.Equal(net.ParseIP("203.0.113.5")) {
+		t.Fatalf("AddRR not applied: %v", h.updates[0].Ns)
+	}
+}
+
+// RFC2136 must satisfy both the narrow Backend and the general Mutator.
+var _ Backend = (*RFC2136)(nil)
+var _ Mutator = (*RFC2136)(nil)
+
 func TestWrongSecretRejected(t *testing.T) {
 	addr, _ := startTestServer(t)
 	u, err := NewRFC2136(addr, testKeyName, "hmac-sha256",
