@@ -346,6 +346,9 @@ read-only — AXFR + SOA queries, never a write.
     goddns zone myip.gr -history     # list snapshots (serial, time)
     goddns zone myip.gr -diff        # what changed in the most recent snapshot
 
+The admin per-zone page has a **history** link showing the same snapshot list
+and the latest change inline.
+
 This answers "who changed what, when" — e.g. a panel client editing their
 MX/SPF/DKIM/DMARC and breaking mail: the diff shows exactly which records moved,
 and the snapshot is the basis for a future rollback. It captures any master zone

@@ -15,6 +15,7 @@ const (
 	helpTmpl     = "help"
 	zonesTmpl    = "zones"
 	zoneViewTmpl = "zoneview"
+	zoneHistTmpl = "zonehist"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -227,7 +228,7 @@ read-only view, add it to the named group:<br>
 
 {{define "zoneview"}}{{template "head" .}}
 <header><div><span class="b">goddns admin</span> <span class="muted">zone {{.Name}} (read-only)</span></div>
-<div><a href="/zones">&larr; zones</a><a href="/zone?name={{.Name}}">refresh</a></div></header>
+<div><a href="/zones">&larr; zones</a><a href="/zone?name={{.Name}}&amp;history=1">history</a><a href="/zone?name={{.Name}}">refresh</a></div></header>
 <main>
 {{if .Error}}
 <div class="card" style="border-color:#5a2230">
@@ -279,6 +280,28 @@ This page never edits BIND — it only reads.</div>
 {{else}}
 <p style="margin-top:.6rem"><a href="/zone?name={{.Name}}&amp;check=1">▸ check nameservers live (probe each NS for the serial it serves)</a></p>
 {{end}}
+{{end}}
+</main></body></html>{{end}}
+
+{{define "zonehist"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">history {{.Name}} (read-only)</span></div>
+<div><a href="/zone?name={{.Name}}">&larr; zone</a><a href="/zone?name={{.Name}}&amp;history=1">refresh</a></div></header>
+<main>
+{{if .Error}}<div class="card" style="border-color:#5a2230"><pre style="margin:.5rem 0">{{.Error}}</pre></div>
+{{else}}
+
+{{if .HasDiff}}<h2>latest change <span class="muted">serial {{.FromSerial}} &rarr; {{.ToSerial}}</span></h2>
+<pre>{{range .Removed}}<span class="err">- {{.}}</span>
+{{end}}{{range .Added}}<span class="ok">+ {{.}}</span>
+{{end}}{{if and (not .Removed) (not .Added)}}<span class="muted">(no record changes; serial bumped only)</span>{{end}}</pre>
+{{end}}
+
+<h2>snapshots</h2>
+<table><thead><tr><th>serial</th><th>captured</th></tr></thead><tbody>
+{{range .Snaps}}<tr><td>{{.Serial}}</td><td class="muted">{{.Taken}}</td></tr>
+{{else}}<tr><td colspan="2" class="muted">(no snapshots yet — the serve loop captures them on SOA-serial change)</td></tr>{{end}}
+</tbody></table>
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">read-only history. CLI: <code>goddns zone {{.Name}} -history</code> / <code>-diff</code>.</div>
 {{end}}
 </main></body></html>{{end}}
 

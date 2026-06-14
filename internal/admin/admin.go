@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/store"
 )
@@ -34,6 +35,8 @@ type Store interface {
 	Del(name string) error
 	Rotate(name string) (store.Record, string, error)
 	Get(name string) (store.Record, error)
+	SnapshotList(zone string, limit int) ([]store.Snapshot, error)
+	SnapshotByID(id int64) (store.Snapshot, bool, error)
 }
 
 // Handler serves the admin UI. Construct with New.
@@ -160,6 +163,42 @@ type nsRow struct {
 	Serial           uint32
 	OK               bool
 }
+type snapRow struct {
+	Serial uint32
+	Taken  string
+	ID     int64
+}
+
+// handleZoneHistory is the read-only per-zone history view: the stored snapshot
+// list plus the diff of the most recent change (what records moved, with the
+// SOA serial noise filtered out). Snapshots are captured by the serve poller.
+func (h *Handler) handleZoneHistory(w http.ResponseWriter, user, name string) {
+	snaps, err := h.store.SnapshotList(name, 200)
+	if err != nil {
+		render(w, zoneHistTmpl, map[string]any{"Version": h.version, "User": user, "Name": name, "Error": err.Error()})
+		return
+	}
+	data := map[string]any{"Version": h.version, "User": user, "Name": name}
+	rows := make([]snapRow, 0, len(snaps))
+	for _, s := range snaps {
+		rows = append(rows, snapRow{Serial: s.Serial, Taken: s.TakenAt.Format("2006-01-02 15:04"), ID: s.ID})
+	}
+	data["Snaps"] = rows
+
+	if len(snaps) >= 2 {
+		newer, okN, errN := h.store.SnapshotByID(snaps[0].ID)
+		older, okO, errO := h.store.SnapshotByID(snaps[1].ID)
+		if errN == nil && errO == nil && okN && okO {
+			added, removed := history.Diff(older.Content, newer.Content)
+			data["Added"] = history.DropSOA(added)
+			data["Removed"] = history.DropSOA(removed)
+			data["FromSerial"] = older.Serial
+			data["ToSerial"] = newer.Serial
+			data["HasDiff"] = true
+		}
+	}
+	render(w, zoneHistTmpl, data)
+}
 
 // handleZone is the read-only per-zone viewer: it pulls the LIVE records from
 // BIND via AXFR (journal-merged) so the operator sees exactly what the server
@@ -169,6 +208,10 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 	name := strings.TrimSuffix(strings.TrimSpace(r.URL.Query().Get("name")), ".")
 	if name == "" {
 		http.Redirect(w, r, "/zones", http.StatusSeeOther)
+		return
+	}
+	if r.URL.Query().Get("history") == "1" {
+		h.handleZoneHistory(w, user, name)
 		return
 	}
 	nc := cfg.NamedConf

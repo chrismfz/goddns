@@ -37,6 +37,20 @@ func Diff(old, new string) (added, removed []string) {
 	return added, removed
 }
 
+// DropSOA removes SOA-record lines (type is the 4th field: name TTL CLASS TYPE
+// …). The SOA serial bumps on every change, so its line always differs; callers
+// that show the serial transition separately drop it to de-noise the diff.
+func DropSOA(lines []string) []string {
+	out := lines[:0:0]
+	for _, l := range lines {
+		if f := strings.Fields(l); len(f) >= 4 && f[3] == "SOA" {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
 func lineSet(s string) map[string]bool {
 	m := map[string]bool{}
 	for _, l := range strings.Split(s, "\n") {
