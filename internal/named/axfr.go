@@ -210,6 +210,20 @@ func Rows(rrs []dns.RR) []RR {
 	return out
 }
 
+// Canonical returns a stable, sorted text dump of the records — one per line
+// in zone-file form (apex first, then by name/type). Used both for -export and
+// for history snapshots, so diffs between two snapshots are meaningful.
+func Canonical(rrs []dns.RR) string {
+	cp := append([]dns.RR(nil), rrs...)
+	SortZone(cp)
+	var b strings.Builder
+	for _, rr := range cp {
+		b.WriteString(rr.String())
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 // SOAOf returns the zone's SOA record, or nil if the transfer had none.
 func SOAOf(rrs []dns.RR) *dns.SOA {
 	for _, rr := range rrs {

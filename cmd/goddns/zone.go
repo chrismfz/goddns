@@ -12,8 +12,65 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
 )
+
+// cmdZoneHistory handles `goddns zone <name> -history` (list snapshots) and
+// `-diff` (show the change in the most recent snapshot). Read-only: it only
+// reads the snapshots the serve loop has stored.
+func cmdZoneHistory(name, cfgPath string, list bool) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		fatal("%v", err)
+	}
+	st := openStore(cfg)
+	defer healDBOwnership(cfg.DBPath)
+	defer st.Close()
+
+	if list {
+		snaps, err := st.SnapshotList(name, 0)
+		if err != nil {
+			fatal("history: %v", err)
+		}
+		if len(snaps) == 0 {
+			fmt.Printf("no snapshots for %s yet (serve captures them; history_interval=%ds)\n", name, cfg.HistoryInterval)
+			return
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(w, "SERIAL\tTAKEN\tID")
+		for _, s := range snaps {
+			fmt.Fprintf(w, "%d\t%s\t%d\n", s.Serial, s.TakenAt.Format("2006-01-02 15:04"), s.ID)
+		}
+		w.Flush()
+		fmt.Printf("\n%d snapshots. See the latest change: goddns zone %s -diff\n", len(snaps), name)
+		return
+	}
+
+	snaps, err := st.SnapshotList(name, 2)
+	if err != nil {
+		fatal("history: %v", err)
+	}
+	if len(snaps) < 2 {
+		fmt.Printf("need at least two snapshots of %s to diff (have %d)\n", name, len(snaps))
+		return
+	}
+	newer, _, _ := st.SnapshotByID(snaps[0].ID)
+	older, _, _ := st.SnapshotByID(snaps[1].ID)
+	added, removed := history.Diff(older.Content, newer.Content)
+	fmt.Printf("zone %s: serial %d → %d   (%s → %s)\n\n",
+		name, older.Serial, newer.Serial,
+		older.TakenAt.Format("2006-01-02 15:04"), newer.TakenAt.Format("2006-01-02 15:04"))
+	for _, l := range removed {
+		fmt.Printf("- %s\n", l)
+	}
+	for _, l := range added {
+		fmt.Printf("+ %s\n", l)
+	}
+	if len(added) == 0 && len(removed) == 0 {
+		fmt.Println("(no record changes between these two snapshots)")
+	}
+}
 
 // cmdZone is the read-only per-zone viewer: it pulls the LIVE zone contents
 // from BIND via AXFR (journal-merged, so it shows exactly what the server
@@ -34,12 +91,19 @@ func cmdZone(args []string) {
 	keyName := fs.String("key", "", "force a specific named.conf TSIG key for the transfer")
 	export := fs.Bool("export", false, "print a zone-file snapshot (loadable backup) instead of a table")
 	check := fs.Bool("check", false, "also probe each apex nameserver live for the SOA serial they serve")
+	histList := fs.Bool("history", false, "list stored history snapshots for the zone")
+	histDiff := fs.Bool("diff", false, "show what changed in the most recent snapshot (vs the previous)")
 	fs.Parse(args)
 	if name == "" {
 		name = fs.Arg(0)
 	}
 	if name == "" {
-		fatal("usage: goddns zone <name> [-export] [-server host] [-key name]")
+		fatal("usage: goddns zone <name> [-export|-check|-history|-diff] [-server host] [-key name]")
+	}
+
+	if *histList || *histDiff {
+		cmdZoneHistory(name, *cfgPath, *histList)
+		return
 	}
 
 	var tsigName, srv, nc string

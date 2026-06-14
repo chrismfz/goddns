@@ -232,6 +232,13 @@ func SerialsAgree(checks []NSCheck) (bool, map[uint32]int) {
 	return len(seen) <= 1, seen
 }
 
+// CurrentSerial returns the SOA serial that server currently serves for zone
+// (a cheap non-recursive query). ok=false if it couldn't be obtained.
+func CurrentSerial(zone, server string) (serial uint32, ok bool) {
+	s, _, err := probeSOA(zone, server)
+	return s, err == nil && s != 0
+}
+
 // resolveHost recursively resolves a hostname's A/AAAA via resolver (used only
 // for out-of-zone nameservers that have no glue in the zone).
 func resolveHost(name, resolver string) []string {
