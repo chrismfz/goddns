@@ -67,16 +67,19 @@ func cmdZones(args []string) {
 		}
 	}
 
-	// On demand: probe every zone's nameservers concurrently for the serial
-	// they serve (read-only AXFR + SOA queries).
+	// On demand: probe every zone's nameservers for the serial they serve
+	// (a cheap NS query + SOA probes, no AXFR), bounded concurrency.
 	nsv := make([]string, len(zones))
 	if *check {
+		sem := make(chan struct{}, 8)
 		var wg sync.WaitGroup
 		for i := range zones {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				nsv[i] = zoneSerial(zones[i], inv, server, tsigName)
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				nsv[i] = zoneSerial(zones[i], server)
 			}(i)
 		}
 		wg.Wait()
@@ -144,31 +147,23 @@ func cmdZones(args []string) {
 	}
 }
 
-// zoneSerial probes one zone's nameservers (AXFR to learn the apex NS, then a
+// zoneSerial probes one zone's nameservers (a cheap apex NS query, then a
 // direct SOA query to each) and returns a short serial-agreement verdict.
 // Non-master zones have no apex NS to compare. Read-only.
-func zoneSerial(z named.Zone, inv *named.Inventory, server, tsigName string) string {
+func zoneSerial(z named.Zone, server string) string {
 	switch z.Kind() {
 	case "static file", "dynamic":
 	default:
 		return "-"
 	}
-	records, _, err := named.TransferAuto(z.Name, server, inv.AXFRKeys(&z, tsigName))
-	if err != nil {
-		return "axfr-err"
-	}
-	checks := named.CheckNameservers(z.Name, records, server)
-	if len(checks) == 0 {
+	switch st, serial := named.ZoneSerialCheck(z.Name, server); st {
+	case named.SerialAgree:
+		return fmt.Sprintf("✓ %d", serial)
+	case named.SerialMismatch:
+		return "✗ MISMATCH"
+	case named.SerialUnreachable:
+		return "unreachable"
+	default:
 		return "no-NS"
 	}
-	agree, seen := named.SerialsAgree(checks)
-	switch {
-	case len(seen) == 0:
-		return "unreachable"
-	case agree:
-		for s := range seen {
-			return fmt.Sprintf("✓ %d", s)
-		}
-	}
-	return "✗ MISMATCH"
 }

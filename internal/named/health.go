@@ -163,6 +163,61 @@ func probeNS(zone, nsName string, glue []string, resolver string) NSCheck {
 	return c
 }
 
+// SerialStatus summarizes a zone's nameserver serial agreement.
+type SerialStatus int
+
+const (
+	SerialNoNS        SerialStatus = iota // no apex NS reachable to check
+	SerialAgree                           // all reachable NS serve the same serial
+	SerialMismatch                        // nameservers disagree (a secondary is behind)
+	SerialUnreachable                     // NS exist but none answered authoritatively
+)
+
+// ZoneNS fetches a zone's apex NS records plus any in-zone glue (A/AAAA in the
+// additional/authority sections) from server via a single non-recursive query.
+// This is far cheaper than an AXFR when only the delegation set is needed, and
+// — unlike AXFR — it doesn't depend on allow-transfer. Read-only.
+func ZoneNS(zone, server string) []dns.RR {
+	c := &dns.Client{Timeout: 2 * time.Second}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeNS)
+	m.RecursionDesired = false
+	resp, _, err := c.Exchange(m, withPort(server))
+	if err != nil || resp == nil {
+		return nil
+	}
+	if resp.Truncated { // NS sets + glue can exceed a UDP datagram
+		c.Net = "tcp"
+		if r2, _, e := c.Exchange(m, withPort(server)); e == nil && r2 != nil {
+			resp = r2
+		}
+	}
+	rrs := append([]dns.RR{}, resp.Answer...)
+	rrs = append(rrs, resp.Ns...)    // some servers put apex NS here
+	rrs = append(rrs, resp.Extra...) // glue addresses (OPT is ignored downstream)
+	return rrs
+}
+
+// ZoneSerialCheck fetches a zone's apex nameservers from server (a cheap NS
+// query, no AXFR) and probes each one directly for the SOA serial it serves,
+// returning an agreement verdict and the agreed serial. Read-only.
+func ZoneSerialCheck(zone, server string) (SerialStatus, uint32) {
+	checks := CheckNameservers(zone, ZoneNS(zone, server), server)
+	if len(checks) == 0 {
+		return SerialNoNS, 0
+	}
+	agree, seen := SerialsAgree(checks)
+	switch {
+	case len(seen) == 0:
+		return SerialUnreachable, 0
+	case agree && len(seen) == 1:
+		for s := range seen {
+			return SerialAgree, s
+		}
+	}
+	return SerialMismatch, 0
+}
+
 // SerialsAgree reports whether all reachable, authoritative nameservers serve
 // the same SOA serial, and returns the distinct serials seen (serial -> count).
 // Note: with zero reachable nameservers it returns true with an empty map;

@@ -283,16 +283,20 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 		}
 	}
 
-	// On demand: probe every zone's nameservers for serial agreement. Done
-	// concurrently (each AXFR + probe is local/fast) so the page bounds to
-	// ~the slowest single zone. Off by default to keep the list snappy.
+	// On demand: probe every zone's nameservers for serial agreement. Each
+	// zone is a cheap NS query + a few SOA probes (no AXFR), run with a small
+	// concurrency cap so a host with many zones can't be made to open a flood
+	// of sockets from one click. Off by default to keep the list snappy.
 	if check {
+		sem := make(chan struct{}, nsCheckConcurrency)
 		var wg sync.WaitGroup
 		for i := range zones {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
-				zr[i].NS, zr[i].NSClass = zoneNSVerdict(zones[i], inv, server, cfg.TSIGName)
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				zr[i].NS, zr[i].NSClass = zoneNSVerdict(zones[i], server)
 			}(i)
 		}
 		wg.Wait()
@@ -314,34 +318,29 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 	})
 }
 
-// zoneNSVerdict runs the on-demand live NS-serial check for one zone: AXFR to
-// learn the apex NS, then probe each nameserver directly. Returns a short
+// nsCheckConcurrency bounds how many zones are probed at once on /zones?check=1.
+const nsCheckConcurrency = 8
+
+// zoneNSVerdict runs the on-demand live NS-serial check for one zone (a cheap
+// apex NS query, then a direct SOA probe to each nameserver). Returns a short
 // status and a CSS class. Non-master zones (hint/slave/forward) return blank —
-// there's no apex NS set to compare. Read-only (AXFR + SOA queries).
-func zoneNSVerdict(z named.Zone, inv *named.Inventory, server, tsigName string) (status, class string) {
+// there's no apex NS set to compare. Read-only.
+func zoneNSVerdict(z named.Zone, server string) (status, class string) {
 	switch z.Kind() {
 	case "static file", "dynamic":
 	default:
 		return "", ""
 	}
-	records, _, err := named.TransferAuto(z.Name, server, inv.AXFRKeys(&z, tsigName))
-	if err != nil {
-		return "axfr error", "muted"
-	}
-	checks := named.CheckNameservers(z.Name, records, server)
-	if len(checks) == 0 {
+	switch st, serial := named.ZoneSerialCheck(z.Name, server); st {
+	case named.SerialAgree:
+		return fmt.Sprintf("✓ %d", serial), "ok"
+	case named.SerialMismatch:
+		return "✗ mismatch", "err"
+	case named.SerialUnreachable:
+		return "unreachable", "warn"
+	default:
 		return "no NS", "muted"
 	}
-	agree, seen := named.SerialsAgree(checks)
-	switch {
-	case len(seen) == 0:
-		return "unreachable", "warn"
-	case agree:
-		for s := range seen {
-			return fmt.Sprintf("✓ %d", s), "ok"
-		}
-	}
-	return "✗ mismatch", "err"
 }
 
 func (h *Handler) session(r *http.Request) (string, bool) {

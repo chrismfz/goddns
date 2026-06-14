@@ -97,6 +97,45 @@ func startSOAServer(t *testing.T, serial uint32) string {
 	return pc.LocalAddr().String()
 }
 
+type nsServer struct{ answer, extra []dns.RR }
+
+func (s *nsServer) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.Authoritative = true
+	if len(r.Question) == 1 && r.Question[0].Qtype == dns.TypeNS {
+		m.Answer = s.answer
+		m.Extra = s.extra
+	}
+	w.WriteMsg(m)
+}
+
+func TestZoneNS(t *testing.T) {
+	answer := []dns.RR{
+		mustRR(t, "myip.gr. 3600 IN NS ns1.myip.gr."),
+		mustRR(t, "myip.gr. 3600 IN NS ns2.myip.gr."),
+	}
+	extra := []dns.RR{
+		mustRR(t, "ns1.myip.gr. 600 IN A 84.54.49.6"),
+		mustRR(t, "ns2.myip.gr. 600 IN A 45.76.129.127"),
+	}
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: &nsServer{answer, extra}}
+	go srv.ActivateAndServe()
+	t.Cleanup(func() { srv.Shutdown() })
+
+	rrs := ZoneNS("myip.gr", pc.LocalAddr().String())
+	if ns := apexNS("myip.gr", rrs); len(ns) != 2 || ns[0] != "ns1.myip.gr" || ns[1] != "ns2.myip.gr" {
+		t.Fatalf("apexNS from ZoneNS = %v, want [ns1.myip.gr ns2.myip.gr]", ns)
+	}
+	if idx := addressIndex(rrs); len(idx["ns1.myip.gr"]) != 1 || idx["ns1.myip.gr"][0] != "84.54.49.6" {
+		t.Fatalf("glue not captured from additional section: %v", idx)
+	}
+}
+
 func TestProbeSOA(t *testing.T) {
 	addr := startSOAServer(t, 2026061410)
 	serial, aa, err := probeSOA("myip.gr", addr)
