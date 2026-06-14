@@ -141,8 +141,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type zoneRow struct {
-	Name, Kind, File, Status, Keys string
-	Dynamic                        bool
+	View, Name, Kind, File, Status, Keys string
+	Dynamic                              bool
 }
 type keyRow struct{ Name, Algorithm string }
 type findRow struct{ Mark, Class, Zone, Message string }
@@ -164,9 +164,13 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 	inv := named.Parse(data)
 
 	var zr []zoneRow
+	hasViews := false
 	for _, z := range inv.UserZones() {
+		if z.View != "" {
+			hasViews = true
+		}
 		zr = append(zr, zoneRow{
-			Name: z.Name, Kind: z.Kind(), File: z.Path,
+			View: z.View, Name: z.Name, Kind: z.Kind(), File: z.Path,
 			Status: named.FileStatus(z.Path, z.Dynamic),
 			Keys:   strings.Join(z.UpdateKeys, ", "), Dynamic: z.Dynamic,
 		})
@@ -183,7 +187,7 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 
 	render(w, zonesTmpl, map[string]any{
 		"Version": h.version, "User": user, "Directory": inv.Directory,
-		"Zones": zr, "Keys": kr, "Findings": fr,
+		"Zones": zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
 		"Builtin": len(inv.Zones) - len(zr),
 	})
 }

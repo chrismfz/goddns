@@ -53,8 +53,19 @@ func cmdZones(args []string) {
 	if inv.Directory != "" {
 		fmt.Printf("directory: %s\n\n", inv.Directory)
 	}
+	hasView := false
+	for _, z := range zones {
+		if z.View != "" {
+			hasView = true
+			break
+		}
+	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "ZONE\tKIND\tFILE\tKEY(S)")
+	if hasView {
+		fmt.Fprintln(w, "VIEW\tZONE\tKIND\tFILE\tKEY(S)")
+	} else {
+		fmt.Fprintln(w, "ZONE\tKIND\tFILE\tKEY(S)")
+	}
 	for _, z := range zones {
 		keys := strings.Join(z.UpdateKeys, ", ")
 		if keys == "" {
@@ -66,7 +77,11 @@ func cmdZones(args []string) {
 		} else if st := named.FileStatus(z.Path, z.Dynamic); st != "" {
 			file += " (" + st + ")"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", z.Name, z.Kind(), file, keys)
+		if hasView {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", z.View, z.Name, z.Kind(), file, keys)
+		} else {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", z.Name, z.Kind(), file, keys)
+		}
 	}
 	w.Flush()
 	if !*all {

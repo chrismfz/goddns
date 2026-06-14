@@ -10,15 +10,18 @@
 package named
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Zone is one zone clause from the parsed config.
 type Zone struct {
 	Name        string   // trailing dot stripped
+	View        string   // enclosing view name ("" for the implicit _default)
 	Type        string   // master, slave, forward, hint, stub, ...
 	File        string   // zone file path as configured (may be relative)
 	Path        string   // File resolved against the directory option (absolute when possible)
@@ -115,12 +118,19 @@ var checkConfCmd = "named-checkconf"
 
 // CheckConf runs `named-checkconf -p [namedConf]` and returns the normalised
 // config dump. A broken config surfaces as an error with named's own message.
+// A timeout guards against a wedged binary (the admin page calls this per
+// request). No shell is used — args are passed as argv.
 func CheckConf(namedConf string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
 	args := []string{"-p"}
 	if namedConf != "" {
 		args = append(args, namedConf)
 	}
-	out, err := exec.Command(checkConfCmd, args...).Output()
+	out, err := exec.CommandContext(ctx, checkConfCmd, args...).Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return nil, fmt.Errorf("%s -p: timed out", checkConfCmd)
+	}
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok && len(ee.Stderr) > 0 {
 			return nil, fmt.Errorf("%s -p: %s", checkConfCmd, strings.TrimSpace(string(ee.Stderr)))

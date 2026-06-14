@@ -195,13 +195,14 @@ read-only view, add it to the named group:<br>
 {{else}}
 
 <h2>zones{{if .Directory}} <span class="muted">(directory {{.Directory}})</span>{{end}}</h2>
-<table><thead><tr><th>zone</th><th>kind</th><th>file</th><th>update key(s)</th></tr></thead><tbody>
+<table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th></tr></thead><tbody>
 {{range .Zones}}<tr>
+{{if $.HasViews}}<td class="muted">{{if .View}}{{.View}}{{else}}_default{{end}}</td>{{end}}
 <td>{{.Name}}</td>
 <td>{{if .Dynamic}}<span class="ok">{{.Kind}}</span>{{else}}<span class="muted">{{.Kind}}</span>{{end}}</td>
 <td>{{if .File}}{{.File}}{{if .Status}} <span class="{{if eq .Status "missing"}}err{{else if eq .Status "no journal yet"}}warn{{else}}muted{{end}}">({{.Status}})</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
 <td>{{if .Keys}}{{.Keys}}{{else}}<span class="muted">—</span>{{end}}</td>
-</tr>{{else}}<tr><td colspan="4" class="muted">(no zones)</td></tr>{{end}}
+</tr>{{else}}<tr><td class="muted">(no zones)</td></tr>{{end}}
 </tbody></table>
 {{if .Builtin}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">(+ {{.Builtin}} built-in empty zones hidden; <code>goddns zones -all</code> on the CLI to show)</div>{{end}}
 

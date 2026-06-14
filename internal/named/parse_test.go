@@ -266,3 +266,67 @@ func TestFileStatus(t *testing.T) {
 		t.Fatal("dynamic file with .jnl should be '+journal'")
 	}
 }
+
+func TestUpdatePolicyLocal(t *testing.T) {
+	// `update-policy local;` shorthand (no brace block) must be dynamic.
+	d := `
+view "_default" {
+	zone "dyn.example" {
+		type master;
+		file "/var/named/dyn.hosts";
+		update-policy local;
+	};
+};
+`
+	inv := Parse([]byte(d))
+	z := find(inv, "dyn.example")
+	if z == nil || !z.Dynamic || z.AllowUpdate != "policy (local)" {
+		t.Fatalf("update-policy local should be dynamic: %+v", z)
+	}
+	// and it must NOT trigger the IP-only "no TSIG key" warning
+	for _, f := range inv.Check("", "") {
+		if f.Zone == "dyn.example" && f.Severity == Warn && contains(f.Message, "IP allow-update") {
+			t.Fatal("policy-local wrongly flagged as IP-only")
+		}
+	}
+}
+
+func TestViewsDistinguishDuplicates(t *testing.T) {
+	// Same zone name in two views -> two rows, each tagged with its view;
+	// the implicit _default view is reported as "".
+	d := `
+view "internal" {
+	zone "split.example" { type master; file "/i.hosts"; };
+};
+view "external" {
+	zone "split.example" { type slave; file "/e.hosts"; };
+};
+view "_default" {
+	zone "plain.example" { type master; file "/p.hosts"; };
+};
+`
+	inv := Parse([]byte(d))
+	if len(inv.Zones) != 3 {
+		t.Fatalf("zones: %+v", inv.Zones)
+	}
+	var internal, external, plain *Zone
+	for i := range inv.Zones {
+		switch inv.Zones[i].View {
+		case "internal":
+			internal = &inv.Zones[i]
+		case "external":
+			external = &inv.Zones[i]
+		case "":
+			plain = &inv.Zones[i]
+		}
+	}
+	if internal == nil || internal.Type != "master" {
+		t.Fatalf("internal: %+v", internal)
+	}
+	if external == nil || external.Type != "slave" {
+		t.Fatalf("external: %+v", external)
+	}
+	if plain == nil || plain.Name != "plain.example" {
+		t.Fatalf("plain (default view tagged ''): %+v", plain)
+	}
+}

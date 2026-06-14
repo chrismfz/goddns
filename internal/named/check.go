@@ -21,7 +21,9 @@ func (inv *Inventory) Check(goddnsTSIGName, goddnsTSIGSecret string) []Finding {
 					"grants update key '" + k + "' which is not defined in named.conf (updates will fail)"})
 			}
 		}
-		if z.Dynamic && len(z.UpdateKeys) == 0 {
+		// Only warn for pure IP-based allow-update (no key). Don't warn for
+		// `update-policy local;` (localhost session key — a safe special case).
+		if z.Dynamic && len(z.UpdateKeys) == 0 && z.AllowUpdate == "addresses/keys" {
 			f = append(f, Finding{Warn, z.Name,
 				"is dynamic via IP allow-update only (no TSIG key) — anyone from those IPs can update it"})
 		}
