@@ -93,6 +93,19 @@ func TestApplyAddPreservesAndBumps(t *testing.T) {
 	}
 }
 
+func TestRefuseOutOfZoneRecord(t *testing.T) {
+	e, path := testEditor(t, staticZone(), "example")
+	// an out-of-zone owner must be refused (named-checkzone only WARNS on it, so
+	// it would otherwise be appended and pollute the authoritative file)
+	op := []ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "evil.victim.com. 60 IN A 6.6.6.6")}}
+	if _, err := e.Apply("example", op); err == nil || !strings.Contains(err.Error(), "not inside zone") {
+		t.Fatalf("an out-of-zone record must be refused, got %v", err)
+	}
+	if out, _ := os.ReadFile(path); strings.Contains(string(out), "victim.com") {
+		t.Fatal("the out-of-zone record must not be written")
+	}
+}
+
 func TestRefuseDynamic(t *testing.T) {
 	z := staticZone()
 	z.Dynamic = true
@@ -199,16 +212,16 @@ func TestDelRRsetQualifiedName(t *testing.T) {
 		t.Fatalf("www A not removed:\n%s", out)
 	}
 
-	// ...while a root-level "www." (the pre-fix bug) matches nothing.
+	// ...while a root-level "www." (the pre-qualify bug shape) is now refused as
+	// out-of-zone rather than silently matching nothing.
 	e2, path2 := testEditor(t, staticZone(), "example")
 	rootlevel := []ddns.Op{{Action: ddns.DelRRset, RR: &dns.RFC3597{Hdr: dns.RR_Header{
 		Name: "www.", Rrtype: dns.TypeA, Class: dns.ClassINET}}}}
-	res2, _ := e2.Apply("example", rootlevel)
-	if len(res2.Removed) != 0 {
-		t.Fatalf("a root-level www. should match nothing, Removed=%v", res2.Removed)
+	if _, err := e2.Apply("example", rootlevel); err == nil || !strings.Contains(err.Error(), "not inside zone") {
+		t.Fatalf("a root-level www. must be refused as out-of-zone, got %v", err)
 	}
 	if out, _ := os.ReadFile(path2); !strings.Contains(string(out), "www\tIN\tA\t1.2.3.4") {
-		t.Fatal("www A should be untouched by a root-level delset")
+		t.Fatal("www A should be untouched")
 	}
 }
 

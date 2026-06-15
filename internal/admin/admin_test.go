@@ -13,6 +13,8 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/filezone"
+	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/store"
 )
 
@@ -407,17 +409,48 @@ func TestRotateAndHelp(t *testing.T) {
 	}
 }
 
-func TestInEditableRouting(t *testing.T) {
-	h := &Handler{}
-	cfg := &config.Config{EditableZones: []string{"myip.gr", "Other.GR."}}
-	if !h.inEditable(cfg, "myip.gr.") {
-		t.Error("myip.gr (trailing dot) should be editable")
+func TestStaticZoneRecordEditing(t *testing.T) {
+	c := mkConfig(t, "")
+	c.EditableZones = []string{"example"}
+	h, _ := newHandler(t, c)
+	dir := t.TempDir()
+	zonePath := filepath.Join(dir, "example.db")
+	os.WriteFile(zonePath, []byte("$ORIGIN example.\n$TTL 60\n@ IN SOA ns.example. host.example. 1 3 4 5 6\n@ IN NS ns.example.\nwww IN A 1.1.1.1\n"), 0o640)
+	inv := &named.Inventory{Zones: []named.Zone{{Name: "example", Type: "master", Path: zonePath}}}
+	h.fileEd = func(*config.Config) *filezone.Editor {
+		return &filezone.Editor{
+			Editable: []string{"example"}, LockDir: filepath.Join(dir, "l"), BackupDir: filepath.Join(dir, "b"),
+			Inv:       func() (*named.Inventory, error) { return inv, nil },
+			CheckZone: func(string, []byte) error { return nil },
+			Reload:    func(string) error { return nil },
+			Verify:    func(string, uint32) error { return nil },
+		}
 	}
-	if !h.inEditable(cfg, "other.gr") {
-		t.Error("case/dot-insensitive match should hold")
+	cookie := login(t, h)
+	csrf := h.csrfFor("admin")
+	add := map[string]string{"csrf": csrf, "zone": "example", "action": "add", "rr": "new 60 IN A 9.9.9.9"}
+
+	// no CSRF -> 400 (same gate as the dynamic path)
+	noCSRF := map[string]string{"zone": "example", "action": "add", "rr": "new 60 IN A 9.9.9.9"}
+	if rr := do(h, "POST", "/zone/record", "127.0.0.1:1", noCSRF, cookie); rr.Code != http.StatusBadRequest {
+		t.Fatalf("CSRF-missing static edit must be 400, got %d", rr.Code)
 	}
-	if h.inEditable(cfg, "ddns.myip.gr") {
-		t.Error("a non-listed zone must not route to file editing")
+	// phase 1: preview shows the diff and writes nothing
+	rr := do(h, "POST", "/zone/record", "127.0.0.1:1", add, cookie)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "new.example.") {
+		t.Fatalf("preview phase: %d\n%s", rr.Code, rr.Body.String())
+	}
+	if b, _ := os.ReadFile(zonePath); strings.Contains(string(b), "9.9.9.9") {
+		t.Fatal("preview must not write the zone file")
+	}
+	// phase 2: confirm applies it in place
+	add["confirm"] = "1"
+	rr2 := do(h, "POST", "/zone/record", "127.0.0.1:1", add, cookie)
+	if rr2.Code != http.StatusSeeOther {
+		t.Fatalf("apply phase: %d\n%s", rr2.Code, rr2.Body.String())
+	}
+	if b, _ := os.ReadFile(zonePath); !strings.Contains(string(b), "9.9.9.9") || !strings.Contains(string(b), "www IN A 1.1.1.1") {
+		t.Fatalf("static edit didn't apply surgically:\n%s", b)
 	}
 }
 

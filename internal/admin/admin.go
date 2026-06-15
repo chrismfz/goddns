@@ -57,6 +57,10 @@ type Handler struct {
 	throttle *loginThrottle
 	confPath string // goddns.conf path, for proxy.d/ vhost editing (empty = read-only)
 	reload   func() // optional: trigger an immediate config reload after a write
+
+	// fileEd overrides the static-zone file editor (tests inject stubs); nil ⇒
+	// the production builder.
+	fileEd func(*config.Config) *filezone.Editor
 }
 
 func New(cfg func() *config.Config, st Store, secret []byte, version string) *Handler {
@@ -358,8 +362,12 @@ func (h *Handler) editor(cfg *config.Config) *recordmut.Editor {
 	return &recordmut.Editor{NamedConf: nc, DNSServer: server, Keys: keys, Snap: h.store, Keep: cfg.HistoryKeep}
 }
 
-// fileEditor builds the file-as-truth editor for enabled static zones.
+// fileEditor builds the file-as-truth editor for enabled static zones (tests can
+// override via h.fileEd).
 func (h *Handler) fileEditor(cfg *config.Config) *filezone.Editor {
+	if h.fileEd != nil {
+		return h.fileEd(cfg)
+	}
 	nc := cfg.NamedConf
 	if nc == "" {
 		nc = "/etc/named.conf"
@@ -369,17 +377,6 @@ func (h *Handler) fileEditor(cfg *config.Config) *filezone.Editor {
 		server = "127.0.0.1:53"
 	}
 	return &filezone.Editor{NamedConf: nc, DNSServer: server, Editable: cfg.EditableZones, Keep: cfg.HistoryKeep}
-}
-
-// inEditable reports whether the zone is on the static-zone file-edit allowlist.
-func (h *Handler) inEditable(cfg *config.Config, zone string) bool {
-	z := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone)), ".")
-	for _, x := range cfg.EditableZones {
-		if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(x)), ".") == z {
-			return true
-		}
-	}
-	return false
 }
 
 // parseRRZone parses an RR with the zone as $ORIGIN, so a relative owner name
@@ -429,11 +426,13 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 		return
 	}
 	cfg := h.cfg()
-	// Route by ownership: an enabled static zone is edited in place (filezone,
-	// structured/surgical — raw whole-file mode stays CLI-only); everything else
-	// is RFC2136 (recordmut). Static parses the RR against the zone origin so a
-	// short owner name qualifies correctly.
-	static := h.inEditable(cfg, zone)
+	// Route by ownership, matching what the page shows: an enabled static MASTER
+	// zone is edited in place (filezone, structured/surgical — raw whole-file
+	// mode stays CLI-only); everything else, including a dynamic zone mistakenly
+	// listed in editable_zones, is RFC2136 (recordmut). CanEdit re-reads the live
+	// dynamic flag, so the routing gate can't disagree with the display gate.
+	fed := h.fileEditor(cfg)
+	static := fed.CanEdit(fed.Lookup(zone))
 	var rr dns.RR
 	var err error
 	if static {
@@ -454,7 +453,7 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 	if r.FormValue("confirm") != "1" {
 		var added, removed []string
 		if static {
-			res, perr := h.fileEditor(cfg).Preview(zone, ops)
+			res, perr := fed.Preview(zone, ops)
 			if perr != nil {
 				renderRecordErr(w, h.version, "%v", perr)
 				return
@@ -476,7 +475,7 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 	}
 
 	if static {
-		res, aerr := h.fileEditor(cfg).Apply(zone, ops)
+		res, aerr := fed.Apply(zone, ops)
 		if aerr != nil {
 			renderRecordErr(w, h.version, "%v", aerr)
 			return
