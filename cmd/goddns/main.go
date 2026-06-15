@@ -38,6 +38,7 @@ Usage:
   goddns rotate-key [name]         # rotate a TSIG key in tsig_keys_file + rndc reconfig
   goddns record add|del|delset ... # edit records (dynamic: RFC2136; static: in-place file edit if enabled)
   goddns zone enable <zone>        # check a static zone is safe to add to editable_zones
+  goddns zone edit|import|export <zone> [file]  # raw whole-file edit / import / export of an enabled static zone
   goddns vhost list|set|del ...    # manage reverse-proxy vhosts (proxy.d/ fragments)
   goddns zones [-check]                        # read-only: zones, dynamic, TSIG health (-check: NS serials)
   goddns zone home.myip.gr [-export|-check]    # read-only: live records via AXFR (+ backup, NS serials)

@@ -212,9 +212,119 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	return e.commit(z, zone, orig, newBytes)
+}
 
-	// HARD GATE: named-checkzone (strict). A missing binary is fatal here — we
-	// won't write a zone we couldn't validate.
+// ReadRaw returns the zone's current file bytes (the export source / raw-edit
+// base). Validates the zone is editable, but takes no lock.
+func (e *Editor) ReadRaw(zone string) ([]byte, error) {
+	z, err := e.resolve(zone)
+	if err != nil {
+		return nil, err
+	}
+	return readNoFollow(z.Path)
+}
+
+// ReplaceRaw replaces the whole zone file with newBytes (raw / webmin-style
+// mode). base is the content the caller last read — the concurrent-edit guard
+// refuses if the file moved since (pass nil only for an intentional overwrite).
+// CLI-only: the daemon never calls this, because a whole-file replace can
+// rewrite an entire zone past checkzone (design S2).
+func (e *Editor) ReplaceRaw(zone string, newBytes, base []byte) (*Result, error) {
+	z, err := e.resolve(zone)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := e.lock(zone)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
+	cur, err := readNoFollow(z.Path)
+	if err != nil {
+		return nil, err
+	}
+	if m := panelMarker(cur); m != "" {
+		return nil, fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", z.Path, m)
+	}
+	if base != nil && !bytes.Equal(cur, base) {
+		return nil, fmt.Errorf("zone %q changed under you (a concurrent edit) — reload and reapply", zone)
+	}
+	normalized, err := normalizeRawSerial(zone, cur, newBytes)
+	if err != nil {
+		return nil, err
+	}
+	return e.commit(z, zone, cur, normalized)
+}
+
+// PreviewRaw checkzones a proposed whole-file replacement and returns the
+// record-level diff plus the current bytes (the base to pass to ReplaceRaw).
+// Writes nothing. The serial is normalized to stay monotonic vs the live zone.
+func (e *Editor) PreviewRaw(zone string, newBytes []byte) (*Result, []byte, error) {
+	z, err := e.resolve(zone)
+	if err != nil {
+		return nil, nil, err
+	}
+	cur, err := readNoFollow(z.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if m := panelMarker(cur); m != "" {
+		return nil, nil, fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", z.Path, m)
+	}
+	newBytes, err = normalizeRawSerial(zone, cur, newBytes)
+	if err != nil {
+		return nil, nil, err
+	}
+	check := e.CheckZone
+	if check == nil {
+		check = zonefile.CheckZone
+	}
+	if err := check(zone, newBytes); err != nil {
+		return nil, nil, fmt.Errorf("checkzone: %w", err)
+	}
+	return diff(zone, z.Path, cur, newBytes), cur, nil
+}
+
+// normalizeRawSerial keeps a raw replacement's SOA serial monotonic vs the live
+// zone. Surgically-locatable content is rewritten above the current serial. When
+// goddns can't auto-bump (e.g. $GENERATE), it REFUSES if the operator's serial
+// doesn't already exceed the current one — never silently regressing secondaries.
+func normalizeRawSerial(zone string, cur, newBytes []byte) ([]byte, error) {
+	floor, _ := currentSerial(cur, zone) // 0 if the current file can't be read
+	if f, err := zonefile.Parse(newBytes, zone); err == nil && f.Surgical() {
+		if b, err := f.SerialFloor(floor); err == nil {
+			return b, nil
+		}
+	}
+	newSerial, ok := currentSerial(newBytes, zone)
+	if !ok || newSerial <= floor {
+		return nil, fmt.Errorf("raw content goddns can't auto-bump (e.g. $GENERATE) has SOA serial %d, not above the current %d — set a higher serial in the file", newSerial, floor)
+	}
+	return newBytes, nil
+}
+
+// currentSerial reads a zone's SOA serial, tolerant of non-surgical content
+// (implied owners, $GENERATE with a normal SOA at the top): it returns the first
+// SOA found even if a later directive stops the parse.
+func currentSerial(content []byte, zone string) (uint32, bool) {
+	zp := dns.NewZoneParser(bytes.NewReader(content), dns.Fqdn(zone), "")
+	zp.SetIncludeAllowed(false)
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		if soa, ok := rr.(*dns.SOA); ok {
+			return soa.Serial, true
+		}
+	}
+	return 0, false
+}
+
+// commit is the shared write tail: checkzone the new bytes (HARD GATE), re-read
+// under the lock and refuse if the file moved since `expected` (nano guard),
+// back up the previous bytes, write atomically, reload (restoring on failure),
+// and verify. The caller holds the lock and supplies `expected` = the bytes it
+// based newBytes on.
+func (e *Editor) commit(z *named.Zone, zone string, expected, newBytes []byte) (*Result, error) {
 	check := e.CheckZone
 	if check == nil {
 		check = zonefile.CheckZone
@@ -226,18 +336,15 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 	if e.beforeWrite != nil {
 		e.beforeWrite()
 	}
-	// Nano guard: re-read under the lock; if the file moved since we read it,
-	// refuse rather than clobber a concurrent (e.g. hand) edit.
 	cur, err := readNoFollow(z.Path)
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(cur, orig) {
+	if !bytes.Equal(cur, expected) {
 		return nil, fmt.Errorf("zone %q changed under you (a concurrent edit) — reload and reapply", zone)
 	}
 
-	// Back up the raw pre-edit bytes (the rollback artifact) before writing.
-	backup, err := e.backup(zone, orig)
+	backup, err := e.backup(zone, expected)
 	if err != nil {
 		return nil, fmt.Errorf("refusing to write without a backup: %w", err)
 	}
@@ -246,7 +353,7 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 		return nil, fmt.Errorf("write %s: %w", z.Path, err)
 	}
 
-	res := diff(zone, z.Path, orig, newBytes)
+	res := diff(zone, z.Path, expected, newBytes)
 	res.Backup = backup
 
 	reload := e.Reload
@@ -254,10 +361,7 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 		reload = rndcReload
 	}
 	if err := reload(zone); err != nil {
-		// Best-effort rollback: put the previous file back so the running named
-		// keeps serving the old zone and a later restart won't load the
-		// un-reloaded change.
-		if rerr := writePreserving(z.Path, orig); rerr != nil {
+		if rerr := writePreserving(z.Path, expected); rerr != nil {
 			return res, fmt.Errorf("reload failed (%w) AND restoring the previous file failed (%v) — recover manually from backup %s", err, rerr, backup)
 		}
 		return res, fmt.Errorf("reload failed (%w) — restored the previous zone file (backup at %s)", err, backup)

@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -120,12 +122,162 @@ func cmdZoneEnable(args []string) {
 	fmt.Println("Then `goddns record add|del|delset` edits it in place (checkzone + backup + rndc reload).")
 }
 
-func cmdZone(args []string) {
-	// `goddns zone enable <name>` — the advisory check before adding a static
-	// zone to editable_zones for file-as-truth editing.
-	if len(args) >= 1 && args[0] == "enable" {
-		cmdZoneEnable(args[1:])
+func fileEditor(cfg *config.Config) *filezone.Editor {
+	return &filezone.Editor{
+		NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
+		Editable: cfg.EditableZones, Keep: cfg.HistoryKeep,
+	}
+}
+
+func loadCfgArg(args []string, usage string, n int) (*config.Config, []string) {
+	fs := flag.NewFlagSet("zone", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConf, "config file")
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != n {
+		fatal("%s", usage)
+	}
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fatal("%v", err)
+	}
+	return cfg, rest
+}
+
+func printRawDiff(res *filezone.Result) {
+	for _, l := range res.Removed {
+		fmt.Printf("- %s\n", l)
+	}
+	for _, l := range res.Added {
+		fmt.Printf("+ %s\n", l)
+	}
+}
+
+// cmdZoneExport prints an enabled static zone's current file (raw, with comments)
+// to stdout — the faithful backup/round-trip source for `zone import`.
+func cmdZoneExport(args []string) {
+	cfg, rest := loadCfgArg(args, "usage: goddns zone export <zone>", 1)
+	data, err := fileEditor(cfg).ReadRaw(rest[0])
+	if err != nil {
+		fatal("%v", err)
+	}
+	os.Stdout.Write(data)
+}
+
+// cmdZoneImport replaces an enabled static zone's file with the contents of a
+// file (raw whole-file mode): checkzone + diff + confirm, then the locked
+// backup/atomic-write/reload pipeline.
+func cmdZoneImport(args []string) {
+	fs := flag.NewFlagSet("zone import", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConf, "config file")
+	yes := fs.Bool("y", false, "apply without the confirmation prompt")
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 2 {
+		fatal("usage: goddns zone import <zone> <file>")
+	}
+	zone, file := rest[0], rest[1]
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fatal("%v", err)
+	}
+	content, err := os.ReadFile(file)
+	if err != nil {
+		fatal("read %s: %v", file, err)
+	}
+	ed := fileEditor(cfg)
+	res, base, err := ed.PreviewRaw(zone, content)
+	if err != nil {
+		fatal("%v", err)
+	}
+	printRawDiff(res)
+	if len(res.Added) == 0 && len(res.Removed) == 0 {
+		fmt.Println("(no record changes; only the serial would bump)")
+	}
+	if !*yes && !confirmPrompt("replace "+zone+" with "+file+"?") {
+		fmt.Println("aborted")
 		return
+	}
+	res, err = ed.ReplaceRaw(zone, content, base)
+	if err != nil {
+		fatal("import: %v", err)
+	}
+	fmt.Printf("imported %s into %s (serial %d) — backup %s\n", file, res.File, res.Serial, res.Backup)
+}
+
+// cmdZoneEdit opens an enabled static zone's file in $EDITOR (webmin-style raw
+// mode), then on save checkzones + diffs + confirms and applies it through the
+// locked pipeline. The base captured before editing drives the concurrent-edit
+// guard, so a `nano` save during your session is refused, not clobbered.
+func cmdZoneEdit(args []string) {
+	cfg, rest := loadCfgArg(args, "usage: goddns zone edit <zone>", 1)
+	zone := rest[0]
+	ed := fileEditor(cfg)
+	base, err := ed.ReadRaw(zone)
+	if err != nil {
+		fatal("%v", err)
+	}
+	tmp, err := os.CreateTemp("", "goddns-"+strings.ReplaceAll(zone, "/", "_")+"-*.zone")
+	if err != nil {
+		fatal("%v", err)
+	}
+	// On a normal return (success / no-change / abort) the temp is removed; on a
+	// fatal (checkzone/apply error) os.Exit skips this defer, so the operator's
+	// edit survives — and we print its path below before bailing.
+	defer os.Remove(tmp.Name())
+	tmp.Write(base)
+	tmp.Close()
+
+	// $EDITOR may carry args (e.g. "code -w"); split it as argv, not shell.
+	ed0 := strings.Fields(cmp.Or(os.Getenv("EDITOR"), os.Getenv("VISUAL"), "vi"))
+	c := exec.Command(ed0[0], append(ed0[1:], tmp.Name())...)
+	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := c.Run(); err != nil {
+		fatal("editor %q: %v", ed0, err)
+	}
+	edited, err := os.ReadFile(tmp.Name())
+	if err != nil {
+		fatal("%v", err)
+	}
+	if bytes.Equal(edited, base) {
+		fmt.Println("no changes")
+		return
+	}
+	res, _, err := ed.PreviewRaw(zone, edited)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "your edit is preserved at %s\n", tmp.Name())
+		fatal("%v", err)
+	}
+	printRawDiff(res)
+	if !confirmPrompt("apply your edit to " + zone + "?") {
+		fmt.Println("aborted")
+		return
+	}
+	res, err = ed.ReplaceRaw(zone, edited, base)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "your edit is preserved at %s\n", tmp.Name())
+		fatal("apply: %v", err)
+	}
+	fmt.Printf("edited %s (serial %d) — backup %s\n", res.File, res.Serial, res.Backup)
+}
+
+func cmdZone(args []string) {
+	// Phase-4 file-edit subcommands for enabled static zones.
+	if len(args) >= 1 {
+		switch args[0] {
+		case "enable":
+			cmdZoneEnable(args[1:])
+			return
+		case "export":
+			cmdZoneExport(args[1:])
+			return
+		case "import":
+			cmdZoneImport(args[1:])
+			return
+		case "edit":
+			cmdZoneEdit(args[1:])
+			return
+		}
 	}
 
 	// The zone name is the first positional arg; allow it before the flags.
