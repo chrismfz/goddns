@@ -162,7 +162,8 @@ deb: build ## Δημιουργεί .deb
 		"$(PKGROOT)/etc/goddns" \
 		"$(PKGROOT)/etc/goddns/proxy.d" \
 		"$(OUTDIR)"
-	@chmod 0750 "$(PKGROOT)/etc/goddns" "$(PKGROOT)/etc/goddns/proxy.d"
+	@chmod 0750 "$(PKGROOT)/etc/goddns"
+	@chmod 2770 "$(PKGROOT)/etc/goddns/proxy.d"   # setgid + group-write: daemon manages vhosts, fragments inherit group goddns
 
 	# copy DEBIAN metadata/scripts
 	@cp -a "$(DEB_SRC)/." "$(PKGROOT)/DEBIAN/"

@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/BurntSushi/toml"
@@ -184,6 +185,30 @@ upstream = "https://1.1.1.1"
 	}
 	if managed, ok := got["managed.example"]; !ok || !managed {
 		t.Errorf("managed.example should be listed managed, got ok=%v managed=%v", ok, managed)
+	}
+}
+
+// A written fragment must share proxy.d/'s group, so the goddns daemon (which
+// runs as a different user than a root CLI) can always read what was written —
+// otherwise a `sudo goddns vhost set` would leave a root:root file that
+// crash-loops the daemon.
+func TestFragmentGroupMatchesDir(t *testing.T) {
+	e := newEditor(t, "")
+	if _, err := e.Set("x.example", rule()); err != nil {
+		t.Fatal(err)
+	}
+	fragSt, err := os.Stat(e.frag("x.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirSt, err := os.Stat(e.dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fg := fragSt.Sys().(*syscall.Stat_t).Gid
+	dg := dirSt.Sys().(*syscall.Stat_t).Gid
+	if fg != dg {
+		t.Fatalf("fragment gid %d != proxy.d gid %d — the daemon may not be able to read it", fg, dg)
 	}
 }
 

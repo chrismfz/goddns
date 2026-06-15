@@ -84,7 +84,7 @@ mkdir -p "%{buildroot}/etc/goddns/proxy.d"
 %{_bindir}/goddns
 %{_unitdir}/goddns.service
 %attr(0750,root,goddns) %dir /etc/goddns
-%attr(0750,root,goddns) %dir /etc/goddns/proxy.d
+%attr(2770,root,goddns) %dir /etc/goddns/proxy.d
 %attr(0640,root,goddns) %config(noreplace) /etc/goddns/goddns.conf
 %config(noreplace) /etc/logrotate.d/goddns
 
@@ -107,10 +107,16 @@ if [ -f /etc/goddns/goddns.conf ]; then
     chown root:goddns /etc/goddns/goddns.conf || true
     chmod 0640 /etc/goddns/goddns.conf || true
 fi
-# proxy vhost drop-in dir + seed the example template in place
+# proxy vhost drop-in dir + seed the example template in place.
+# 2770 root:goddns — setgid so fragments written by the CLI (as root) or the
+# admin UI (as goddns) land group goddns and stay daemon-readable; group-write
+# lets the admin UI manage vhosts.
 mkdir -p /etc/goddns/proxy.d
 chown root:goddns /etc/goddns/proxy.d || true
-chmod 0750 /etc/goddns/proxy.d || true
+chmod 2770 /etc/goddns/proxy.d || true
+# heal any fragment an older root CLI left root:root (would crash-loop the daemon)
+chgrp goddns /etc/goddns/proxy.d/*.conf 2>/dev/null || true
+chmod 0640 /etc/goddns/proxy.d/*.conf 2>/dev/null || true
 if [ -f %{_datadir}/goddns/configs/vhost.conf.example ] && \
    [ ! -f /etc/goddns/proxy.d/vhost.conf.example ]; then
     install -m0640 -o root -g goddns \
