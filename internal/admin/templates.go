@@ -257,7 +257,7 @@ This page never edits BIND — it only reads.</div>
 <td>{{.Name}}</td><td class="muted">{{.TTL}}</td>
 <td>{{.Type}}</td><td style="word-break:break-all">{{.Data}}</td>
 {{if $.Editable}}<td style="white-space:nowrap"><form class="inline" method="post" action="/zone/record"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="zone" value="{{$.Name}}"><input type="hidden" name="action" value="del"><input type="hidden" name="rr" value="{{.Full}}"><button class="danger" type="submit">del</button></form></td>{{end}}
-</tr>{{else}}<tr><td colspan="5" class="muted">(no records)</td></tr>{{end}}
+</tr>{{else}}<tr><td colspan="{{if .Editable}}5{{else}}4{{end}}" class="muted">(no records)</td></tr>{{end}}
 </tbody></table>
 {{if .Editable}}
 <div class="card"><form method="post" action="/zone/record"><div class="row">

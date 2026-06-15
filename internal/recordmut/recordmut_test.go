@@ -66,6 +66,21 @@ func TestValidateDynamicAndKey(t *testing.T) {
 	}
 }
 
+func TestBuildResultDelRR(t *testing.T) {
+	live := []dns.RR{mustRR(t, "host.ddns.myip.gr. 60 IN A 1.1.1.1")}
+
+	// del of an existing record (different TTL) -> resolved against live, shown
+	existing := []ddns.Op{{Action: ddns.DelRR, RR: mustRR(t, "host.ddns.myip.gr. 300 IN A 1.1.1.1")}}
+	if res := buildResult("ddns.myip.gr", "k", existing, live); len(res.Removed) != 1 {
+		t.Fatalf("del of an existing record should resolve, got %v", res.Removed)
+	}
+	// del of an absent record -> a no-op, not reported as removed
+	absent := []ddns.Op{{Action: ddns.DelRR, RR: mustRR(t, "host.ddns.myip.gr. 60 IN A 9.9.9.9")}}
+	if res := buildResult("ddns.myip.gr", "k", absent, live); len(res.Removed) != 0 {
+		t.Fatalf("del of an absent record should be a no-op, got %v", res.Removed)
+	}
+}
+
 func TestDelegatedChildRefused(t *testing.T) {
 	e := testEditor()
 	in := &named.Inventory{Zones: []named.Zone{
