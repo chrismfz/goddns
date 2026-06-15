@@ -67,6 +67,12 @@ type Config struct {
 	// default), so the connection peer IP is always the client.
 	TrustedProxies []string `toml:"trusted_proxies"`
 
+	// Static zones the operator has enabled for goddns to edit IN PLACE
+	// (Phase 4, file-as-truth). goddns only edits a static master zone listed
+	// here — never a dynamic zone (those use RFC2136), a slave, a panel-managed
+	// zone, or one not on this list. Set it yourself after `goddns zone enable`.
+	EditableZones []string `toml:"editable_zones"`
+
 	// Reverse proxy mode: a second TLS listener that routes by SNI/Host to
 	// internal upstreams (iDRAC, switches, anything without proper TLS).
 	// Off by default — pure-DDNS deployments are unaffected.
