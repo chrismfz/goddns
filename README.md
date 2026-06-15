@@ -71,6 +71,36 @@ Tokens are 256-bit random values; only their SHA-256 hash is stored in SQLite.
 TSIG secrets are supplied via the systemd `EnvironmentFile`
 (`/etc/goddns/goddns.env`, root-only), not the config file.
 
+### TSIG keyring + rotation (`tsig_keys_file`)
+
+Instead of keeping the TSIG secret in two places (named's key file *and*
+goddns's env), point goddns at a single **goddns-owned key file** that named
+also includes. It is the one source of truth, holds one or more keys, and
+goddns can **rotate** a key in it with one command:
+
+    # a goddns-owned key file, readable by named, writable by goddns:
+    tsig-keygen -a hmac-sha256 ddns-update | sudo tee /etc/goddns/tsig.keys
+    sudo chown goddns:named /etc/goddns/tsig.keys && sudo chmod 0640 /etc/goddns/tsig.keys
+    sudo chmod 0751 /etc/goddns          # let the `named` user traverse to the one file
+                                         # (0751 = search only; goddns.conf/env stay unreadable)
+
+    # named.conf, once:
+    include "/etc/goddns/tsig.keys";
+
+    # goddns.conf — replaces tsig_secret / GODDNS_TSIG_SECRET:
+    tsig_keys_file = "/etc/goddns/tsig.keys"
+    tsig_name      = "ddns-update"
+
+Then rotation is one keystroke — it rewrites just that key, reconfigures BIND,
+and self-tests that the new key is accepted (other keys in the file untouched):
+
+    sudo goddns rotate-key            # rotates tsig_name; `rotate-key <name>` for another
+    # -> writes new secret, runs `rndc reconfig`, self-tests, daemon auto-reloads
+
+The running daemon watches the key file, so it picks up the new secret on its
+next poll — no manual restart. The legacy `tsig_secret`/env path still works
+when `tsig_keys_file` is unset.
+
 ## Build & packaging (cfm-style workflow)
 
     make help               # self-documenting target list

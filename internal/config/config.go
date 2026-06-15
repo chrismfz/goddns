@@ -13,6 +13,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/chrismfz/goddns/internal/tsig"
 )
 
 // TLS modes.
@@ -54,10 +56,11 @@ type Config struct {
 	ACMETSIGSecret string `toml:"acme_tsig_secret"` // defaults to tsig_secret; prefer env
 
 	// DNS / TSIG (the DDNS update key)
-	DNSServer  string `toml:"dns_server"`  // where to send the UPDATE, e.g. 127.0.0.1:53
-	TSIGName   string `toml:"tsig_name"`   // key name as defined in named.conf
-	TSIGAlgo   string `toml:"tsig_algo"`   // hmac-sha256 (default)
-	TSIGSecret string `toml:"tsig_secret"` // base64; prefer env GODDNS_TSIG_SECRET
+	DNSServer    string `toml:"dns_server"`     // where to send the UPDATE, e.g. 127.0.0.1:53
+	TSIGName     string `toml:"tsig_name"`      // key name as defined in named.conf
+	TSIGAlgo     string `toml:"tsig_algo"`      // hmac-sha256 (default)
+	TSIGSecret   string `toml:"tsig_secret"`    // base64; prefer env GODDNS_TSIG_SECRET
+	TSIGKeysFile string `toml:"tsig_keys_file"` // goddns-owned key file, the single source of truth for the keyring (also included once by named.conf). When set it supplies tsig_name's secret/algo — no separate tsig_secret/env.
 
 	// Trusted proxies: if the request comes from one of these CIDRs we honour
 	// X-Forwarded-For. Leave empty when goddns is exposed directly (the safe
@@ -79,7 +82,11 @@ type Config struct {
 	Admin AdminConfig `toml:"admin"`
 
 	trustedNets []*net.IPNet
+	tsigKeys    []tsig.Key
 }
+
+// TSIGKeys returns the keyring loaded from tsig_keys_file (empty if unset).
+func (c *Config) TSIGKeys() []tsig.Key { return c.tsigKeys }
 
 // AdminConfig configures the admin web UI (see internal/admin).
 type AdminConfig struct {
@@ -166,6 +173,25 @@ func Load(path string) (*Config, error) {
 	}
 	if v := os.Getenv("GODDNS_ACME_TSIG_SECRET"); v != "" {
 		c.ACMETSIGSecret = v
+	}
+
+	// tsig_keys_file is the single source of truth when set: load the keyring
+	// and take tsig_name's secret/algo from it (the file BIND also includes),
+	// instead of a separate tsig_secret/env.
+	if c.TSIGKeysFile != "" {
+		keys, err := tsig.LoadFile(c.TSIGKeysFile)
+		if err != nil {
+			return nil, fmt.Errorf("tsig_keys_file %s: %w", c.TSIGKeysFile, err)
+		}
+		c.tsigKeys = keys
+		k := tsig.Find(keys, c.TSIGName)
+		if k == nil {
+			return nil, fmt.Errorf("tsig_keys_file %s has no key %q (tsig_name)", c.TSIGKeysFile, c.TSIGName)
+		}
+		c.TSIGSecret = k.Secret
+		if k.Algo != "" {
+			c.TSIGAlgo = k.Algo
+		}
 	}
 
 	// ACME TSIG falls back to the main DDNS key. A dedicated key is better
