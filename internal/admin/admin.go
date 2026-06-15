@@ -32,6 +32,7 @@ import (
 	"github.com/chrismfz/goddns/internal/store"
 	"github.com/chrismfz/goddns/internal/tsig"
 	"github.com/chrismfz/goddns/internal/vhostmut"
+	"github.com/chrismfz/goddns/internal/zoned"
 )
 
 const cookieName = "goddns_admin"
@@ -379,20 +380,6 @@ func (h *Handler) fileEditor(cfg *config.Config) *filezone.Editor {
 	return &filezone.Editor{NamedConf: nc, DNSServer: server, Editable: cfg.EditableZones, Keep: cfg.HistoryKeep}
 }
 
-// parseRRZone parses an RR with the zone as $ORIGIN, so a relative owner name
-// (e.g. `www`) qualifies under the zone instead of becoming a root-level name.
-func parseRRZone(line, zone string) (dns.RR, error) {
-	zp := dns.NewZoneParser(strings.NewReader(line), dns.Fqdn(zone), "")
-	rr, ok := zp.Next()
-	if err := zp.Err(); err != nil {
-		return nil, err
-	}
-	if !ok || rr == nil {
-		return nil, fmt.Errorf("no record in %q", line)
-	}
-	return rr, nil
-}
-
 // canEditZone reports whether goddns may edit the named zone (dynamic + a held
 // key) — used to decide whether to show edit/restore controls. Best-effort: if
 // named.conf can't be read, it returns false (controls stay hidden).
@@ -427,19 +414,17 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 	}
 	cfg := h.cfg()
 	// Route by ownership, matching what the page shows: an enabled static MASTER
-	// zone is edited in place (filezone, structured/surgical — raw whole-file
-	// mode stays CLI-only); everything else, including a dynamic zone mistakenly
-	// listed in editable_zones, is RFC2136 (recordmut). CanEdit re-reads the live
-	// dynamic flag, so the routing gate can't disagree with the display gate.
+	// zone is edited in place (file-as-truth — via the zoned root helper if one
+	// is configured, else directly); everything else, including a dynamic zone
+	// mistakenly listed in editable_zones, is RFC2136 (recordmut). CanEdit
+	// re-reads the live dynamic flag, so routing can't disagree with the display.
 	fed := h.fileEditor(cfg)
-	static := fed.CanEdit(fed.Lookup(zone))
-	var rr dns.RR
-	var err error
-	if static {
-		rr, err = parseRRZone(line, zone)
-	} else {
-		rr, err = dns.NewRR(line)
+	if fed.CanEdit(fed.Lookup(zone)) {
+		h.handleStaticRecord(w, r, user, peer, cfg, zone, action, line)
+		return
 	}
+
+	rr, err := dns.NewRR(line)
 	if err != nil || rr == nil {
 		renderRecordErr(w, h.version, "parse record %q: %v", line, err)
 		return
@@ -449,23 +434,38 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 		act = ddns.DelRR
 	}
 	ops := []ddns.Op{{Action: act, RR: rr}}
+	ed := h.editor(cfg)
 
 	if r.FormValue("confirm") != "1" {
-		var added, removed []string
-		if static {
-			res, perr := fed.Preview(zone, ops)
-			if perr != nil {
-				renderRecordErr(w, h.version, "%v", perr)
-				return
-			}
-			added, removed = res.Added, res.Removed
-		} else {
-			res, perr := h.editor(cfg).Preview(zone, ops)
-			if perr != nil {
-				renderRecordErr(w, h.version, "%v", perr)
-				return
-			}
-			added, removed = res.Added, res.Removed
+		res, perr := ed.Preview(zone, ops)
+		if perr != nil {
+			renderRecordErr(w, h.version, "%v", perr)
+			return
+		}
+		render(w, recordConfirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
+			"Action": action, "RR": line, "Added": res.Added, "Removed": res.Removed,
+		})
+		return
+	}
+	res, aerr := ed.Apply(zone, ops)
+	if aerr != nil {
+		renderRecordErr(w, h.version, "%v", aerr)
+		return
+	}
+	h.audit(user, peer, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
+	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone), http.StatusSeeOther)
+}
+
+// handleStaticRecord edits a record in an enabled static zone in place, via the
+// zoned root helper when a socket is configured (so the daemon never writes
+// /var/named) or directly otherwise. Two-phase confirm like the dynamic path.
+func (h *Handler) handleStaticRecord(w http.ResponseWriter, r *http.Request, user, peer string, cfg *config.Config, zone, action, line string) {
+	if r.FormValue("confirm") != "1" {
+		added, removed, _, _, err := h.staticEdit(cfg, zone, action, line, false)
+		if err != nil {
+			renderRecordErr(w, h.version, "%v", err)
+			return
 		}
 		render(w, recordConfirmTmpl, map[string]any{
 			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
@@ -473,23 +473,49 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 		})
 		return
 	}
-
-	if static {
-		res, aerr := fed.Apply(zone, ops)
-		if aerr != nil {
-			renderRecordErr(w, h.version, "%v", aerr)
-			return
-		}
-		h.audit(user, peer, "record-%s zone=%s rr=%q file=%s serial=%d backup=%s", action, zone, line, res.File, res.Serial, res.Backup)
-	} else {
-		res, aerr := h.editor(cfg).Apply(zone, ops)
-		if aerr != nil {
-			renderRecordErr(w, h.version, "%v", aerr)
-			return
-		}
-		h.audit(user, peer, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
+	_, _, serial, backup, err := h.staticEdit(cfg, zone, action, line, true)
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
 	}
+	via := "direct"
+	if cfg.ZonedSocket != "" {
+		via = "zoned"
+	}
+	h.audit(user, peer, "record-%s zone=%s rr=%q serial=%d backup=%s via=%s", action, zone, line, serial, backup, via)
 	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone), http.StatusSeeOther)
+}
+
+// staticEdit previews or applies one static-zone record edit, routed through the
+// zoned root helper (if zoned_socket is set) or filezone directly.
+func (h *Handler) staticEdit(cfg *config.Config, zone, action, line string, apply bool) (added, removed []string, serial uint32, backup string, err error) {
+	if cfg.ZonedSocket != "" {
+		resp, e := zoned.Call(cfg.ZonedSocket, zoned.Request{Zone: zone, Action: action, RR: line, Apply: apply})
+		if e != nil {
+			return nil, nil, 0, "", e
+		}
+		return resp.Added, resp.Removed, resp.Serial, resp.Backup, nil
+	}
+	rr, e := filezone.ParseRR(line, zone)
+	if e != nil {
+		return nil, nil, 0, "", fmt.Errorf("parse %q: %v", line, e)
+	}
+	act := ddns.AddRR
+	if action == "del" {
+		act = ddns.DelRR
+	}
+	ops := []ddns.Op{{Action: act, RR: rr}}
+	fed := h.fileEditor(cfg)
+	var res *filezone.Result
+	if apply {
+		res, e = fed.Apply(zone, ops)
+	} else {
+		res, e = fed.Preview(zone, ops)
+	}
+	if e != nil {
+		return nil, nil, 0, "", e
+	}
+	return res.Added, res.Removed, res.Serial, res.Backup, nil
 }
 
 // handleRestore rolls a dynamic zone back to a Phase-1 snapshot. Two-phase like

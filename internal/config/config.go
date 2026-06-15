@@ -73,6 +73,13 @@ type Config struct {
 	// zone, or one not on this list. Set it yourself after `goddns zone enable`.
 	EditableZones []string `toml:"editable_zones"`
 
+	// Path to the goddns-zoned privileged-helper socket. When set, the admin web
+	// UI sends static-zone edits to that root helper (which writes /var/named +
+	// reloads) instead of writing the file itself — so the internet-facing daemon
+	// never touches the zone directory. Empty = the daemon writes directly (needs
+	// the perms; CLI editing as root is unaffected either way).
+	ZonedSocket string `toml:"zoned_socket"`
+
 	// Reverse proxy mode: a second TLS listener that routes by SNI/Host to
 	// internal upstreams (iDRAC, switches, anything without proper TLS).
 	// Off by default — pure-DDNS deployments are unaffected.

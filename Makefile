@@ -172,6 +172,7 @@ deb: build ## Δημιουργεί .deb
 	# payload
 	@install -m0755 "$(BIN)" "$(PKGROOT)/usr/bin/goddns"
 	@install -m0640 "$(CONFIG_DIR)/goddns.service" "$(PKGROOT)/lib/systemd/system/goddns.service"
+	@install -m0640 "$(CONFIG_DIR)/goddns-zoned.service" "$(PKGROOT)/lib/systemd/system/goddns-zoned.service"
 	@install -m0640 "$(CONFIG_DIR)/goddns.conf"    "$(PKGROOT)/etc/goddns/goddns.conf"
 	@mkdir -p "$(PKGROOT)/etc/logrotate.d"
 	@install -m0644 "$(CONFIG_DIR)/goddns.logrotate" "$(PKGROOT)/etc/logrotate.d/goddns"
@@ -207,6 +208,7 @@ stage-pkgroot: build
 	# systemd unit (RPM-friendly path)
 	@mkdir -p $(PKGROOT)/usr/lib/systemd/system
 	@cp -f $(CONFIG_DIR)/goddns.service $(PKGROOT)/usr/lib/systemd/system/goddns.service
+	@cp -f $(CONFIG_DIR)/goddns-zoned.service $(PKGROOT)/usr/lib/systemd/system/goddns-zoned.service
 
 
 rpm_prep_dirs:
@@ -222,6 +224,7 @@ stage-rpm: stage-pkgroot
 	@echo "→ Staging RPM systemd unit"
 	@mkdir -p $(PKGROOT)/usr/lib/systemd/system
 	@cp -f $(CONFIG_DIR)/goddns.service $(PKGROOT)/usr/lib/systemd/system/goddns.service
+	@cp -f $(CONFIG_DIR)/goddns-zoned.service $(PKGROOT)/usr/lib/systemd/system/goddns-zoned.service
 
 
 # --- RPM (.rpm) ---

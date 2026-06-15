@@ -89,6 +89,21 @@ func (e *Editor) editable(zone string) bool {
 
 func norm(z string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".") }
 
+// ParseRR parses a zone-file RR line with the zone as $ORIGIN, so a relative
+// owner name (e.g. `www`) qualifies under the zone instead of becoming a
+// root-level name. Shared by the CLI, the admin UI, and the zoned helper.
+func ParseRR(line, zone string) (dns.RR, error) {
+	zp := dns.NewZoneParser(strings.NewReader(line), dns.Fqdn(zone), "")
+	rr, ok := zp.Next()
+	if err := zp.Err(); err != nil {
+		return nil, err
+	}
+	if !ok || rr == nil {
+		return nil, fmt.Errorf("no record in %q", line)
+	}
+	return rr, nil
+}
+
 // Lookup returns the named.Zone for name from the inventory (nil if absent or
 // the inventory can't be read) — for routing decisions that need the live
 // dynamic flag.

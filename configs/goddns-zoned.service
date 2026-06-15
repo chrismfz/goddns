@@ -1,0 +1,33 @@
+[Unit]
+Description=goddns privileged zone-edit helper (file-as-truth static zones)
+Documentation=https://github.com/chrismfz/goddns
+After=named.service
+# Optional companion to goddns.service — only needed if you edit static zones
+# from the ADMIN WEB UI. CLI editing (run as root) never needs this.
+
+[Service]
+Type=simple
+# Runs as ROOT on purpose: it writes the zone files BIND serves and runs
+# `rndc reload`, so the unprivileged goddns daemon never has to. The daemon
+# talks to it over /run/goddns/zoned.sock (root:goddns 0660) and sends only
+# structured record ops, which this helper re-validates against its OWN config.
+ExecStart=/usr/bin/goddns zoned -config /etc/goddns/goddns.conf
+Restart=on-failure
+RestartSec=3
+RuntimeDirectory=goddns
+RuntimeDirectoryMode=0755
+
+# Light hardening (it is privileged by design; don't over-sandbox or it breaks
+# on non-default BIND layouts — add your zone dir to ReadWritePaths if you
+# enable ProtectSystem).
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

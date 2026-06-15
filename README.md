@@ -441,6 +441,45 @@ so it is undoable. The admin **history page** has a `restore` button per
 snapshot (same confirm + diff, audited). This is the "the client broke their
 DKIM at 14:00 — put it back" button.
 
+### Editing static zones in place (file-as-truth)
+
+goddns can also edit a **static** zone's file directly — the records you keep in
+a hand-written zone file, not a dynamic/RFC2136 zone. It is **file-as-truth**: the
+file is the single source of truth, goddns rewrites only the changed record's
+line(s) (your comments / `$TTL` / ordering survive), bumps the serial,
+`named-checkzone`s, backs up the previous bytes, writes atomically, and
+`rndc reload`s. It **coexists with `nano`**: an edit is done under an advisory
+lock with a byte-compare, so a concurrent hand-edit is refused ("changed under
+you — reload"), never clobbered. It never touches a dynamic zone (those use
+`record`), a slave, a panel-managed zone, or one you didn't enable.
+
+    goddns zone enable myip.gr            # checks it's a safe static master, prints the line to add
+    # add it to editable_zones in goddns.conf, then:
+    goddns record add myip.gr 'www.myip.gr. 300 IN A 203.0.113.9'   # surgical, in place
+    goddns record del myip.gr 'www.myip.gr. 300 IN A 203.0.113.9'
+    goddns zone edit   myip.gr            # whole-file edit in $EDITOR (raw mode, CLI-only)
+    goddns zone import myip.gr file.db    # replace from a file (checkzone-gated)
+    goddns zone export myip.gr            # dump the raw file
+
+The same `add`/`del` is in the **admin per-zone page** for enabled static zones
+(structured edits only; raw whole-file mode stays on the CLI). Every change is
+captured by the history poller (it watches static zones too), so a `nano` edit
+and a goddns edit both show up in `goddns zone … -history` / `-diff`.
+
+**Permissions — the daemon write path.** The CLI (run as root) needs nothing
+extra. For editing from the **web UI**, the goddns *daemon* would need to write
+the zone file and run `rndc` — which on an internet-facing box you may not want.
+The package therefore ships a small **privileged helper**, `goddns-zoned` (a
+systemd unit, disabled by default), that runs as root and does the file write +
+reload; the daemon connects to it over `/run/goddns/zoned.sock` (root:goddns,
+0660) and sends only **structured ops** that the helper **re-validates against
+its own config**. So the internet-facing daemon never holds a `/var/named`
+descriptor. Turn it on with `systemctl enable --now goddns-zoned` and set
+`zoned_socket = "/run/goddns/zoned.sock"`. Leaving it off lets the daemon write
+directly (then grant it the perms yourself). goddns never edits `named.conf`
+itself, and never auto-grants itself access to BIND's files — that stays your
+call.
+
 ## Logging
 
 By default goddns logs to stderr (journald under systemd). On a busy DNS
