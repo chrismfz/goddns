@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
@@ -87,9 +88,18 @@ func cmdRotateKey(args []string) {
 		if err != nil {
 			rollback(fmt.Sprintf("self-test setup failed: %v", err))
 		}
-		if err := u.Verify(zone); err != nil {
+		// brief retry in case reconfig hasn't fully settled, so a transient
+		// probe failure doesn't trigger a spurious rollback.
+		var verr error
+		for i := 0; i < 3; i++ {
+			if verr = u.Verify(zone); verr == nil {
+				break
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		if verr != nil {
 			rollback(fmt.Sprintf("self-test FAILED — named did not accept the new key (%v); "+
-				"check that named.conf includes %s", err, cfg.TSIGKeysFile))
+				"check that named.conf includes %s", verr, cfg.TSIGKeysFile))
 		}
 		fmt.Printf("self-test: named accepts the new key on %s ✓\n", zone)
 	}
