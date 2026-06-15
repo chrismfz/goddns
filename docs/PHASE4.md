@@ -70,12 +70,28 @@ apply backend behind the existing `ddns.Mutator` seam.
 This is the answer to "if I nano it in a hurry, will we kill each other?" — **no.**
 Step 1 captures the file's `(mtime, sha256)`; step 6 re-checks it just before
 writing. If you (or another admin session) changed the file in between, goddns
-**refuses** and tells you to reload — it never writes over a change it didn't see.
-Because the file is the only truth, there is no second copy to drift: goddns
-always edits against exactly what's on disk right now. Covers human-vs-goddns and
-goddns-vs-goddns. No lost edits, no silent clobber. (This is how a careful editor
-behaves — read-modify-write with a compare-and-swap, like `git`'s non-fast-forward
-refusal.)
+**refuses that one write** and tells you to reload — it never writes over a change
+it didn't see.
+
+It is **stateless and per-write**, not a lock on the zone. A hand-edit does **not**
+disable goddns, block future edits, or refuse views. Two cases make this concrete:
+
+- **goddns wasn't editing** (it was closed / down / you had no access, and you just
+  `nano`'d a CNAME): nothing to conflict with. Next time you open the zone, goddns
+  reads the file fresh — your CNAME is simply the current state — and everything
+  works normally. The history poller (§6) already snapshotted your hand-edit.
+- **a genuine concurrent edit** (you had a goddns edit form open against the
+  pre-`nano` file, then `nano`'d, then hit save): goddns refuses **that save**
+  (applying it would silently drop your CNAME), you reload to pick up the current
+  file, redo the change, save. Your `nano` edit is never lost — it's on disk the
+  whole time; the refusal only stops a stale write from clobbering it.
+
+Views are never refused (they always read fresh). The check is exactly a
+compare-and-swap on "did the file move under me for *this* write" — like `git`'s
+non-fast-forward push refusal (you `pull`/reload and proceed), not "git refuses to
+work because you committed." Because the file is the only truth, there is no second
+copy to drift: goddns always edits against what's on disk right now. No lost edits,
+no silent clobber.
 
 ## 4. Surgical edits vs raw mode
 
