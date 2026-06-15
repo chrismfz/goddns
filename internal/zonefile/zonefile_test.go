@@ -303,6 +303,28 @@ func TestSingleLineSOA(t *testing.T) {
 	}
 }
 
+func TestSerialFloor(t *testing.T) {
+	f := parse(t, handZone) // serial 2024010101
+	// floor 0 -> date-based bump above the current serial
+	out, err := f.SerialFloor(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := parse(t, string(out)).SOASerial(); s <= 2024010101 {
+		t.Fatalf("SerialFloor(0) = %d, want a date bump above the current", s)
+	}
+	// a high floor wins
+	out2, _ := parse(t, handZone).SerialFloor(4000000000)
+	if s := parse(t, string(out2)).SOASerial(); s != 4000000001 {
+		t.Fatalf("SerialFloor(4e9) = %d, want 4000000001", s)
+	}
+	// the rest of the file is byte-identical except the serial
+	old := uint32(2024010101)
+	if restoreSerial(string(out2), old, 4000000001) != handZone {
+		t.Fatalf("SerialFloor changed more than the serial:\n%s", out2)
+	}
+}
+
 func TestNextSerial(t *testing.T) {
 	// from an old serial -> jumps to today's YYYYMMDD00
 	if got := nextSerial(1); got < 2026061500 {

@@ -139,6 +139,27 @@ func (f *File) Surgical() bool { return f.noSurgery == "" }
 // Reason returns why surgical editing is refused (empty if it's allowed).
 func (f *File) Reason() string { return f.noSurgery }
 
+// SerialFloor returns the file bytes with the SOA serial set to a value that
+// exceeds both the current file serial and floor (date-based) — so a raw
+// whole-file replace (e.g. an import carrying a stale serial) never regresses
+// below the live zone. Errors with *UnsafeError if the serial isn't surgically
+// locatable (raw content with $GENERATE etc.) — the caller then leaves the
+// operator's serial as-is.
+func (f *File) SerialFloor(floor uint32) ([]byte, error) {
+	if f.noSurgery != "" || f.serialTok == nil {
+		return nil, &UnsafeError{Reason: "serial not surgically locatable"}
+	}
+	base := f.SOASerial()
+	if floor > base {
+		base = floor
+	}
+	next := nextSerial(base)
+	out := append([]string(nil), f.lines...)
+	st := f.serialTok
+	out[st.line] = out[st.line][:st.start] + strconv.FormatUint(uint64(next), 10) + out[st.line][st.end:]
+	return []byte(strings.Join(out, "\n")), nil
+}
+
 // SOASerial returns the current serial, or 0 if no SOA.
 func (f *File) SOASerial() uint32 {
 	if f.soa != nil {
