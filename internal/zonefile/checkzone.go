@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 // ErrCheckzoneMissing means named-checkzone isn't installed; the caller decides
@@ -18,6 +20,12 @@ var ErrCheckzoneMissing = errors.New("named-checkzone not found in PATH")
 // fail (not warn) on integrity problems it can detect; the design's post-reload
 // semantic verify covers what it can't.
 func CheckZone(zone string, content []byte) error {
+	// Validate the zone name before it becomes an exec argument: a name starting
+	// with '-' would be parsed as a flag (argument injection), and the design's
+	// option-(b) threat model has the zone name flowing from a less-trusted path.
+	if _, ok := dns.IsDomainName(zone); zone == "" || strings.HasPrefix(zone, "-") || !ok {
+		return fmt.Errorf("invalid zone name %q", zone)
+	}
 	bin, err := exec.LookPath("named-checkzone")
 	if err != nil {
 		return ErrCheckzoneMissing

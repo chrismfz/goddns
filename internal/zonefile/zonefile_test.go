@@ -183,6 +183,86 @@ func TestDelRRsetMissingIsNoOp(t *testing.T) {
 	}
 }
 
+func TestRefuseDeleteWhenNextInheritsTTL(t *testing.T) {
+	// No $TTL directive: "b" omits its TTL, inheriting "a"'s 300. Deleting "a"
+	// would silently change b's effective TTL — must be refused.
+	z := "$ORIGIN example.\n@ IN SOA ns.example. host.example. 100 3 4 5 6\n@ IN NS ns.example.\na 300 IN A 1.1.1.1\nb IN A 2.2.2.2\n"
+	f := parse(t, z)
+	if !f.Surgical() {
+		t.Fatalf("zone should be surgical, got %q", f.Reason())
+	}
+	op := []ddns.Op{{Action: ddns.DelRR, RR: mustRR(t, "a.example. 0 IN A 1.1.1.1")}}
+	_, err := f.Edit(op)
+	var ue *UnsafeError
+	if !errors.As(err, &ue) || !strings.Contains(err.Error(), "inherits its TTL") {
+		t.Fatalf("expected a TTL-inheritance UnsafeError, got %v", err)
+	}
+}
+
+func TestDeleteSafeWithTTLDirective(t *testing.T) {
+	// With $TTL present, an omitted TTL inherits from the directive, not the
+	// neighbour — so the same delete is safe.
+	z := "$ORIGIN example.\n$TTL 3600\n@ IN SOA ns.example. host.example. 100 3 4 5 6\n@ IN NS ns.example.\na 300 IN A 1.1.1.1\nb IN A 2.2.2.2\n"
+	f := parse(t, z)
+	op := []ddns.Op{{Action: ddns.DelRR, RR: mustRR(t, "a.example. 0 IN A 1.1.1.1")}}
+	if _, err := f.Edit(op); err != nil {
+		t.Fatalf("delete should be safe with $TTL present: %v", err)
+	}
+}
+
+func TestTXTWithParensSemicolonsRoundTrips(t *testing.T) {
+	z := "$ORIGIN example.\n$TTL 60\n@ IN SOA ns.example. host.example. 5 3 4 5 6\n@ IN NS ns.example.\ntxt IN TXT \"v=spf1 a:foo (bar) ; not a comment\"\n"
+	f := parse(t, z)
+	if !f.Surgical() {
+		t.Fatalf("TXT-with-specials should be surgical, got %q", f.Reason())
+	}
+	out, err := f.Edit(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := f.SOASerial()
+	if restoreSerial(string(out), old, parse(t, string(out)).SOASerial()) != z {
+		t.Fatalf("TXT with parens/semicolons not preserved byte-for-byte:\n%s", out)
+	}
+}
+
+func TestCRLFPreserved(t *testing.T) {
+	z := "$ORIGIN example.\r\n$TTL 60\r\n@ IN SOA ns.example. host.example. 7 3 4 5 6\r\n@ IN NS ns.example.\r\nw IN A 1.1.1.1\r\n"
+	f := parse(t, z)
+	out, err := f.Edit(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := f.SOASerial()
+	if restoreSerial(string(out), old, parse(t, string(out)).SOASerial()) != z {
+		t.Fatalf("CRLF endings not preserved:\n%q", out)
+	}
+}
+
+func TestNoTrailingNewlineAdd(t *testing.T) {
+	z := "$ORIGIN example.\n$TTL 60\n@ IN SOA ns.example. host.example. 8 3 4 5 6\n@ IN NS ns.example." // no trailing \n
+	f := parse(t, z)
+	out, err := f.Edit([]ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "w.example. 60 IN A 1.1.1.1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), "w.example.") {
+		t.Fatalf("add to a newline-less file failed:\n%q", out)
+	}
+}
+
+func TestDuplicateDeleteFirstOnly(t *testing.T) {
+	z := "$ORIGIN example.\n$TTL 60\n@ IN SOA ns.example. host.example. 9 3 4 5 6\n@ IN NS ns.example.\nw IN A 1.1.1.1\nw IN A 1.1.1.1\n"
+	f := parse(t, z)
+	out, err := f.Edit([]ddns.Op{{Action: ddns.DelRR, RR: mustRR(t, "w.example. 0 IN A 1.1.1.1")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(out), "w\tIN\tA\t1.1.1.1") + strings.Count(string(out), "w IN A 1.1.1.1"); n != 1 {
+		t.Fatalf("DelRR should remove exactly one of the duplicate lines, %d remain:\n%s", n, out)
+	}
+}
+
 func TestRefuseGenerate(t *testing.T) {
 	z := "$ORIGIN example.\n$TTL 60\n@ IN SOA ns. host. ( 1 2 3 4 5 )\n@ IN NS ns.\n$GENERATE 1-3 host$ IN A 10.0.0.$\n"
 	f, err := Parse([]byte(z), "example.")

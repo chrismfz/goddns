@@ -16,6 +16,7 @@ package zonefile
 import (
 	"bytes"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,18 +35,20 @@ func unsafe(format string, a ...any) error { return &UnsafeError{Reason: fmt.Spr
 
 // File is a parsed zone file that maps each record to its source line span.
 type File struct {
-	lines     []string // physical lines (split on \n; rejoined exactly)
-	origin    string
-	records   []*rec  // record entries in file order (empty when !surgical)
-	soa       *rec    // the SOA record
-	serialTok *tokPos // location of the SOA serial token (for the in-place bump)
-	noSurgery string  // non-empty reason ⇒ surgical editing refused (raw mode only)
+	lines       []string // physical lines (split on \n; rejoined exactly)
+	origin      string
+	records     []*rec  // record entries in file order (empty when !surgical)
+	soa         *rec    // the SOA record
+	serialTok   *tokPos // location of the SOA serial token (for the in-place bump)
+	hasTTLDirec bool    // a $TTL directive is present (omitted TTLs inherit from it, not neighbours)
+	noSurgery   string  // non-empty reason ⇒ surgical editing refused (raw mode only)
 }
 
 type rec struct {
-	rr         dns.RR
-	start, end int // physical line span (inclusive)
-	explicit   bool
+	rr          dns.RR
+	start, end  int  // physical line span (inclusive)
+	explicit    bool // explicit owner (no leading whitespace)
+	explicitTTL bool // an explicit TTL token (vs inheriting from $TTL / the prior record)
 }
 
 type tokPos struct {
@@ -70,6 +73,8 @@ func Parse(data []byte, origin string) (*File, error) {
 			switch e.directive {
 			case "$INCLUDE", "$GENERATE":
 				f.noSurgery = "file uses " + e.directive + " — raw mode required"
+			case "$TTL":
+				f.hasTTLDirec = true
 			case "$ORIGIN":
 				if seenRecord {
 					f.noSurgery = "file re-scopes $ORIGIN mid-file — raw mode required"
@@ -106,7 +111,10 @@ func Parse(data []byte, origin string) (*File, error) {
 		return f, nil
 	}
 	for i, e := range recs {
-		r := &rec{rr: rrs[i], start: e.start, end: e.end, explicit: e.explicit}
+		r := &rec{
+			rr: rrs[i], start: e.start, end: e.end, explicit: e.explicit,
+			explicitTTL: hasExplicitTTL(e.tokens, e.explicit, rrs[i].Header().Rrtype),
+		}
 		f.records = append(f.records, r)
 		if rrs[i].Header().Rrtype == dns.TypeSOA {
 			f.soa = r
@@ -115,6 +123,12 @@ func Parse(data []byte, origin string) (*File, error) {
 	}
 	if f.soa == nil || f.serialTok == nil {
 		f.noSurgery = "no locatable SOA serial — raw mode required"
+		return f, nil
+	}
+	// Cross-check the located serial token against the parsed SOA serial — cheap
+	// insurance that the in-place bump lands on the right token (S1).
+	if v, err := strconv.ParseUint(f.serialTok.text, 10, 32); err != nil || uint32(v) != f.SOASerial() {
+		f.noSurgery = "the located SOA serial token doesn't match the parsed serial — raw mode required"
 	}
 	return f, nil
 }
@@ -196,7 +210,8 @@ func (f *File) Edit(ops []ddns.Op) ([]byte, error) {
 	return []byte(strings.Join(res, "\n")), nil
 }
 
-// canDelete enforces the safe subset for a delete/replace target.
+// canDelete enforces the safe subset for a delete/replace target: removing the
+// line must not silently re-home the record below it (owner OR TTL inheritance).
 func (f *File) canDelete(r *rec) error {
 	if r == f.soa {
 		return unsafe("refusing to delete the SOA record")
@@ -204,8 +219,17 @@ func (f *File) canDelete(r *rec) error {
 	if !r.explicit || r.start != r.end {
 		return unsafe("record at line %d uses owner-name omission or spans multiple lines — raw mode required", r.start+1)
 	}
-	if nxt := f.nextRecord(r); nxt != nil && !nxt.explicit {
+	nxt := f.nextRecord(r)
+	if nxt == nil {
+		return nil
+	}
+	if !nxt.explicit {
 		return unsafe("the record after line %d inherits its owner from it — raw mode required", r.start+1)
+	}
+	// With no $TTL directive, an omitted TTL inherits from the PREVIOUS record;
+	// deleting this one would change the next record's effective TTL.
+	if !f.hasTTLDirec && !nxt.explicitTTL {
+		return unsafe("the record after line %d inherits its TTL from it (no $TTL) — raw mode required", r.start+1)
 	}
 	return nil
 }
@@ -299,6 +323,64 @@ func locateSerial(toks []tokPos) *tokPos {
 	return nil
 }
 
+func directiveName(tok string) (string, bool) {
+	up := strings.ToUpper(tok)
+	switch up {
+	case "$ORIGIN", "$TTL", "$INCLUDE", "$GENERATE":
+		return up, true
+	}
+	return "", false
+}
+
+// hasExplicitTTL reports whether a record's source carried an explicit TTL token
+// (between the owner/class and the type) rather than inheriting one.
+func hasExplicitTTL(toks []tokPos, explicitOwner bool, rrtype uint16) bool {
+	typeStr := dns.TypeToString[rrtype]
+	i := 0
+	if explicitOwner && len(toks) > 0 {
+		i = 1 // skip the owner token
+	}
+	for ; i < len(toks); i++ {
+		t := toks[i].text
+		if strings.EqualFold(t, typeStr) {
+			return false // reached the type with no TTL
+		}
+		if isClass(t) {
+			continue
+		}
+		if looksLikeTTL(t) {
+			return true
+		}
+	}
+	return false
+}
+
+func isClass(s string) bool {
+	switch strings.ToUpper(s) {
+	case "IN", "CH", "HS", "CS", "ANY", "NONE":
+		return true
+	}
+	return false
+}
+
+// looksLikeTTL matches a bare number or a BIND duration like 1h / 1h30m.
+func looksLikeTTL(s string) bool {
+	if s == "" {
+		return false
+	}
+	digit := false
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9':
+			digit = true
+		case strings.ContainsRune("smhdwSMHDW", c):
+		default:
+			return false
+		}
+	}
+	return digit
+}
+
 func parseAll(data []byte, origin string) ([]dns.RR, error) {
 	zp := dns.NewZoneParser(bytes.NewReader(data), origin, "")
 	zp.SetIncludeAllowed(false)
@@ -343,9 +425,11 @@ func tokenizeEntries(lines []string) []entry {
 			i++
 			continue
 		}
-		if strings.HasPrefix(toks[0].text, "$") {
-			out = append(out, entry{kind: kindDirective, start: i, end: i, tokens: toks,
-				directive: strings.ToUpper(toks[0].text)})
+		// Only the known directives are directives — a (rare, legal) owner like
+		// "$x" is a record. A misclassification here is also caught downstream by
+		// the tokenizer/parser count backstop, but classifying precisely is better.
+		if name, ok := directiveName(toks[0].text); ok {
+			out = append(out, entry{kind: kindDirective, start: i, end: i, tokens: toks, directive: name})
 			i++
 			continue
 		}
