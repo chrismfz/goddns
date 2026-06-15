@@ -194,6 +194,26 @@ func TestZoneHistoryDiffAndEscaping(t *testing.T) {
 	}
 }
 
+func TestRecordHandlerGates(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	cookie := login(t, h)
+
+	// missing CSRF -> 400 (the gate before any mutation)
+	rr := do(h, "POST", "/zone/record", "127.0.0.1:1",
+		map[string]string{"zone": "ddns.myip.gr", "action": "add", "rr": "x.ddns.myip.gr.60INA1.2.3.4"}, cookie)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("missing CSRF should be 400, got %d", rr.Code)
+	}
+
+	// valid CSRF but an unparseable record -> a rendered error, no mutation
+	csrf := h.csrfFor("admin")
+	rr = do(h, "POST", "/zone/record", "127.0.0.1:1",
+		map[string]string{"csrf": csrf, "zone": "ddns.myip.gr", "action": "add", "rr": "notarecord"}, cookie)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "parse record") {
+		t.Fatalf("bad record should render a parse error: %d\n%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestAllowListDenies(t *testing.T) {
 	h, _ := newHandler(t, mkConfig(t, `allow = ["127.0.0.0/8"]`))
 	if rr := do(h, "GET", "/", "8.8.8.8:1", nil, nil); rr.Code != http.StatusForbidden {

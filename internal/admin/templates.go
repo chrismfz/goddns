@@ -7,15 +7,16 @@ import (
 )
 
 const (
-	loginTmpl    = "login"
-	dashTmpl     = "dash"
-	resultTmpl   = "result"
-	logsTmpl     = "logs"
-	confirmTmpl  = "confirm"
-	helpTmpl     = "help"
-	zonesTmpl    = "zones"
-	zoneViewTmpl = "zoneview"
-	zoneHistTmpl = "zonehist"
+	loginTmpl         = "login"
+	dashTmpl          = "dash"
+	resultTmpl        = "result"
+	logsTmpl          = "logs"
+	confirmTmpl       = "confirm"
+	helpTmpl          = "help"
+	zonesTmpl         = "zones"
+	zoneViewTmpl      = "zoneview"
+	zoneHistTmpl      = "zonehist"
+	recordConfirmTmpl = "recordconfirm"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -251,13 +252,22 @@ This page never edits BIND — it only reads.</div>
 {{else}}<div class="muted" style="margin-top:.3rem">static — edited by hand in the zone file (nano &rarr; serial+1 &rarr; rndc reload).</div>{{end}}{{end}}
 </div>
 
-<table><thead><tr><th>name</th><th>TTL</th><th>type</th><th>data</th></tr></thead><tbody>
+<table><thead><tr><th>name</th><th>TTL</th><th>type</th><th>data</th>{{if .Editable}}<th></th>{{end}}</tr></thead><tbody>
 {{range .Records}}<tr>
 <td>{{.Name}}</td><td class="muted">{{.TTL}}</td>
 <td>{{.Type}}</td><td style="word-break:break-all">{{.Data}}</td>
-</tr>{{else}}<tr><td colspan="4" class="muted">(no records)</td></tr>{{end}}
+{{if $.Editable}}<td style="white-space:nowrap"><form class="inline" method="post" action="/zone/record"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="zone" value="{{$.Name}}"><input type="hidden" name="action" value="del"><input type="hidden" name="rr" value="{{.Full}}"><button class="danger" type="submit">del</button></form></td>{{end}}
+</tr>{{else}}<tr><td colspan="{{if .Editable}}5{{else}}4{{end}}" class="muted">(no records)</td></tr>{{end}}
 </tbody></table>
-<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR ({{.Auth}}). CLI: <code>goddns zone {{.Name}}</code> (add <code>-export</code> for a backup snapshot). Read-only.</div>
+{{if .Editable}}
+<div class="card"><form method="post" action="/zone/record"><div class="row">
+<input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="zone" value="{{.Name}}"><input type="hidden" name="action" value="add">
+<div style="flex:1"><label>add record (zone-file line)</label><input name="rr" placeholder="host.{{.Name}}. 60 IN A 203.0.113.9" style="width:100%"></div>
+<div><button type="submit">add</button></div>
+</div></form>
+<div class="muted" style="font-size:.72rem">dynamic zone — edits go via a signed RFC2136 UPDATE, snapshotted first; del/add show a confirm + diff. The key's update-policy is the hard bound.</div></div>
+{{end}}
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR ({{.Auth}}). CLI: <code>goddns zone {{.Name}}</code> / <code>goddns record …</code>.</div>
 
 <h2>SOA / NS checks</h2>
 <div class="card">
@@ -304,6 +314,24 @@ This page never edits BIND — it only reads.</div>
 <div class="muted" style="font-size:.72rem;margin-top:.4rem">read-only history. CLI: <code>goddns zone {{.Name}} -history</code> / <code>-diff</code>.</div>
 {{end}}
 </main></body></html>{{end}}
+
+{{define "recordconfirm"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">confirm</span></div>
+<div><a href="/zone?name={{.Zone}}">cancel</a></div></header>
+<main><h2>{{.Action}} record in {{.Zone}}</h2>
+<div class="card">
+<pre>{{range .Removed}}<span class="err">- {{.}}</span>
+{{end}}{{range .Added}}<span class="ok">+ {{.}}</span>
+{{end}}{{if and (not .Removed) (not .Added)}}<span class="muted">(nothing would change)</span>{{end}}</pre>
+<form method="post" action="/zone/record">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="zone" value="{{.Zone}}">
+<input type="hidden" name="action" value="{{.Action}}">
+<input type="hidden" name="rr" value="{{.RR}}">
+<input type="hidden" name="confirm" value="1">
+<button class="{{if .Removed}}danger{{end}}" type="submit">apply</button>
+<a href="/zone?name={{.Zone}}" style="margin-left:1rem;color:#9aa4b2">cancel</a>
+</form></div></main></body></html>{{end}}
 
 {{define "logs"}}{{template "head" .}}
 <header><div><span class="b">goddns admin</span> <span class="muted">{{.Title}}</span></div>

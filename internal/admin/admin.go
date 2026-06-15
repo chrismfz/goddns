@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -18,12 +19,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/miekg/dns"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
+	"github.com/chrismfz/goddns/internal/recordmut"
 	"github.com/chrismfz/goddns/internal/store"
+	"github.com/chrismfz/goddns/internal/tsig"
 )
 
 const cookieName = "goddns_admin"
@@ -37,6 +42,7 @@ type Store interface {
 	Get(name string) (store.Record, error)
 	SnapshotList(zone string, limit int) ([]store.Snapshot, error)
 	SnapshotByID(id int64) (store.Snapshot, bool, error)
+	SnapshotPut(zone string, serial uint32, content string, keep int) (int64, error)
 }
 
 // Handler serves the admin UI. Construct with New.
@@ -142,6 +148,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleZones(w, r, user)
 	case "/zone":
 		h.handleZone(w, r, user)
+	case "/zone/record":
+		h.handleRecord(w, r, user, peerStr)
 	default:
 		http.NotFound(w, r)
 	}
@@ -155,8 +163,8 @@ type zoneRow struct {
 type keyRow struct{ Name, Algorithm string }
 type findRow struct{ Mark, Class, Zone, Message string }
 type rrRow struct {
-	Name, Type, Data string
-	TTL              uint32
+	Name, Type, Data, Full string // Full = zone-file line, for the delete form
+	TTL                    uint32
 }
 type nsRow struct {
 	Name, Addr, Note string
@@ -242,7 +250,10 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 
 	var rows []rrRow
 	for _, row := range named.Rows(records) {
-		rows = append(rows, rrRow{Name: row.Name, TTL: row.TTL, Type: row.Type, Data: row.Data})
+		rows = append(rows, rrRow{
+			Name: row.Name, TTL: row.TTL, Type: row.Type, Data: row.Data,
+			Full: fmt.Sprintf("%s %d IN %s %s", row.Name, row.TTL, row.Type, row.Data),
+		})
 	}
 	data := map[string]any{
 		"Version": h.version, "User": user, "Name": name,
@@ -252,6 +263,10 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 		data["Kind"] = z.Kind()
 		data["Dynamic"] = z.Dynamic
 		data["Keys"] = strings.Join(z.UpdateKeys, ", ")
+		if h.editor(cfg).CanEdit(z) {
+			data["Editable"] = true
+			data["CSRF"] = h.csrfFor(user)
+		}
 	}
 	if soa := named.SOAOf(records); soa != nil {
 		data["Serial"] = soa.Serial
@@ -288,6 +303,77 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 		data["NoAuth"] = len(seen) == 0
 	}
 	render(w, zoneViewTmpl, data)
+}
+
+// editor builds the record-mutation editor from the live config (keyring or the
+// single key), wired to the snapshot store.
+func (h *Handler) editor(cfg *config.Config) *recordmut.Editor {
+	keys := cfg.TSIGKeys()
+	if len(keys) == 0 {
+		keys = []tsig.Key{{Name: strings.TrimSuffix(cfg.TSIGName, "."), Algo: cfg.TSIGAlgo, Secret: cfg.TSIGSecret}}
+	}
+	nc := cfg.NamedConf
+	if nc == "" {
+		nc = "/etc/named.conf"
+	}
+	server := cfg.DNSServer
+	if server == "" {
+		server = "127.0.0.1:53"
+	}
+	return &recordmut.Editor{NamedConf: nc, DNSServer: server, Keys: keys, Snap: h.store, Keep: cfg.HistoryKeep}
+}
+
+// handleRecord adds or deletes a record in a dynamic zone. Like the destructive
+// token actions it is two-phase: the first POST renders a diff/confirm page, and
+// only confirm=1 applies (CSRF-checked, audited; recordmut snapshots first and
+// refuses static/panel zones).
+func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, peer string) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	zone := strings.TrimSpace(r.FormValue("zone"))
+	action := r.FormValue("action")
+	line := strings.TrimSpace(r.FormValue("rr"))
+	if zone == "" || line == "" || (action != "add" && action != "del") {
+		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+	rr, err := dns.NewRR(line)
+	if err != nil || rr == nil {
+		renderRecordErr(w, h.version, "parse record %q: %v", line, err)
+		return
+	}
+	act := ddns.AddRR
+	if action == "del" {
+		act = ddns.DelRR
+	}
+	ops := []ddns.Op{{Action: act, RR: rr}}
+	ed := h.editor(h.cfg())
+
+	if r.FormValue("confirm") != "1" {
+		res, err := ed.Preview(zone, ops)
+		if err != nil {
+			renderRecordErr(w, h.version, "%v", err)
+			return
+		}
+		render(w, recordConfirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
+			"Action": action, "RR": line, "Added": res.Added, "Removed": res.Removed,
+		})
+		return
+	}
+	res, err := ed.Apply(zone, ops)
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	h.audit(user, peer, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
+	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone), http.StatusSeeOther)
+}
+
+func renderRecordErr(w http.ResponseWriter, version, format string, a ...any) {
+	render(w, resultTmpl, map[string]any{"Version": version, "Error": fmt.Sprintf(format, a...)})
 }
 
 // handleZones is the read-only BIND introspection page (zones, dynamic flags,

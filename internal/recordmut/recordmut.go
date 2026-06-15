@@ -162,6 +162,12 @@ func (e *Editor) keyFor(z *named.Zone) *tsig.Key {
 	return nil
 }
 
+// CanEdit reports whether goddns can edit this zone: it must be dynamic and
+// grant a TSIG key goddns holds. Used to show edit controls only where they work.
+func (e *Editor) CanEdit(z *named.Zone) bool {
+	return z != nil && z.Dynamic && e.keyFor(z) != nil
+}
+
 // mostSpecificZone returns the canonical name of the longest user zone that
 // encloses name (the zone authoritative for that record), or "" if none.
 func mostSpecificZone(inv *named.Inventory, name string) string {
@@ -187,7 +193,17 @@ func buildResult(zone, keyName string, ops []ddns.Op, live []dns.RR) *Result {
 		case ddns.AddRR:
 			res.Added = append(res.Added, op.RR.String())
 		case ddns.DelRR:
-			res.Removed = append(res.Removed, op.RR.String())
+			// RFC2136 delete-exact-RR matches name+type+rdata (TTL ignored) and
+			// is a no-op if absent — so only report it removed if it's actually
+			// in the live zone (otherwise the diff would imply a change there
+			// won't be).
+			want := rrKey(op.RR)
+			for _, rr := range live {
+				if rrKey(rr) == want {
+					res.Removed = append(res.Removed, rr.String())
+					break
+				}
+			}
 		case ddns.DelRRset:
 			h := op.RR.Header()
 			for _, rr := range live {
@@ -205,4 +221,12 @@ func buildResult(zone, keyName string, ops []ddns.Op, live []dns.RR) *Result {
 		}
 	}
 	return res
+}
+
+// rrKey identifies a record by name+type+rdata (case-insensitive name, TTL
+// ignored) — the fields RFC2136 delete-exact-RR actually matches on.
+func rrKey(rr dns.RR) string {
+	h := rr.Header()
+	rdata := strings.TrimPrefix(rr.String(), h.String())
+	return strings.ToLower(strings.TrimSuffix(h.Name, ".")) + " " + dns.TypeToString[h.Rrtype] + " " + rdata
 }
