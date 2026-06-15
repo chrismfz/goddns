@@ -97,6 +97,12 @@ func WriteFile(path string, keys []Key) error {
 		tmp.Close()
 		return err
 	}
+	// fsync before rename: a key file BIND must read shouldn't survive a crash
+	// as a zero-length or stale file.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}

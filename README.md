@@ -91,15 +91,18 @@ goddns can **rotate** a key in it with one command:
     tsig_keys_file = "/etc/goddns/tsig.keys"
     tsig_name      = "ddns-update"
 
-Then rotation is one keystroke — it rewrites just that key, reconfigures BIND,
-and self-tests that the new key is accepted (other keys in the file untouched):
+Then rotation is one keystroke. It is transactional — on any failure it rolls
+the file back to the previous secret, so named, the file and the daemon stay
+consistent (other keys in the file are untouched):
 
     sudo goddns rotate-key            # rotates tsig_name; `rotate-key <name>` for another
-    # -> writes new secret, runs `rndc reconfig`, self-tests, daemon auto-reloads
+    # -> new secret -> rndc reconfig -> self-test -> reload goddns
 
-The running daemon watches the key file, so it picks up the new secret on its
-next poll — no manual restart. The legacy `tsig_secret`/env path still works
-when `tsig_keys_file` is unset.
+The self-test sends a TSIG-signed query to a zone BIND actually serves and
+requires a verified signed answer, so it can't pass on a stray/unsigned reply.
+The command reloads the daemon (and it also watches the key file as a fallback),
+so the new secret is live without a restart. The legacy `tsig_secret`/env path
+still works when `tsig_keys_file` is unset.
 
 ## Build & packaging (cfm-style workflow)
 

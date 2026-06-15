@@ -188,6 +188,9 @@ func Load(path string) (*Config, error) {
 		if k == nil {
 			return nil, fmt.Errorf("tsig_keys_file %s has no key %q (tsig_name)", c.TSIGKeysFile, c.TSIGName)
 		}
+		if k.Secret == "" {
+			return nil, fmt.Errorf("tsig_keys_file %s: key %q has no secret", c.TSIGKeysFile, c.TSIGName)
+		}
 		c.TSIGSecret = k.Secret
 		if k.Algo != "" {
 			c.TSIGAlgo = k.Algo
