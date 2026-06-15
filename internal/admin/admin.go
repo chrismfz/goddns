@@ -25,6 +25,7 @@ import (
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
+	"github.com/chrismfz/goddns/internal/filezone"
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/recordmut"
@@ -56,6 +57,10 @@ type Handler struct {
 	throttle *loginThrottle
 	confPath string // goddns.conf path, for proxy.d/ vhost editing (empty = read-only)
 	reload   func() // optional: trigger an immediate config reload after a write
+
+	// fileEd overrides the static-zone file editor (tests inject stubs); nil ⇒
+	// the production builder.
+	fileEd func(*config.Config) *filezone.Editor
 }
 
 func New(cfg func() *config.Config, st Store, secret []byte, version string) *Handler {
@@ -296,9 +301,10 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 		data["Kind"] = z.Kind()
 		data["Dynamic"] = z.Dynamic
 		data["Keys"] = strings.Join(z.UpdateKeys, ", ")
-		if h.editor(cfg).CanEdit(z) {
+		if h.editor(cfg).CanEdit(z) || h.fileEditor(cfg).CanEdit(z) {
 			data["Editable"] = true
 			data["CSRF"] = h.csrfFor(user)
+			data["FileEdit"] = h.fileEditor(cfg).CanEdit(z) // static, edited in place
 		}
 	}
 	if soa := named.SOAOf(records); soa != nil {
@@ -356,6 +362,37 @@ func (h *Handler) editor(cfg *config.Config) *recordmut.Editor {
 	return &recordmut.Editor{NamedConf: nc, DNSServer: server, Keys: keys, Snap: h.store, Keep: cfg.HistoryKeep}
 }
 
+// fileEditor builds the file-as-truth editor for enabled static zones (tests can
+// override via h.fileEd).
+func (h *Handler) fileEditor(cfg *config.Config) *filezone.Editor {
+	if h.fileEd != nil {
+		return h.fileEd(cfg)
+	}
+	nc := cfg.NamedConf
+	if nc == "" {
+		nc = "/etc/named.conf"
+	}
+	server := cfg.DNSServer
+	if server == "" {
+		server = "127.0.0.1:53"
+	}
+	return &filezone.Editor{NamedConf: nc, DNSServer: server, Editable: cfg.EditableZones, Keep: cfg.HistoryKeep}
+}
+
+// parseRRZone parses an RR with the zone as $ORIGIN, so a relative owner name
+// (e.g. `www`) qualifies under the zone instead of becoming a root-level name.
+func parseRRZone(line, zone string) (dns.RR, error) {
+	zp := dns.NewZoneParser(strings.NewReader(line), dns.Fqdn(zone), "")
+	rr, ok := zp.Next()
+	if err := zp.Err(); err != nil {
+		return nil, err
+	}
+	if !ok || rr == nil {
+		return nil, fmt.Errorf("no record in %q", line)
+	}
+	return rr, nil
+}
+
 // canEditZone reports whether goddns may edit the named zone (dynamic + a held
 // key) — used to decide whether to show edit/restore controls. Best-effort: if
 // named.conf can't be read, it returns false (controls stay hidden).
@@ -388,7 +425,21 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
-	rr, err := dns.NewRR(line)
+	cfg := h.cfg()
+	// Route by ownership, matching what the page shows: an enabled static MASTER
+	// zone is edited in place (filezone, structured/surgical — raw whole-file
+	// mode stays CLI-only); everything else, including a dynamic zone mistakenly
+	// listed in editable_zones, is RFC2136 (recordmut). CanEdit re-reads the live
+	// dynamic flag, so the routing gate can't disagree with the display gate.
+	fed := h.fileEditor(cfg)
+	static := fed.CanEdit(fed.Lookup(zone))
+	var rr dns.RR
+	var err error
+	if static {
+		rr, err = parseRRZone(line, zone)
+	} else {
+		rr, err = dns.NewRR(line)
+	}
 	if err != nil || rr == nil {
 		renderRecordErr(w, h.version, "parse record %q: %v", line, err)
 		return
@@ -398,26 +449,46 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 		act = ddns.DelRR
 	}
 	ops := []ddns.Op{{Action: act, RR: rr}}
-	ed := h.editor(h.cfg())
 
 	if r.FormValue("confirm") != "1" {
-		res, err := ed.Preview(zone, ops)
-		if err != nil {
-			renderRecordErr(w, h.version, "%v", err)
-			return
+		var added, removed []string
+		if static {
+			res, perr := fed.Preview(zone, ops)
+			if perr != nil {
+				renderRecordErr(w, h.version, "%v", perr)
+				return
+			}
+			added, removed = res.Added, res.Removed
+		} else {
+			res, perr := h.editor(cfg).Preview(zone, ops)
+			if perr != nil {
+				renderRecordErr(w, h.version, "%v", perr)
+				return
+			}
+			added, removed = res.Added, res.Removed
 		}
 		render(w, recordConfirmTmpl, map[string]any{
 			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
-			"Action": action, "RR": line, "Added": res.Added, "Removed": res.Removed,
+			"Action": action, "RR": line, "Added": added, "Removed": removed,
 		})
 		return
 	}
-	res, err := ed.Apply(zone, ops)
-	if err != nil {
-		renderRecordErr(w, h.version, "%v", err)
-		return
+
+	if static {
+		res, aerr := fed.Apply(zone, ops)
+		if aerr != nil {
+			renderRecordErr(w, h.version, "%v", aerr)
+			return
+		}
+		h.audit(user, peer, "record-%s zone=%s rr=%q file=%s serial=%d backup=%s", action, zone, line, res.File, res.Serial, res.Backup)
+	} else {
+		res, aerr := h.editor(cfg).Apply(zone, ops)
+		if aerr != nil {
+			renderRecordErr(w, h.version, "%v", aerr)
+			return
+		}
+		h.audit(user, peer, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
 	}
-	h.audit(user, peer, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
 	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone), http.StatusSeeOther)
 }
 

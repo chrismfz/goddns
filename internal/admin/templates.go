@@ -329,6 +329,7 @@ This page never edits BIND — it only reads.</div>
 {{if .Serial}}<div>serial <b>{{.Serial}}</b>{{if .Primary}} &middot; primary {{.Primary}}{{end}} &middot; {{.Count}} records{{if .Signed}} &middot; <span class="warn">DNSSEC-signed</span>{{end}}</div>{{else}}<div>{{.Count}} records</div>{{end}}
 {{if .Signed}}<div class="warn" style="margin-top:.3rem;font-size:.8rem">DNSSEC-signed ({{.SignedCount}} signing records). RRSIG/DNSKEY/NSEC are managed by BIND and expire — an <code>-export</code> dump of them is not a hand-restorable backup; restore the unsigned source and let BIND re-sign.</div>{{end}}
 {{if .InConf}}{{if .Dynamic}}<div class="ok" style="margin-top:.3rem">DYNAMIC — updated live{{if .Keys}} via key(s): {{.Keys}}{{end}}. The records below are journal-merged (what BIND actually serves), so you don't need to freeze/thaw to see them.</div>
+{{else if .FileEdit}}<div class="ok" style="margin-top:.3rem">static — enabled for in-place editing. goddns rewrites only the changed line(s) (comments/formatting kept), checkzones, backs up and reloads — and coexists with your <code>nano</code> edits (a concurrent change is refused, not clobbered).</div>
 {{else}}<div class="muted" style="margin-top:.3rem">static — edited by hand in the zone file (nano &rarr; serial+1 &rarr; rndc reload).</div>{{end}}{{end}}
 </div>
 
@@ -345,7 +346,7 @@ This page never edits BIND — it only reads.</div>
 <div style="flex:1"><label>add record (zone-file line)</label><input name="rr" placeholder="host.{{.Name}}. 60 IN A 203.0.113.9" style="width:100%"></div>
 <div><button type="submit">add</button></div>
 </div></form>
-<div class="muted" style="font-size:.72rem">dynamic zone — edits go via a signed RFC2136 UPDATE, snapshotted first; del/add show a confirm + diff. The key's update-policy is the hard bound.</div></div>
+<div class="muted" style="font-size:.72rem">{{if .FileEdit}}static zone — del/add rewrite the file in place (surgical), checkzone + backup + rndc reload, with a confirm + diff. Raw whole-file edits stay on the CLI (<code>goddns zone edit</code>).{{else}}dynamic zone — edits go via a signed RFC2136 UPDATE, snapshotted first; del/add show a confirm + diff. The key's update-policy is the hard bound.{{end}}</div></div>
 {{end}}
 <div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR ({{.Auth}}). CLI: <code>goddns zone {{.Name}}</code> / <code>goddns record …</code>.</div>
 

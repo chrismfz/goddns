@@ -89,6 +89,17 @@ func (e *Editor) editable(zone string) bool {
 
 func norm(z string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".") }
 
+// Lookup returns the named.Zone for name from the inventory (nil if absent or
+// the inventory can't be read) — for routing decisions that need the live
+// dynamic flag.
+func (e *Editor) Lookup(name string) *named.Zone {
+	inv, err := e.inventory()
+	if err != nil {
+		return nil
+	}
+	return inv.ZoneByName(name)
+}
+
 // CanEdit reports whether goddns may file-edit this zone (static master, on the
 // allowlist) — for showing edit controls. It does not read the file.
 func (e *Editor) CanEdit(z *named.Zone) bool {
@@ -378,8 +389,20 @@ func (e *Editor) commit(z *named.Zone, zone string, expected, newBytes []byte) (
 }
 
 // compute runs the Stage-0 surgical edit and returns the new bytes (UnsafeError
-// ⇒ the caller should use raw mode).
+// ⇒ the caller should use raw mode). It first refuses any op whose record is not
+// in-bailiwick of the zone — an out-of-zone owner would otherwise be appended
+// (named-checkzone -i full only *warns* on out-of-zone data, so it wouldn't
+// catch it) and pollute the authoritative file.
 func (e *Editor) compute(zone string, orig []byte, ops []ddns.Op) ([]byte, error) {
+	origin := dns.Fqdn(zone)
+	for _, op := range ops {
+		if op.RR == nil {
+			return nil, fmt.Errorf("a record operation has no record")
+		}
+		if !dns.IsSubDomain(origin, op.RR.Header().Name) {
+			return nil, fmt.Errorf("record %q is not inside zone %q", strings.TrimSuffix(op.RR.Header().Name, "."), zone)
+		}
+	}
 	f, err := zonefile.Parse(orig, zone)
 	if err != nil {
 		return nil, fmt.Errorf("parse %q: %w", zone, err)
