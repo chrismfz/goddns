@@ -7,6 +7,7 @@ package recordmut
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -79,20 +80,36 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 	return res, nil
 }
 
-// prepare reads the inventory, validates, and transfers the live zone.
+// prepare reads the inventory, validates the zone, validates the ops, and
+// transfers the live zone — the full path Preview/Apply share.
 func (e *Editor) prepare(zone string, ops []ddns.Op) (*named.Zone, *tsig.Key, []dns.RR, error) {
+	inv, z, key, live, err := e.transfer(zone)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if err := e.validateOps(inv, zone, ops); err != nil {
+		return nil, nil, nil, err
+	}
+	return z, key, live, nil
+}
+
+// transfer does everything that does NOT depend on the specific ops: read
+// named.conf, check the zone is editable (exists, dynamic, grants a held key),
+// and AXFR the live zone. RestorePlan needs the live zone BEFORE it can compute
+// the restore delta, so this step stands on its own.
+func (e *Editor) transfer(zone string) (*named.Inventory, *named.Zone, *tsig.Key, []dns.RR, error) {
 	nc := e.NamedConf
 	if nc == "" {
 		nc = "/etc/named.conf"
 	}
 	data, err := named.CheckConf(nc)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("read named.conf: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("read named.conf: %w", err)
 	}
 	inv := named.Parse(data)
-	z, key, err := e.validate(inv, zone, ops)
+	z, key, err := e.validateZone(inv, zone)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	server := e.DNSServer
 	if server == "" {
@@ -102,18 +119,30 @@ func (e *Editor) prepare(zone string, ops []ddns.Op) (*named.Zone, *tsig.Key, []
 	// the diff. If the zone can't be transferred, don't proceed on a blind diff.
 	live, _, err := named.TransferAuto(zone, server, inv.AXFRKeys(z, key.Name))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("can't transfer %q to snapshot/diff it (%w) — "+
+		return nil, nil, nil, nil, fmt.Errorf("can't transfer %q to snapshot/diff it (%w) — "+
 			"record editing needs the zone transferable: allow-transfer { localhost; } or a key", zone, err)
 	}
-	return z, key, live, nil
+	return inv, z, key, live, nil
 }
 
-// validate enforces the invariant: the zone must exist, be dynamic, grant a key
-// goddns holds, and every op's name must lie inside the zone.
+// validate enforces the full invariant: the zone must exist, be dynamic, grant
+// a key goddns holds, and every op's name must lie inside the zone. It composes
+// the zone-level and op-level checks; both are also used on their own.
 func (e *Editor) validate(inv *named.Inventory, zone string, ops []ddns.Op) (*named.Zone, *tsig.Key, error) {
-	if len(ops) == 0 {
-		return nil, nil, fmt.Errorf("no record operations given")
+	z, key, err := e.validateZone(inv, zone)
+	if err != nil {
+		return nil, nil, err
 	}
+	if err := e.validateOps(inv, zone, ops); err != nil {
+		return nil, nil, err
+	}
+	return z, key, nil
+}
+
+// validateZone checks the zone is one goddns may edit: it exists, is dynamic
+// (the invariant — goddns never converts a static/panel zone), and grants a
+// TSIG key goddns actually holds.
+func (e *Editor) validateZone(inv *named.Inventory, zone string) (*named.Zone, *tsig.Key, error) {
 	z := inv.ZoneByName(zone)
 	if z == nil {
 		return nil, nil, fmt.Errorf("zone %q is not in named.conf", zone)
@@ -127,24 +156,32 @@ func (e *Editor) validate(inv *named.Inventory, zone string, ops []ddns.Op) (*na
 		return nil, nil, fmt.Errorf("no goddns TSIG key with a secret is granted update on %q (zone grants: %s)",
 			zone, strings.Join(z.UpdateKeys, ", "))
 	}
+	return z, key, nil
+}
+
+// validateOps checks every op refers to a record that belongs to THIS zone as
+// its most-specific enclosing zone — so a record for a delegated child is never
+// sent to the parent.
+func (e *Editor) validateOps(inv *named.Inventory, zone string, ops []ddns.Op) error {
+	if len(ops) == 0 {
+		return fmt.Errorf("no record operations given")
+	}
 	target := dns.CanonicalName(zone)
 	for _, op := range ops {
 		if op.RR == nil {
-			return nil, nil, fmt.Errorf("a record operation has no record")
+			return fmt.Errorf("a record operation has no record")
 		}
-		// The name must belong to THIS zone as its most-specific enclosing
-		// zone — so a record for a delegated child isn't sent to the parent.
 		owner := mostSpecificZone(inv, op.RR.Header().Name)
 		name := strings.TrimSuffix(dns.CanonicalName(op.RR.Header().Name), ".")
 		if owner == "" {
-			return nil, nil, fmt.Errorf("record %q is not inside any zone served here", name)
+			return fmt.Errorf("record %q is not inside any zone served here", name)
 		}
 		if owner != target {
-			return nil, nil, fmt.Errorf("record %q belongs to the more specific zone %q — target that zone",
+			return fmt.Errorf("record %q belongs to the more specific zone %q — target that zone",
 				name, strings.TrimSuffix(owner, "."))
 		}
 	}
-	return z, key, nil
+	return nil
 }
 
 // keyFor returns the first key goddns HOLDS (with a secret) that the zone grants.
@@ -229,4 +266,149 @@ func rrKey(rr dns.RR) string {
 	h := rr.Header()
 	rdata := strings.TrimPrefix(rr.String(), h.String())
 	return strings.ToLower(strings.TrimSuffix(h.Name, ".")) + " " + dns.TypeToString[h.Rrtype] + " " + rdata
+}
+
+// RestorePlan computes the change that makes the live zone match a snapshot
+// (Phase-1 canonical content) again — the Phase-1↔2 link. It is NOT a serial
+// rollback: it computes a FORWARD delta (records the snapshot had but live lost
+// → AddRR; records live gained since → DelRR) and returns it as ops, plus a
+// preview Result. Feeding those ops to Apply runs them as one signed UPDATE
+// that snapshots-before, so the restore is itself undoable. SOA and DNSSEC
+// records are left untouched — BIND owns those and keeps the zone moving
+// forward (new serial, fresh signatures). ops is empty when live already
+// matches the snapshot (nothing to do).
+func (e *Editor) RestorePlan(zone, snapContent string) ([]ddns.Op, *Result, error) {
+	inv, _, key, live, err := e.transfer(zone)
+	if err != nil {
+		return nil, nil, err
+	}
+	want, err := parseRecords(snapContent)
+	if err != nil {
+		return nil, nil, err
+	}
+	// A snapshot is a full AXFR: it also carries any delegated child's apex NS
+	// and in-bailiwick glue, which belong to the CHILD zone. Restore only the
+	// records this zone is authoritative for, on both sides of the diff — so
+	// child/glue is left untouched rather than aborting the whole restore, and
+	// a child's record is never sent to the parent.
+	target := dns.CanonicalName(zone)
+	want = ownedBy(inv, target, want)
+	live = ownedBy(inv, target, live)
+	// Guard against a corrupt/empty snapshot: with no restorable records, the
+	// delta would delete every live record (apex NS included) and empty the
+	// zone. A real Phase-1 snapshot always has the apex NS, so this only fires
+	// on a bad snapshot.
+	if !hasRestorable(want) {
+		return nil, nil, fmt.Errorf("snapshot has no restorable records for %q — refusing to empty the zone", zone)
+	}
+	ops := restoreOps(want, live)
+	if len(ops) == 0 {
+		return nil, &Result{Zone: zone, Key: key.Name}, nil
+	}
+	// The delta is derived from in-zone live + snapshot records, so every op is
+	// in-zone by construction; validate anyway as a belt-and-braces guard.
+	if err := e.validateOps(inv, zone, ops); err != nil {
+		return nil, nil, err
+	}
+	return ops, buildResult(zone, key.Name, ops, live), nil
+}
+
+// ownedBy keeps only the records whose most-specific enclosing zone is target —
+// i.e. the records THIS zone is authoritative for, excluding any delegated
+// child's data that a full AXFR happens to include.
+func ownedBy(inv *named.Inventory, target string, rrs []dns.RR) []dns.RR {
+	out := rrs[:0:0]
+	for _, rr := range rrs {
+		if mostSpecificZone(inv, rr.Header().Name) == target {
+			out = append(out, rr)
+		}
+	}
+	return out
+}
+
+// hasRestorable reports whether any record is operator data (not BIND-managed
+// SOA/DNSSEC) — the records a restore would actually re-create.
+func hasRestorable(rrs []dns.RR) bool {
+	for _, rr := range rrs {
+		if !managed(rr) {
+			return true
+		}
+	}
+	return false
+}
+
+// restoreOps computes the delta that turns live into want, ignoring
+// BIND-managed records (SOA + DNSSEC). Records in want but not live become
+// AddRR; records in live but not want become DelRR. Matching is by rrKey
+// (name+type+rdata, TTL-insensitive), so a TTL-only difference is not restored.
+// Deletes are ordered before adds, each group sorted for a stable preview.
+func restoreOps(want, live []dns.RR) []ddns.Op {
+	wantSet := make(map[string]dns.RR, len(want))
+	for _, rr := range want {
+		if managed(rr) {
+			continue
+		}
+		wantSet[rrKey(rr)] = rr
+	}
+	liveSet := make(map[string]dns.RR, len(live))
+	for _, rr := range live {
+		if managed(rr) {
+			continue
+		}
+		liveSet[rrKey(rr)] = rr
+	}
+	var add, del []ddns.Op
+	for k, rr := range wantSet {
+		if _, ok := liveSet[k]; !ok {
+			add = append(add, ddns.Op{Action: ddns.AddRR, RR: rr})
+		}
+	}
+	for k, rr := range liveSet {
+		if _, ok := wantSet[k]; !ok {
+			del = append(del, ddns.Op{Action: ddns.DelRR, RR: rr})
+		}
+	}
+	sortOps(add)
+	sortOps(del)
+	return append(del, add...)
+}
+
+// sortOps orders ops by their record's zone-file text, for deterministic
+// previews and tests.
+func sortOps(ops []ddns.Op) {
+	sort.Slice(ops, func(i, j int) bool { return ops[i].RR.String() < ops[j].RR.String() })
+}
+
+// parseRecords turns a Phase-1 canonical snapshot (one record per line, in
+// zone-file form) back into records.
+func parseRecords(content string) ([]dns.RR, error) {
+	var out []dns.RR
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		rr, err := dns.NewRR(line)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot has an unparseable record %q: %w", line, err)
+		}
+		if rr != nil {
+			out = append(out, rr)
+		}
+	}
+	return out, nil
+}
+
+// managed reports whether a record is owned by BIND rather than the operator:
+// the SOA (its serial only moves forward) and the DNSSEC chain (RRSIG/NSEC*/
+// DNSKEY/CDS/CDNSKEY, generated and rotated by inline-signing). These are
+// excluded from a restore — replaying an old SOA would break secondaries and
+// replaying stale signatures would break validation.
+func managed(rr dns.RR) bool {
+	switch rr.Header().Rrtype {
+	case dns.TypeSOA, dns.TypeRRSIG, dns.TypeNSEC, dns.TypeNSEC3,
+		dns.TypeNSEC3PARAM, dns.TypeDNSKEY, dns.TypeCDS, dns.TypeCDNSKEY:
+		return true
+	}
+	return false
 }

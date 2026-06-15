@@ -150,6 +150,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleZone(w, r, user)
 	case "/zone/record":
 		h.handleRecord(w, r, user, peerStr)
+	case "/zone/restore":
+		h.handleRestore(w, r, user, peerStr)
 	default:
 		http.NotFound(w, r)
 	}
@@ -192,6 +194,13 @@ func (h *Handler) handleZoneHistory(w http.ResponseWriter, user, name string) {
 		rows = append(rows, snapRow{Serial: s.Serial, Taken: s.TakenAt.Format("2006-01-02 15:04"), ID: s.ID})
 	}
 	data["Snaps"] = rows
+
+	// Show restore controls only where goddns can actually write (dynamic zone,
+	// held key). The restore POST is CSRF-checked like every mutating action.
+	if h.canEditZone(h.cfg(), name) {
+		data["Editable"] = true
+		data["CSRF"] = h.csrfFor(user)
+	}
 
 	if len(snaps) >= 2 {
 		newer, okN, errN := h.store.SnapshotByID(snaps[0].ID)
@@ -323,6 +332,22 @@ func (h *Handler) editor(cfg *config.Config) *recordmut.Editor {
 	return &recordmut.Editor{NamedConf: nc, DNSServer: server, Keys: keys, Snap: h.store, Keep: cfg.HistoryKeep}
 }
 
+// canEditZone reports whether goddns may edit the named zone (dynamic + a held
+// key) — used to decide whether to show edit/restore controls. Best-effort: if
+// named.conf can't be read, it returns false (controls stay hidden).
+func (h *Handler) canEditZone(cfg *config.Config, name string) bool {
+	nc := cfg.NamedConf
+	if nc == "" {
+		nc = "/etc/named.conf"
+	}
+	data, err := named.CheckConf(nc)
+	if err != nil {
+		return false
+	}
+	z := named.Parse(data).ZoneByName(name)
+	return h.editor(cfg).CanEdit(z)
+}
+
 // handleRecord adds or deletes a record in a dynamic zone. Like the destructive
 // token actions it is two-phase: the first POST renders a diff/confirm page, and
 // only confirm=1 applies (CSRF-checked, audited; recordmut snapshots first and
@@ -370,6 +395,58 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 	}
 	h.audit(user, peer, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
 	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone), http.StatusSeeOther)
+}
+
+// handleRestore rolls a dynamic zone back to a Phase-1 snapshot. Two-phase like
+// handleRecord: the first POST previews the forward delta (what records the
+// restore would add/remove) and only confirm=1 applies it — CSRF-checked,
+// audited, and itself snapshotted-before (so a restore is undoable).
+func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request, user, peer string) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	zone := strings.TrimSpace(r.FormValue("zone"))
+	var id int64
+	if _, err := fmt.Sscan(strings.TrimSpace(r.FormValue("id")), &id); err != nil || zone == "" || id <= 0 {
+		http.Error(w, "missing fields", http.StatusBadRequest)
+		return
+	}
+	snap, ok, err := h.store.SnapshotByID(id)
+	if err != nil {
+		renderRecordErr(w, h.version, "read snapshot #%d: %v", id, err)
+		return
+	}
+	if !ok || !strings.EqualFold(strings.TrimSuffix(snap.Zone, "."), strings.TrimSuffix(zone, ".")) {
+		renderRecordErr(w, h.version, "no snapshot #%d for zone %q", id, zone)
+		return
+	}
+	ed := h.editor(h.cfg())
+	ops, res, err := ed.RestorePlan(zone, snap.Content)
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	if len(ops) == 0 {
+		renderRecordErr(w, h.version, "%s already matches snapshot #%d — nothing to restore", zone, id)
+		return
+	}
+
+	if r.FormValue("confirm") != "1" {
+		render(w, restoreConfirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
+			"ID": id, "Serial": snap.Serial, "Taken": snap.TakenAt.Format("2006-01-02 15:04"),
+			"Added": res.Added, "Removed": res.Removed,
+		})
+		return
+	}
+	res, err = ed.Apply(zone, ops)
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	h.audit(user, peer, "record-restore zone=%s snapshot=%d key=%s pre-snapshot=%d", zone, id, res.Key, res.Snapshot)
+	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone)+"&history=1", http.StatusSeeOther)
 }
 
 func renderRecordErr(w http.ResponseWriter, version, format string, a ...any) {
