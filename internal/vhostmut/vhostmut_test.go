@@ -191,9 +191,31 @@ upstream = "https://1.1.1.1"
 // A written fragment must share proxy.d/'s group, so the goddns daemon (which
 // runs as a different user than a root CLI) can always read what was written —
 // otherwise a `sudo goddns vhost set` would leave a root:root file that
-// crash-loops the daemon.
+// crash-loops the daemon. To actually exercise the chgrp (not just have both
+// default to the test user's primary group), set proxy.d/ to a SECONDARY group
+// the user belongs to and assert the fragment lands in that group.
 func TestFragmentGroupMatchesDir(t *testing.T) {
 	e := newEditor(t, "")
+	if err := os.MkdirAll(e.dir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := syscall.Getgroups()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondary := -1
+	for _, g := range groups {
+		if g != os.Getgid() {
+			secondary = g
+			break
+		}
+	}
+	if secondary < 0 {
+		t.Skip("test user has no secondary group to exercise the chgrp")
+	}
+	if err := os.Chown(e.dir(), -1, secondary); err != nil {
+		t.Skipf("cannot chgrp proxy.d/ to %d: %v", secondary, err)
+	}
 	if _, err := e.Set("x.example", rule()); err != nil {
 		t.Fatal(err)
 	}
@@ -201,14 +223,8 @@ func TestFragmentGroupMatchesDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dirSt, err := os.Stat(e.dir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	fg := fragSt.Sys().(*syscall.Stat_t).Gid
-	dg := dirSt.Sys().(*syscall.Stat_t).Gid
-	if fg != dg {
-		t.Fatalf("fragment gid %d != proxy.d gid %d — the daemon may not be able to read it", fg, dg)
+	if fg := int(fragSt.Sys().(*syscall.Stat_t).Gid); fg != secondary {
+		t.Fatalf("fragment gid %d != proxy.d gid %d — writeFragment didn't match the dir's group", fg, secondary)
 	}
 }
 
