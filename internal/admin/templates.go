@@ -17,6 +17,8 @@ const (
 	zoneViewTmpl      = "zoneview"
 	zoneHistTmpl      = "zonehist"
 	recordConfirmTmpl = "recordconfirm"
+	proxyFormTmpl     = "proxyform"
+	proxyConfirmTmpl  = "proxyconfirm"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -103,18 +105,70 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 </div></form></div>
 
 {{if .ProxyOn}}<h2>proxy hosts</h2>
-<table><thead><tr><th>host</th><th>upstream</th><th>allow</th><th>auth</th><th>rate</th></tr></thead><tbody>
+<table><thead><tr><th>host</th><th>upstream</th><th>allow</th><th>auth</th><th>rate</th>{{if .ProxyEdit}}<th></th>{{end}}</tr></thead><tbody>
 {{range .Proxies}}<tr>
 <td>{{.Host}}</td><td class="muted">{{.Upstream}}</td>
 <td>{{if .Allow}}{{.Allow}}{{else}}<span class="warn">any</span>{{end}}</td>
 <td>{{if .Auth}}<span class="ok">basic</span>{{else}}<span class="muted">—</span>{{end}}</td>
 <td>{{if .Rate}}{{.Rate}}/s{{else}}<span class="muted">—</span>{{end}}</td>
-</tr>{{else}}<tr><td colspan="5" class="muted">(no proxy hosts)</td></tr>{{end}}
+{{if $.ProxyEdit}}<td style="white-space:nowrap">{{if .Managed}}
+<a href="/proxy/edit?host={{.Host}}">edit</a>
+<form class="inline" method="post" action="/proxy/del"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="host" value="{{.Host}}"><button class="danger" type="submit">del</button></form>
+{{else}}<span class="muted" title="defined in goddns.conf">conf</span>{{end}}</td>{{end}}
+</tr>{{else}}<tr><td colspan="{{if .ProxyEdit}}6{{else}}5{{end}}" class="muted">(no proxy hosts)</td></tr>{{end}}
 </tbody></table>
-<div class="muted" style="font-size:.72rem;margin-top:.4rem">proxy hosts are read-only here — edit goddns.conf (hot-reloaded). DDNS records are managed above.</div>
+{{if .ProxyEdit}}
+<div class="card"><form method="post" action="/proxy/set"><input type="hidden" name="csrf" value="{{.CSRF}}"><div class="row">
+<div><label>host</label><input name="host" placeholder="idrac.internal.myip.gr" size="26"></div>
+<div><label>upstream</label><input name="upstream" placeholder="https://10.23.0.5" size="22"></div>
+<div><label>allow (CIDRs)</label><input name="allow" placeholder="10.0.0.0/8" size="16"></div>
+<div><label>rate/s</label><input name="rate" type="number" value="0" style="width:5rem"></div>
+<div><label>verify</label><input type="checkbox" name="verify" value="1"></div>
+<div><label>preserve host</label><input type="checkbox" name="preserve" value="1"></div>
+<div><button type="submit">add vhost</button></div>
+</div>
+<div class="row" style="margin-top:.4rem"><div style="flex:1"><label>basic_auth (user:bcrypt, one per line — make with <code>goddns passwd</code>)</label><input name="auth" placeholder="chris:$2a$10$..." style="width:100%"></div></div>
+</form></div>
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">goddns manages <code>proxy.d/&lt;host&gt;.conf</code> fragments; vhosts marked <span class="muted">conf</span> live in goddns.conf and stay read-only here.</div>
+{{else}}<div class="muted" style="font-size:.72rem;margin-top:.4rem">proxy hosts are read-only here — edit goddns.conf (hot-reloaded). DDNS records are managed above.</div>{{end}}
 {{end}}
 
 </main></body></html>{{end}}
+
+{{define "proxyform"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">{{if .Edit}}edit{{else}}add{{end}} vhost</span></div><div><a href="/">cancel</a></div></header>
+<main><h2>{{if .Edit}}edit {{.Host}}{{else}}add a proxy vhost{{end}}</h2>
+<div class="card"><form method="post" action="/proxy/set"><input type="hidden" name="csrf" value="{{.CSRF}}">
+<div><label>host</label><input name="host" value="{{.Host}}" {{if .Edit}}readonly{{end}} placeholder="idrac.internal.myip.gr" style="width:100%"></div>
+<div style="margin-top:.6rem"><label>upstream</label><input name="upstream" value="{{.Upstream}}" placeholder="https://10.23.0.5" style="width:100%"></div>
+<div style="margin-top:.6rem"><label>allow (CIDRs, comma/space separated)</label><input name="allow" value="{{.Allow}}" placeholder="10.0.0.0/8" style="width:100%"></div>
+<div style="margin-top:.6rem"><label>basic_auth (user:bcrypt, one per line)</label><textarea name="auth" rows="2" style="width:100%;background:#0c0e12;color:#d7dae0;border:1px solid #2a313c;border-radius:4px;padding:.35rem .5rem;font:inherit">{{.Auth}}</textarea></div>
+<div class="row" style="margin-top:.6rem">
+<div><label>rate/s</label><input name="rate" type="number" value="{{.Rate}}" style="width:5rem"></div>
+<div><label>verify upstream TLS</label><input type="checkbox" name="verify" value="1" {{if .Verify}}checked{{end}}></div>
+<div><label>preserve host</label><input type="checkbox" name="preserve" value="1" {{if .Preserve}}checked{{end}}></div>
+</div>
+<div style="margin-top:.8rem"><button type="submit">preview</button><a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a></div>
+</form></div></main></body></html>{{end}}
+
+{{define "proxyconfirm"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">confirm</span></div><div><a href="/">cancel</a></div></header>
+<main><h2>{{.Action}} vhost {{.Host}}</h2>
+<div class="card">
+<pre>{{.Fragment}}</pre>
+<form method="post" action="/proxy/set">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="host" value="{{.Host}}">
+<input type="hidden" name="upstream" value="{{.Upstream}}">
+<input type="hidden" name="allow" value="{{.Allow}}">
+<input type="hidden" name="auth" value="{{.Auth}}">
+<input type="hidden" name="rate" value="{{.Rate}}">
+{{if .Verify}}<input type="hidden" name="verify" value="1">{{end}}
+{{if .Preserve}}<input type="hidden" name="preserve" value="1">{{end}}
+<input type="hidden" name="confirm" value="1">
+<button type="submit">{{.Action}}</button>
+<a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a>
+</form></div></main></body></html>{{end}}
 
 {{define "result"}}{{template "head" .}}
 <header><div><span class="b">goddns admin</span></div><div><a href="/">&larr; back</a></div></header>
@@ -140,6 +194,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <form method="post" action="{{.Action}}">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
 <input type="hidden" name="fqdn" value="{{.FQDN}}">
+{{if .Host}}<input type="hidden" name="host" value="{{.Host}}">{{end}}
 <input type="hidden" name="confirm" value="1">
 <button class="danger" type="submit">{{.Verb}}</button>
 <a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a>

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/chrismfz/goddns/internal/recordmut"
 	"github.com/chrismfz/goddns/internal/store"
 	"github.com/chrismfz/goddns/internal/tsig"
+	"github.com/chrismfz/goddns/internal/vhostmut"
 )
 
 const cookieName = "goddns_admin"
@@ -52,10 +54,24 @@ type Handler struct {
 	secret   []byte
 	version  string
 	throttle *loginThrottle
+	confPath string // goddns.conf path, for proxy.d/ vhost editing (empty = read-only)
+	reload   func() // optional: trigger an immediate config reload after a write
 }
 
 func New(cfg func() *config.Config, st Store, secret []byte, version string) *Handler {
 	return &Handler{cfg: cfg, store: st, secret: secret, version: version, throttle: newLoginThrottle()}
+}
+
+// EnableVhostEditing turns on proxy-vhost CRUD in the UI: confPath locates
+// proxy.d/, and reload (optional) is called after a successful write so the
+// change applies immediately instead of waiting for the poll.
+func (h *Handler) EnableVhostEditing(confPath string, reload func()) {
+	h.confPath = confPath
+	h.reload = reload
+}
+
+func (h *Handler) vhostEditor() *vhostmut.Editor {
+	return &vhostmut.Editor{ConfPath: h.confPath}
 }
 
 // adminCred returns the bcrypt hash configured for user (the credential
@@ -150,6 +166,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleZone(w, r, user)
 	case "/zone/record":
 		h.handleRecord(w, r, user, peerStr)
+	case "/proxy/edit":
+		h.handleProxyEdit(w, r, user)
+	case "/proxy/set":
+		h.handleProxySet(w, r, user, peerStr)
+	case "/proxy/del":
+		h.handleProxyDel(w, r, user, peerStr)
 	default:
 		http.NotFound(w, r)
 	}
@@ -532,6 +554,7 @@ type proxyView struct {
 	Host, Upstream, Allow string
 	Auth                  bool
 	Rate                  int
+	Managed               bool // goddns owns the proxy.d/ fragment (editable)
 }
 
 func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user string) {
@@ -558,12 +581,24 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 		})
 	}
 
+	// Which vhosts goddns owns (proxy.d/ fragments) — those get edit/del
+	// controls; base-config vhosts stay read-only. Best-effort: on any error
+	// nothing is marked managed and the table is read-only.
+	managed := map[string]bool{}
+	if h.confPath != "" {
+		if entries, err := h.vhostEditor().List(); err == nil {
+			for _, e := range entries {
+				managed[e.Host] = e.Managed
+			}
+		}
+	}
 	var pv []proxyView
 	for _, host := range cfg.ProxyHosts() {
 		rule := cfg.Proxy[host]
 		pv = append(pv, proxyView{
 			Host: host, Upstream: rule.Upstream, Allow: strings.Join(rule.Allow, ", "),
 			Auth: len(rule.BasicAuth) > 0, Rate: rule.RateLimit,
+			Managed: managed[strings.TrimSuffix(strings.ToLower(host), ".")],
 		})
 	}
 
@@ -574,10 +609,131 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 		"Records":   rv,
 		"Proxies":   pv,
 		"ProxyOn":   cfg.ProxyEnabled,
+		"ProxyEdit": h.confPath != "",
 		"HasAccess": cfg.AccessLog != "",
 		"HasEvent":  cfg.LogFile != "",
 	})
 }
+
+// proxyRuleFromForm builds a ProxyRule + host from the vhost form fields.
+func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule) {
+	host := strings.TrimSpace(r.FormValue("host"))
+	rate, _ := strconv.Atoi(r.FormValue("rate"))
+	splitLines := func(s string) []string {
+		var out []string
+		for _, f := range strings.FieldsFunc(s, func(c rune) bool { return c == ',' || c == '\n' || c == '\r' }) {
+			if f = strings.TrimSpace(f); f != "" {
+				out = append(out, f)
+			}
+		}
+		return out
+	}
+	return host, config.ProxyRule{
+		Upstream:       strings.TrimSpace(r.FormValue("upstream")),
+		UpstreamVerify: r.FormValue("verify") == "1",
+		PreserveHost:   r.FormValue("preserve") == "1",
+		Allow:          splitLines(r.FormValue("allow")),
+		BasicAuth:      splitLines(r.FormValue("auth")),
+		RateLimit:      rate,
+	}
+}
+
+// handleProxyEdit serves the vhost form pre-filled for an existing managed
+// vhost (GET /proxy/edit?host=). The dashboard's inline form covers "add".
+func (h *Handler) handleProxyEdit(w http.ResponseWriter, r *http.Request, user string) {
+	if h.confPath == "" {
+		http.NotFound(w, r)
+		return
+	}
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host"))), ".")
+	entries, err := h.vhostEditor().List()
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	for _, e := range entries {
+		if e.Host == host && e.Managed {
+			render(w, proxyFormTmpl, map[string]any{
+				"Version": h.version, "CSRF": h.csrfFor(user), "Edit": true,
+				"Host": e.Host, "Upstream": e.Rule.Upstream,
+				"Allow": strings.Join(e.Rule.Allow, ", "), "Auth": strings.Join(e.Rule.BasicAuth, "\n"),
+				"Rate": e.Rule.RateLimit, "Verify": e.Rule.UpstreamVerify, "Preserve": e.Rule.PreserveHost,
+			})
+			return
+		}
+	}
+	renderRecordErr(w, h.version, "no goddns-managed vhost %q to edit", host)
+}
+
+// handleProxySet creates/replaces a managed vhost. Two-phase like the record
+// editor: the first POST previews the rendered fragment, confirm=1 writes it
+// (CSRF-checked, audited) and triggers an immediate reload.
+func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, peer string) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || h.confPath == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	host, rule := proxyRuleFromForm(r)
+	ed := h.vhostEditor()
+	res, err := ed.PreviewSet(host, rule)
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	if r.FormValue("confirm") != "1" {
+		render(w, proxyConfirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user),
+			"Action": res.Action, "Host": res.Host, "Fragment": res.Fragment,
+			"Upstream": rule.Upstream, "Allow": strings.Join(rule.Allow, ", "),
+			"Auth": strings.Join(rule.BasicAuth, "\n"), "Rate": rule.RateLimit,
+			"Verify": rule.UpstreamVerify, "Preserve": rule.PreserveHost,
+		})
+		return
+	}
+	if _, err := ed.Set(host, rule); err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	h.audit(user, peer, "vhost-%s host=%s upstream=%s", res.Action, res.Host, rule.Upstream)
+	if h.reload != nil {
+		h.reload()
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+// handleProxyDel removes a managed vhost (two-phase confirm, audited, reloads).
+func (h *Handler) handleProxyDel(w http.ResponseWriter, r *http.Request, user, peer string) {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || h.confPath == "" {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	host := strings.TrimSpace(r.FormValue("host"))
+	ed := h.vhostEditor()
+	res, err := ed.PreviewRemove(host)
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	if r.FormValue("confirm") != "1" {
+		render(w, confirmTmpl, map[string]any{
+			"Version": h.version, "CSRF": h.csrfFor(user), "FQDN": res.Host, "Host": res.Host,
+			"Action": "/proxy/del", "Verb": "yes, remove",
+			"Msg": "Remove this proxy vhost? Its " + relBase(res.File) + " fragment is deleted and the route stops on the next reload.",
+		})
+		return
+	}
+	if _, err := ed.Remove(host); err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
+	h.audit(user, peer, "vhost-remove host=%s", res.Host)
+	if h.reload != nil {
+		h.reload()
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func relBase(f string) string { return "proxy.d/" + filepath.Base(f) }
 
 func (h *Handler) handleAdd(w http.ResponseWriter, r *http.Request, user, peer string) {
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
