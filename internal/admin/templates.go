@@ -20,6 +20,7 @@ const (
 	restoreConfirmTmpl = "restoreconfirm"
 	proxyFormTmpl      = "proxyform"
 	proxyConfirmTmpl   = "proxyconfirm"
+	passwdTmpl         = "passwd"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -47,6 +48,11 @@ body{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background
 header{background:#161a21;border-bottom:1px solid #262c36;padding:.7rem 1rem;display:flex;justify-content:space-between;align-items:center}
 header .b{color:#18bcf2;font-weight:bold}
 header a{color:#9aa4b2;text-decoration:none;margin-left:1rem}
+header nav a.on{color:#18bcf2}
+.subnav{background:#11151c;border-bottom:1px solid #1d222b;padding:.45rem 1rem;display:flex;gap:1rem;align-items:center;font-size:.82rem}
+.subnav a{color:#9aa4b2;text-decoration:none}
+.subnav .here{color:#8ab4f8;font-weight:bold}
+.subnav .sp{flex:1}
 main{max-width:1100px;margin:0 auto;padding:1rem}
 h2{color:#8ab4f8;font-size:1rem;margin:1.4rem 0 .5rem;border-bottom:1px solid #262c36;padding-bottom:.3rem}
 table{width:100%;border-collapse:collapse;font-size:.86rem}
@@ -65,6 +71,18 @@ label{display:block;font-size:.75rem;color:#7d8696;margin-bottom:.2rem}
 pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;overflow:auto;max-height:60vh;font-size:.78rem;line-height:1.35}
 </style></head><body>{{end}}
 
+{{/* topbar: the persistent main nav, identical on every signed-in page so the
+   menu never disappears. .Active selects which link is highlighted. */}}
+{{define "topbar"}}<header>
+<div><a href="/" class="b">goddns admin</a><nav>
+<a href="/" {{if eq .Active "dash"}}class="on"{{end}}>dashboard</a>
+<a href="/zones" {{if eq .Active "zones"}}class="on"{{end}}>zones</a>
+<a href="/logs?which=access" {{if eq .Active "logs"}}class="on"{{end}}>logs</a>
+<a href="/passwd" {{if eq .Active "passwd"}}class="on"{{end}}>password</a>
+</nav></div>
+<div><span class="muted">{{.User}}</span><a href="/logout">logout</a></div>
+</header>{{end}}
+
 {{define "login"}}{{template "head" .}}
 <main style="max-width:340px;margin-top:12vh">
 <div class="b" style="color:#18bcf2;font-size:1.3rem;margin-bottom:1rem">goddns admin</div>
@@ -77,9 +95,8 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div class="muted" style="font-size:.7rem;margin-top:1rem">goddns {{.Version}}</div>
 </main></body></html>{{end}}
 
-{{define "dash"}}{{template "head" .}}
-<header><div><span class="b">goddns admin</span> <span class="muted">{{.Version}}</span></div>
-<div><span class="muted">{{.User}}</span><a href="/zones">zones</a><a href="/logs?which=access">access log</a><a href="/logs?which=event">event log</a><a href="/logout">logout</a></div></header>
+{{define "dash"}}{{template "head" .}}{{template "topbar" .}}
+<div class="subnav"><span class="here">dashboard</span><span class="sp"></span><span class="muted">goddns {{.Version}}</span></div>
 <main>
 
 <h2>DDNS records</h2>
@@ -128,7 +145,11 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div><label>preserve host</label><input type="checkbox" name="preserve" value="1"></div>
 <div><button type="submit">add vhost</button></div>
 </div>
-<div class="row" style="margin-top:.4rem"><div style="flex:1"><label>basic_auth (user:bcrypt, one per line — make with <code>goddns passwd</code>)</label><input name="auth" placeholder="chris:$2a$10$..." style="width:100%"></div></div>
+<div class="row" style="margin-top:.4rem">
+<div><label>login user (optional)</label><input name="auth_user" placeholder="chris" size="14" autocomplete="off"></div>
+<div><label>login password</label><input name="auth_pass" type="password" placeholder="bcrypt-hashed for you" size="20" autocomplete="new-password"></div>
+<div class="muted" style="font-size:.7rem;align-self:center">→ stored bcrypt-hashed; leave blank for IP-only</div>
+</div>
 </form></div>
 <div class="muted" style="font-size:.72rem;margin-top:.4rem">goddns manages <code>proxy.d/&lt;host&gt;.conf</code> fragments; vhosts marked <span class="muted">conf</span> live in goddns.conf and stay read-only here.</div>
 {{else}}<div class="muted" style="font-size:.72rem;margin-top:.4rem">proxy hosts are read-only here — edit goddns.conf (hot-reloaded). DDNS records are managed above.</div>{{end}}
@@ -143,7 +164,12 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div><label>host</label><input name="host" value="{{.Host}}" {{if .Edit}}readonly{{end}} placeholder="idrac.internal.myip.gr" style="width:100%"></div>
 <div style="margin-top:.6rem"><label>upstream</label><input name="upstream" value="{{.Upstream}}" placeholder="https://10.23.0.5" style="width:100%"></div>
 <div style="margin-top:.6rem"><label>allow (CIDRs, comma/space separated)</label><input name="allow" value="{{.Allow}}" placeholder="10.0.0.0/8" style="width:100%"></div>
-<div style="margin-top:.6rem"><label>basic_auth (user:bcrypt, one per line)</label><textarea name="auth" rows="2" style="width:100%;background:#0c0e12;color:#d7dae0;border:1px solid #2a313c;border-radius:4px;padding:.35rem .5rem;font:inherit">{{.Auth}}</textarea></div>
+<div style="margin-top:.6rem"><label>basic_auth (user:bcrypt, one per line — existing entries; edit/clear to remove)</label><textarea name="auth" rows="2" style="width:100%;background:#0c0e12;color:#d7dae0;border:1px solid #2a313c;border-radius:4px;padding:.35rem .5rem;font:inherit">{{.Auth}}</textarea></div>
+<div class="row" style="margin-top:.6rem">
+<div><label>+ add login user</label><input name="auth_user" placeholder="chris" autocomplete="off"></div>
+<div><label>+ password</label><input name="auth_pass" type="password" placeholder="bcrypt-hashed for you" autocomplete="new-password"></div>
+<div class="muted" style="font-size:.7rem;align-self:center">appended to basic_auth on save</div>
+</div>
 <div class="row" style="margin-top:.6rem">
 <div><label>rate/s</label><input name="rate" type="number" value="{{.Rate}}" style="width:5rem"></div>
 <div><label>verify upstream TLS</label><input type="checkbox" name="verify" value="1" {{if .Verify}}checked{{end}}></div>
@@ -238,9 +264,8 @@ curl "https://{{.Host}}:{{.Port}}/nic/update?hostname={{.Name}}&token={{.Token}}
 <p style="margin-top:1rem"><a href="/">&larr; back to dashboard</a></p>
 </main></body></html>{{end}}
 
-{{define "zones"}}{{template "head" .}}
-<header><div><span class="b">goddns admin</span> <span class="muted">zones (read-only)</span></div>
-<div><a href="/">&larr; dashboard</a><a href="/zones">refresh</a></div></header>
+{{define "zones"}}{{template "head" .}}{{template "topbar" .}}
+<div class="subnav"><span class="here">zones</span><span class="muted">read-only</span><span class="sp"></span><a href="/zones">refresh</a></div>
 <main>
 {{if .Error}}
 <div class="card" style="border-color:#5a2230">
@@ -283,9 +308,8 @@ read-only view, add it to the named group:<br>
 {{end}}
 </main></body></html>{{end}}
 
-{{define "zoneview"}}{{template "head" .}}
-<header><div><span class="b">goddns admin</span> <span class="muted">zone {{.Name}} (read-only)</span></div>
-<div><a href="/zones">&larr; zones</a><a href="/zone?name={{.Name}}&amp;history=1">history</a><a href="/zone?name={{.Name}}">refresh</a></div></header>
+{{define "zoneview"}}{{template "head" .}}{{template "topbar" .}}
+<div class="subnav"><a href="/zones">&larr; zones</a><span class="here">{{.Name}}</span><span class="muted">read-only</span><span class="sp"></span><a href="/zone?name={{.Name}}&amp;history=1">history</a><a href="/zone?name={{.Name}}">refresh</a></div>
 <main>
 {{if .Error}}
 <div class="card" style="border-color:#5a2230">
@@ -349,9 +373,8 @@ This page never edits BIND — it only reads.</div>
 {{end}}
 </main></body></html>{{end}}
 
-{{define "zonehist"}}{{template "head" .}}
-<header><div><span class="b">goddns admin</span> <span class="muted">history {{.Name}} (read-only)</span></div>
-<div><a href="/zone?name={{.Name}}">&larr; zone</a><a href="/zone?name={{.Name}}&amp;history=1">refresh</a></div></header>
+{{define "zonehist"}}{{template "head" .}}{{template "topbar" .}}
+<div class="subnav"><a href="/zones">&larr; zones</a><a href="/zone?name={{.Name}}">{{.Name}}</a><span class="here">history</span><span class="sp"></span><a href="/zone?name={{.Name}}&amp;history=1">refresh</a></div>
 <main>
 {{if .Error}}<div class="card" style="border-color:#5a2230"><pre style="margin:.5rem 0">{{.Error}}</pre></div>
 {{else}}
@@ -412,10 +435,30 @@ This page never edits BIND — it only reads.</div>
 <a href="/zone?name={{.Zone}}&amp;history=1" style="margin-left:1rem;color:#9aa4b2">cancel</a>
 </form></div></main></body></html>{{end}}
 
-{{define "logs"}}{{template "head" .}}
-<header><div><span class="b">goddns admin</span> <span class="muted">{{.Title}}</span></div>
-<div><a href="/">&larr; dashboard</a><a href="/logs?which={{.Which}}">refresh</a></div></header>
+{{define "logs"}}{{template "head" .}}{{template "topbar" .}}
+<div class="subnav">
+<a href="/logs?which=access" {{if eq .Which "access"}}class="here"{{end}}>access log</a>
+<a href="/logs?which=event" {{if eq .Which "event"}}class="here"{{end}}>event log</a>
+<span class="sp"></span><a href="/logs?which={{.Which}}">refresh</a></div>
 <main><h2>{{.Title}} <span class="muted">(newest first, last 300)</span></h2>
 <pre>{{range .Lines}}{{.}}
 {{end}}</pre></main></body></html>{{end}}
+
+{{define "passwd"}}{{template "head" .}}{{template "topbar" .}}
+<div class="subnav"><span class="here">password hash</span><span class="sp"></span></div>
+<main><h2>generate a password hash</h2>
+{{if .Error}}<div class="card" style="border-color:#5a2230;color:#ff8aa6">{{.Error}}</div>{{end}}
+{{if .Entry}}<div class="card">
+<div class="muted">bcrypt entry for <b>{{.U}}</b> — paste into <code>[admin] users</code> in goddns.conf, or a vhost's <code>basic_auth</code>:</div>
+<div class="tok">{{.Entry}}</div>
+<div class="warn" style="font-size:.78rem;margin-top:.5rem">goddns never rewrites your goddns.conf — paste this yourself; it hot-reloads. (For a proxy vhost you can skip this and just type the password in the vhost form.)</div>
+</div>{{end}}
+<div class="card"><form method="post" action="/passwd">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<div><label>user</label><input name="u" value="{{.U}}" autocomplete="off" style="width:100%"></div>
+<div style="margin-top:.6rem"><label>password</label><input name="pw" type="password" autocomplete="new-password" style="width:100%"></div>
+<div style="margin-top:.8rem"><button type="submit">generate hash</button></div>
+</form></div>
+<div class="muted" style="font-size:.72rem">Same as <code>goddns passwd -user …</code> on the console — bcrypt, computed here so you don't need shell access. The password is never stored or logged.</div>
+</main></body></html>{{end}}
 `
