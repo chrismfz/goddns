@@ -28,7 +28,8 @@ ReadWritePaths=-/var/log/goddns-access.log
 ReadOnlyPaths=-/etc/letsencrypt
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK
+# AF_UNIX is needed to reach the goddns-zoned helper socket (web static editing).
+RestrictAddressFamilies=AF_INET AF_INET6 AF_NETLINK AF_UNIX
 SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 

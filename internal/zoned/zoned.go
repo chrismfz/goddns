@@ -12,13 +12,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net"
+	"syscall"
 	"time"
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filezone"
 )
+
+const maxRequest = 64 << 10 // cap an untrusted request body
 
 // Request is one structured record edit. The helper re-derives the op and
 // re-validates the zone against its OWN config — Zone is a hint, not a grant.
@@ -43,34 +48,71 @@ type Response struct {
 // Server is the helper. Cfg loads the CURRENT config each request (so
 // editable_zones / named_conf are re-read, never taken from the client).
 type Server struct {
-	Cfg    func() (*config.Config, error)
-	editor func(*config.Config) *filezone.Editor // tests override; nil = from cfg
+	Cfg     func() (*config.Config, error)
+	PeerGID int                                   // >0: require the connecting peer be uid 0 or this gid (SO_PEERCRED)
+	editor  func(*config.Config) *filezone.Editor // tests override; nil = from cfg
 }
 
-// Serve handles one request per connection on ln until ctx is cancelled.
+// Serve handles one request per connection on ln until ctx is cancelled, with a
+// small bound on concurrent handlers (a root service must not let a local flood
+// spawn unbounded goroutines / concurrent zone writes).
 func (s *Server) Serve(ctx context.Context, ln net.Listener) {
 	go func() {
 		<-ctx.Done()
 		ln.Close()
 	}()
+	sem := make(chan struct{}, 8)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			return // ln closed on ctx cancel
 		}
-		go s.serveConn(conn)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem }()
+			s.serveConn(conn)
+		}()
 	}
 }
 
 func (s *Server) serveConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if !peerOK(conn, s.PeerGID) {
+		writeResp(conn, Response{Error: "permission denied"})
+		return
+	}
 	var req Request
-	if err := json.NewDecoder(conn).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, maxRequest)).Decode(&req); err != nil {
 		writeResp(conn, Response{Error: "bad request: " + err.Error()})
 		return
 	}
 	writeResp(conn, s.process(req))
+}
+
+// peerOK verifies the connecting peer's credentials (SO_PEERCRED) as defence in
+// depth over the socket's 0660 root:goddns perms: only uid 0 or the goddns gid.
+// allowGID <= 0 disables the check (tests / no group resolved).
+func peerOK(conn net.Conn, allowGID int) bool {
+	if allowGID <= 0 {
+		return true
+	}
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return false
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return false
+	}
+	var cred *syscall.Ucred
+	var cerr error
+	if cerr = raw.Control(func(fd uintptr) {
+		cred, cerr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); cerr != nil {
+		return false
+	}
+	return cred != nil && (cred.Uid == 0 || int(cred.Gid) == allowGID)
 }
 
 // process re-validates and runs the edit. Everything (allowlist, static-master,
@@ -104,6 +146,11 @@ func (s *Server) process(req Request) Response {
 	if err != nil {
 		return Response{Error: err.Error()}
 	}
+	// Audit on the helper's own side: the daemon's audit log is the thing assumed
+	// compromised in this threat model, so the root writer records what it applied.
+	if req.Apply {
+		log.Printf("zoned-audit: %s zone=%s rr=%q serial=%d backup=%s", req.Action, req.Zone, req.RR, res.Serial, res.Backup)
+	}
 	return Response{OK: true, Added: res.Added, Removed: res.Removed, Serial: res.Serial, Backup: res.Backup}
 }
 
@@ -134,7 +181,7 @@ func Call(socket string, req Request) (*Response, error) {
 		return nil, err
 	}
 	var resp Response
-	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(conn, maxRequest)).Decode(&resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK && resp.Error != "" {

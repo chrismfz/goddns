@@ -43,13 +43,19 @@ func cmdZoned(args []string) {
 		fatal("socket dir: %v", err)
 	}
 	_ = os.Remove(sock) // clear a stale socket
+	// Create the socket non-world-connectable from the start (umask 0177 → 0600),
+	// closing the window between Listen and the chmod below.
+	old := syscall.Umask(0o177)
 	ln, err := net.Listen("unix", sock)
+	syscall.Umask(old)
 	if err != nil {
 		fatal("listen %s: %v", sock, err)
 	}
 	defer os.Remove(sock)
-	// root:goddns 0660 — only the goddns group (the daemon) may connect.
-	if gid, gerr := lookupGID("goddns"); gerr == nil {
+	// root:goddns 0660 — only root and the goddns group (the daemon) may connect.
+	gid := -1
+	if g, gerr := lookupGID("goddns"); gerr == nil {
+		gid = g
 		_ = os.Chown(sock, 0, gid)
 	}
 	_ = os.Chmod(sock, 0o660)
@@ -57,7 +63,10 @@ func cmdZoned(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	log.Printf("goddns-zoned: root write helper listening on %s", sock)
-	srv := &zoned.Server{Cfg: func() (*config.Config, error) { return config.Load(*cfgPath) }}
+	srv := &zoned.Server{
+		Cfg:     func() (*config.Config, error) { return config.Load(*cfgPath) },
+		PeerGID: gid, // belt-and-braces over the socket perms (SO_PEERCRED)
+	}
 	srv.Serve(ctx, ln)
 	log.Printf("goddns-zoned: shut down")
 }
