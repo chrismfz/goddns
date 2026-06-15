@@ -257,17 +257,24 @@ the same TLS and port — no extra listener, no port games):
     users   = ["chris:$2a$10$..."]      # goddns passwd -user chris
 
 It shows the DDNS records (last IP / last seen), the proxy table, and a tail
-of the logs, and lets you **add / rotate / delete DDNS tokens** (proxy hosts
-stay read-only — edit `goddns.conf`, it hot-reloads). Each record has a
-**help** link with ready copy-paste client snippets (curl, cron, MikroTik,
-router DynDNS2) for that hostname — set `public_host` so they're filled in
-with your server name and port. Tokens are stored hashed and **can't be
-shown again**; if one is lost, **rotate** mints a fresh token (the old one
-stops working) and shows it once with the snippets filled in. The same is
-available on the CLI: `goddns token rotate -fqdn home.ddns.myip.gr`.
-DDNS tokens live in SQLite, so CRUD there is natural; full proxy CRUD would
-mean moving proxy rules out of the hand-edited config, a deliberate non-goal
-for now.
+of the logs, and lets you **add / rotate / delete DDNS tokens**. Each record
+has a **help** link with ready copy-paste client snippets (curl, cron,
+MikroTik, router DynDNS2) for that hostname — set `public_host` so they're
+filled in with your server name and port. Tokens are stored hashed and
+**can't be shown again**; if one is lost, **rotate** mints a fresh token (the
+old one stops working) and shows it once with the snippets filled in. The same
+is available on the CLI: `goddns token rotate -fqdn home.ddns.myip.gr`.
+
+**Proxy vhosts** are editable too: a goddns-managed `proxy.d/<host>.conf`
+fragment gets `edit` / `del` buttons and there's an "add vhost" form (a vhost
+defined in `goddns.conf` by hand is marked `conf` and stays read-only). For
+`basic_auth` you can just type a username + password in the vhost form and
+goddns bcrypts it for you — no console trip. The same hashing is on a dedicated
+**password** page (the in-UI `goddns passwd`): type a user + password, get a
+`user:bcrypt` line to paste into `[admin] users` (goddns never rewrites your
+`goddns.conf`, so admin logins are placed by you — the page just mints the
+hash). A persistent top nav (dashboard · zones · logs · password) is on every
+page, with a per-page sub-bar for context.
 
 **It can rewrite DNS, so it is gated in depth** — a custom port would be
 security theatre; layered auth is the real control:

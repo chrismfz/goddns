@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -158,6 +159,72 @@ func login(t *testing.T, h *Handler) *http.Cookie {
 	}
 	t.Fatal("no session cookie set")
 	return nil
+}
+
+func TestPasswdHelper(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	cookie := login(t, h)
+	csrf := h.csrfFor("admin")
+	if rr := do(h, "GET", "/passwd", "127.0.0.1:1", nil, cookie); rr.Code != http.StatusOK ||
+		!strings.Contains(rr.Body.String(), "generate a password hash") {
+		t.Fatalf("GET /passwd: %d", rr.Code)
+	}
+	rr := do(h, "POST", "/passwd", "127.0.0.1:1",
+		map[string]string{"csrf": csrf, "u": "chris", "pw": "hunter2pass"}, cookie)
+	body := rr.Body.String()
+	if !strings.Contains(body, "chris:$2a$") {
+		t.Fatalf("expected a bcrypt entry for chris, got:\n%s", body)
+	}
+	if strings.Contains(body, "hunter2pass") {
+		t.Fatalf("the plaintext password must never appear in the response")
+	}
+}
+
+func TestProxyFormPasswordHashed(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	confPath := filepath.Join(t.TempDir(), "goddns.conf")
+	if err := os.WriteFile(confPath, []byte(""), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	h.EnableVhostEditing(confPath, nil)
+	cookie := login(t, h)
+	csrf := h.csrfFor("admin")
+	// First POST (no confirm) previews the fragment; a typed password must be
+	// bcrypt-hashed into basic_auth and never echoed in clear.
+	rr := do(h, "POST", "/proxy/set", "127.0.0.1:1", map[string]string{
+		"csrf": csrf, "host": "idrac.example", "upstream": "https://1.1.1.1",
+		"auth_user": "chris", "auth_pass": "s3kritpw",
+	}, cookie)
+	body := rr.Body.String()
+	if !strings.Contains(body, "basic_auth") || !strings.Contains(body, "$2a$") {
+		t.Fatalf("expected a bcrypt basic_auth entry in the preview, got:\n%s", body)
+	}
+	if strings.Contains(body, "s3kritpw") {
+		t.Fatalf("the plaintext password must never appear in the preview/fragment")
+	}
+
+	// Confirm phase: resubmit the preview's hidden fields (auth = the HASH, no
+	// plaintext) with confirm=1 — this is where a regression that re-introduced
+	// the plaintext into the round-trip would surface. The written fragment must
+	// carry the bcrypt hash, never the password.
+	entry := regexp.MustCompile(`chris:\$2a\$[./A-Za-z0-9$]+`).FindString(body)
+	if entry == "" {
+		t.Fatalf("could not locate the hashed entry in the preview")
+	}
+	rr2 := do(h, "POST", "/proxy/set", "127.0.0.1:1", map[string]string{
+		"csrf": csrf, "host": "idrac.example", "upstream": "https://1.1.1.1",
+		"auth": entry, "confirm": "1",
+	}, cookie)
+	if rr2.Code != http.StatusSeeOther {
+		t.Fatalf("confirm POST: got %d, want 303\n%s", rr2.Code, rr2.Body.String())
+	}
+	frag, err := os.ReadFile(filepath.Join(filepath.Dir(confPath), "proxy.d", "idrac.example.conf"))
+	if err != nil {
+		t.Fatalf("read written fragment: %v", err)
+	}
+	if !strings.Contains(string(frag), "$2a$") || strings.Contains(string(frag), "s3kritpw") {
+		t.Fatalf("written fragment must carry the hash, not the plaintext:\n%s", frag)
+	}
 }
 
 func TestZoneHistoryDiffAndEscaping(t *testing.T) {

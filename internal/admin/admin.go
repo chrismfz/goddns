@@ -168,6 +168,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleRecord(w, r, user, peerStr)
 	case "/zone/restore":
 		h.handleRestore(w, r, user, peerStr)
+	case "/passwd":
+		h.handlePasswd(w, r, user)
 	case "/proxy/edit":
 		h.handleProxyEdit(w, r, user)
 	case "/proxy/set":
@@ -210,7 +212,7 @@ func (h *Handler) handleZoneHistory(w http.ResponseWriter, user, name string) {
 		render(w, zoneHistTmpl, map[string]any{"Version": h.version, "User": user, "Name": name, "Error": err.Error()})
 		return
 	}
-	data := map[string]any{"Version": h.version, "User": user, "Name": name}
+	data := map[string]any{"Version": h.version, "User": user, "Active": "zones", "Name": name}
 	rows := make([]snapRow, 0, len(snaps))
 	for _, s := range snaps {
 		rows = append(rows, snapRow{Serial: s.Serial, Taken: s.TakenAt.Format("2006-01-02 15:04"), ID: s.ID})
@@ -287,7 +289,7 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 		})
 	}
 	data := map[string]any{
-		"Version": h.version, "User": user, "Name": name,
+		"Version": h.version, "User": user, "Active": "zones", "Name": name,
 		"InConf": z != nil, "Records": rows, "Count": len(records), "Auth": auth,
 	}
 	if z != nil {
@@ -540,7 +542,7 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 	}
 
 	render(w, zonesTmpl, map[string]any{
-		"Version": h.version, "User": user, "Directory": inv.Directory,
+		"Version": h.version, "User": user, "Active": "zones", "Directory": inv.Directory,
 		"Zones": zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
 		"Builtin": len(inv.Zones) - len(zr), "Checked": check,
 	})
@@ -682,6 +684,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 	render(w, dashTmpl, map[string]any{
 		"Version":   h.version,
 		"User":      user,
+		"Active":    "dash",
 		"CSRF":      h.csrfFor(user),
 		"Records":   rv,
 		"Proxies":   pv,
@@ -692,8 +695,44 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 	})
 }
 
-// proxyRuleFromForm builds a ProxyRule + host from the vhost form fields.
-func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule) {
+// handlePasswd is the in-UI equivalent of `goddns passwd`: type a user and a
+// password, get a `user:bcrypt` entry to drop into [admin] users or a vhost's
+// basic_auth — so you never need shell access to mint one. It's a pure helper:
+// nothing is written (goddns never rewrites your goddns.conf) and the password
+// is never stored or logged.
+func (h *Handler) handlePasswd(w http.ResponseWriter, r *http.Request, user string) {
+	data := map[string]any{"Version": h.version, "User": user, "Active": "passwd", "CSRF": h.csrfFor(user)}
+	if r.Method == http.MethodPost {
+		if !h.csrfOK(user, r.FormValue("csrf")) {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		u := strings.TrimSpace(r.FormValue("u"))
+		pw := r.FormValue("pw")
+		data["U"] = u
+		switch {
+		case u == "" || pw == "":
+			data["Error"] = "user and password are both required"
+		case strings.Contains(u, ":"):
+			data["Error"] = "user must not contain ':'"
+		case len(pw) < 8:
+			data["Error"] = "password too short (min 8 characters)"
+		default:
+			hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+			if err != nil {
+				data["Error"] = err.Error()
+			} else {
+				data["Entry"] = u + ":" + string(hash)
+			}
+		}
+	}
+	render(w, passwdTmpl, data)
+}
+
+// proxyRuleFromForm builds a ProxyRule + host from the vhost form fields. A
+// plaintext auth_user/auth_pass pair is bcrypt-hashed here and appended to
+// basic_auth, so the operator never has to run `goddns passwd` by hand.
+func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule, error) {
 	host := strings.TrimSpace(r.FormValue("host"))
 	rate, _ := strconv.Atoi(r.FormValue("rate"))
 	splitLines := func(s string) []string {
@@ -705,7 +744,7 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule) {
 		}
 		return out
 	}
-	return host, config.ProxyRule{
+	rule := config.ProxyRule{
 		Upstream:       strings.TrimSpace(r.FormValue("upstream")),
 		UpstreamVerify: r.FormValue("verify") == "1",
 		PreserveHost:   r.FormValue("preserve") == "1",
@@ -713,6 +752,23 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule) {
 		BasicAuth:      splitLines(r.FormValue("auth")),
 		RateLimit:      rate,
 	}
+	if pw := r.FormValue("auth_pass"); pw != "" {
+		u := strings.TrimSpace(r.FormValue("auth_user"))
+		switch {
+		case u == "":
+			return host, rule, fmt.Errorf("a login user is required when you set a password")
+		case strings.Contains(u, ":"):
+			return host, rule, fmt.Errorf("login user must not contain ':'")
+		case len(pw) < 8:
+			return host, rule, fmt.Errorf("login password too short (min 8 characters)")
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+		if err != nil {
+			return host, rule, fmt.Errorf("hash login password: %w", err)
+		}
+		rule.BasicAuth = append(rule.BasicAuth, u+":"+string(hash))
+	}
+	return host, rule, nil
 }
 
 // handleProxyEdit serves the vhost form pre-filled for an existing managed
@@ -750,7 +806,11 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	host, rule := proxyRuleFromForm(r)
+	host, rule, err := proxyRuleFromForm(r)
+	if err != nil {
+		renderRecordErr(w, h.version, "%v", err)
+		return
+	}
 	ed := h.vhostEditor()
 	res, err := ed.PreviewSet(host, rule)
 	if err != nil {
@@ -943,7 +1003,7 @@ func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request, user string
 	}
 	lines := tailFile(path, 300)
 	render(w, logsTmpl, map[string]any{
-		"Version": h.version, "Title": title, "Which": which, "Lines": lines,
+		"Version": h.version, "User": user, "Active": "logs", "Title": title, "Which": which, "Lines": lines,
 	})
 }
 
