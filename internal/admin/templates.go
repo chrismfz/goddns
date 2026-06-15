@@ -7,18 +7,19 @@ import (
 )
 
 const (
-	loginTmpl         = "login"
-	dashTmpl          = "dash"
-	resultTmpl        = "result"
-	logsTmpl          = "logs"
-	confirmTmpl       = "confirm"
-	helpTmpl          = "help"
-	zonesTmpl         = "zones"
-	zoneViewTmpl      = "zoneview"
-	zoneHistTmpl      = "zonehist"
-	recordConfirmTmpl = "recordconfirm"
-	proxyFormTmpl     = "proxyform"
-	proxyConfirmTmpl  = "proxyconfirm"
+	loginTmpl          = "login"
+	dashTmpl           = "dash"
+	resultTmpl         = "result"
+	logsTmpl           = "logs"
+	confirmTmpl        = "confirm"
+	helpTmpl           = "help"
+	zonesTmpl          = "zones"
+	zoneViewTmpl       = "zoneview"
+	zoneHistTmpl       = "zonehist"
+	recordConfirmTmpl  = "recordconfirm"
+	restoreConfirmTmpl = "restoreconfirm"
+	proxyFormTmpl      = "proxyform"
+	proxyConfirmTmpl   = "proxyconfirm"
 )
 
 var tmpls = template.Must(template.New("").Parse(pages))
@@ -362,11 +363,16 @@ This page never edits BIND — it only reads.</div>
 {{end}}
 
 <h2>snapshots</h2>
-<table><thead><tr><th>serial</th><th>captured</th></tr></thead><tbody>
-{{range .Snaps}}<tr><td>{{.Serial}}</td><td class="muted">{{.Taken}}</td></tr>
-{{else}}<tr><td colspan="2" class="muted">(no snapshots yet — the serve loop captures them on SOA-serial change)</td></tr>{{end}}
+<table><thead><tr><th>serial</th><th>captured</th>{{if .Editable}}<th></th>{{end}}</tr></thead><tbody>
+{{range .Snaps}}<tr><td>{{.Serial}}</td><td class="muted">{{.Taken}}</td>{{if $.Editable}}<td><form method="post" action="/zone/restore" style="margin:0">
+<input type="hidden" name="csrf" value="{{$.CSRF}}">
+<input type="hidden" name="zone" value="{{$.Name}}">
+<input type="hidden" name="id" value="{{.ID}}">
+<button type="submit">restore</button></form></td>{{end}}</tr>
+{{else}}<tr><td colspan="{{if .Editable}}3{{else}}2{{end}}" class="muted">(no snapshots yet — the serve loop captures them on SOA-serial change)</td></tr>{{end}}
 </tbody></table>
-<div class="muted" style="font-size:.72rem;margin-top:.4rem">read-only history. CLI: <code>goddns zone {{.Name}} -history</code> / <code>-diff</code>.</div>
+{{if .Editable}}<div class="muted" style="font-size:.72rem;margin-top:.4rem">restore re-creates a snapshot's records as a new change (the SOA serial moves forward; DNSSEC stays with BIND). The restore is itself snapshotted, so it is undoable.</div>{{end}}
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">CLI: <code>goddns zone {{.Name}} -history</code> / <code>-diff</code>{{if .Editable}} / <code>goddns record restore {{.Name}} &lt;id&gt;</code>{{end}}.</div>
 {{end}}
 </main></body></html>{{end}}
 
@@ -386,6 +392,24 @@ This page never edits BIND — it only reads.</div>
 <input type="hidden" name="confirm" value="1">
 <button class="{{if .Removed}}danger{{end}}" type="submit">apply</button>
 <a href="/zone?name={{.Zone}}" style="margin-left:1rem;color:#9aa4b2">cancel</a>
+</form></div></main></body></html>{{end}}
+
+{{define "restoreconfirm"}}{{template "head" .}}
+<header><div><span class="b">goddns admin</span> <span class="muted">confirm restore</span></div>
+<div><a href="/zone?name={{.Zone}}&amp;history=1">cancel</a></div></header>
+<main><h2>restore {{.Zone}} to snapshot #{{.ID}} <span class="muted">serial {{.Serial}} &middot; {{.Taken}}</span></h2>
+<div class="card">
+<pre>{{range .Removed}}<span class="err">- {{.}}</span>
+{{end}}{{range .Added}}<span class="ok">+ {{.}}</span>
+{{end}}</pre>
+<div class="muted" style="font-size:.72rem">SOA &amp; DNSSEC are left to BIND — the serial moves forward and this restore is itself snapshotted (undoable).</div>
+<form method="post" action="/zone/restore">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<input type="hidden" name="zone" value="{{.Zone}}">
+<input type="hidden" name="id" value="{{.ID}}">
+<input type="hidden" name="confirm" value="1">
+<button class="{{if .Removed}}danger{{end}}" type="submit">restore</button>
+<a href="/zone?name={{.Zone}}&amp;history=1" style="margin-left:1rem;color:#9aa4b2">cancel</a>
 </form></div></main></body></html>{{end}}
 
 {{define "logs"}}{{template "head" .}}

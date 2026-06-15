@@ -416,6 +416,24 @@ The same editing is in the **admin per-zone page**: dynamic zones show an "add
 record" box and a `del` button per row, each with a CSRF-checked confirm + diff
 (static/panel zones stay read-only). Audited, snapshotted, same invariant.
 
+### Rolling back (`goddns record restore`)
+
+Every record edit — and every external change BIND makes — is snapshotted (see
+[history](#history)). Restore rolls a dynamic zone back to any snapshot:
+
+    goddns record restore ddns.myip.gr          # list snapshots (with ids)
+    goddns record restore ddns.myip.gr 41       # preview the delta, confirm, apply
+
+It is a point-in-time **content** restore, not a serial rollback: it computes a
+*forward* delta (records the snapshot had but live lost → add; records live
+gained since → remove) and applies it as one signed UPDATE. The SOA serial keeps
+moving forward and DNSSEC stays with BIND — replaying an old serial would break
+secondaries and stale signatures would break validation, so SOA/RRSIG/NSEC*/
+DNSKEY/CDS/CDNSKEY are left untouched. The restore is itself snapshotted first,
+so it is undoable. The admin **history page** has a `restore` button per
+snapshot (same confirm + diff, audited). This is the "the client broke their
+DKIM at 14:00 — put it back" button.
+
 ## Logging
 
 By default goddns logs to stderr (journald under systemd). On a busy DNS
