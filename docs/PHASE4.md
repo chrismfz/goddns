@@ -1,6 +1,7 @@
 # Phase 4 — in-place zone editing (file-as-truth)
 
-Status: **proposal (model revised after operator review).** An earlier draft made
+Status: **proposal — file-as-truth model, hardened by an independent design
+review (changes marked [R]).** An earlier draft made
 goddns the *sole authority* for a zone with a SQLite canonical store and forbade
 hand-editing. That reintroduces the exact collision the original invariant exists
 to prevent: **two sources of truth (store ↔ file) that diverge the moment an
@@ -43,35 +44,53 @@ an operator who hand-edits — so the means is updated, the end is unchanged.
 
 ## 2. The edit pipeline
 
-For a record change (add / delete / change) on an enabled static zone:
+For a record change (add / delete / change) on an enabled static zone, the whole
+read-modify-write runs **inside one `flock(LOCK_EX)` critical section** (M1):
 
 ```
-1. read the file fresh; capture its (mtime, sha256) = the version you're editing
-2. parse it (miekg dns.ZoneParser) into records + keep the raw text & line map
-3. apply the Op surgically: insert/replace/remove the exact record line(s),
+1. open the file O_NOFOLLOW; flock(LOCK_EX) the descriptor and HOLD it; read the bytes
+2. tokenize it with a line-aware tokenizer (NOT miekg's resolver) → records + an
+   exact source-line map; parse with miekg only to VALIDATE well-formedness (M2)
+3. apply the Op surgically: rewrite only the target record's source line(s),
    leaving comments / $directives / ordering / whitespace untouched
-4. bump the SOA serial (read current → max(current+1, todayNN); never below current)
-5. named-checkzone (strict flags) on the candidate  ← HARD GATE
-6. optimistic-lock re-check: re-stat the file; if (mtime, sha256) changed since
-   step 1, REFUSE ("changed under you — reload & reapply")  ← the nano-safety
-7. snapshot the current (pre-edit) file content (Phase-1 history)
-8. atomic write: temp + rename + fsync, O_NOFOLLOW, refuse if target is a symlink
-9. rndc reload <zone>  (per-zone blast radius)
+   (records goddns can't map unambiguously → refuse, fall back to raw mode — §4)
+4. bump the SOA serial (read current from the tokenized SOA → max(current+1,
+   todayNN); never below current)
+5. named-checkzone (strict flags, same BIND as the running server — S5) ← HARD GATE
+6. re-read the bytes UNDER THE HELD LOCK and compare to the bytes from step 1;
+   if they differ, REFUSE ("changed under you — reload & reapply") ← the nano guard
+7. save the raw pre-edit file BYTES as the rollback artifact (separate from the
+   Phase-1 canonical AXFR snapshot, which is for diff/history, not file rollback — S5)
+8. write the new bytes back under the still-held lock (temp + rename + fsync, in
+   the locked dir; refuse a symlink target), then release the lock
+9. rndc reload <zone>  (per-zone blast radius; if rndc unreachable → write failed)
 10. verify (apex SOA serial bumped + apex NS set matches) + audit
 ```
 
-Rollback = restore a snapshot's content → checkzone → write → reload. The same
-pipeline backs both structured edits and the raw-text mode (§4); `recordmut`'s
-preview/diff/confirm/snapshot/audit machinery is reused, with a new `filezone`
-apply backend behind the existing `ddns.Mutator` seam.
+Rollback = restore the saved pre-edit **bytes** → checkzone → write → reload, routed
+through this same locked pipeline (O3). The same pipeline backs both structured
+edits and the raw-text mode (§4); `recordmut`'s preview/diff/confirm/snapshot/audit
+machinery is reused, with a new `filezone` apply backend behind the `ddns.Mutator`
+seam.
 
-## 3. Coexisting with nano — optimistic concurrency (the headline guarantee)
+## 3. Coexisting with nano — optimistic concurrency (and its honest limit) [R]
 
-This is the answer to "if I nano it in a hurry, will we kill each other?" — **no.**
-Step 1 captures the file's `(mtime, sha256)`; step 6 re-checks it just before
-writing. If you (or another admin session) changed the file in between, goddns
-**refuses that one write** and tells you to reload — it never writes over a change
-it didn't see.
+This is the answer to "if I nano it in a hurry, will we kill each other?" — **almost
+never, and never silently within goddns's own writers; with `nano` the window is
+tiny and detected, not a guarantee.** The mechanism (M1): goddns holds an advisory
+`flock(LOCK_EX)` across the entire read-modify-write, and re-reads + byte-compares
+the file against what it first read **immediately before writing, under that lock**.
+If the bytes changed, it refuses that one write.
+
+**The honest caveat:** `flock` is **advisory** — `nano`/`vim` do not take it. So the
+lock *perfectly* serializes goddns-vs-goddns and goddns-vs-(root helper); for
+goddns-vs-`nano` the **byte-compare under the lock** is what protects you: a `nano`
+save that lands before goddns's pre-write re-read is detected (refused); the only
+residual is a `nano` save in the sub-millisecond gap between that re-read and the
+rename — narrowed to almost nothing, not zero. The earlier "git non-fast-forward"
+framing was too strong: this is a check-and-write under a lock, which bounds the
+window to ~one syscall, not a true atomic CAS. The doc states the limit rather than
+overselling a guarantee.
 
 It is **stateless and per-write**, not a lock on the zone. A hand-edit does **not**
 disable goddns, block future edits, or refuse views. Two cases make this concrete:
@@ -86,36 +105,60 @@ disable goddns, block future edits, or refuse views. Two cases make this concret
   file, redo the change, save. Your `nano` edit is never lost — it's on disk the
   whole time; the refusal only stops a stale write from clobbering it.
 
-Views are never refused (they always read fresh). The check is exactly a
-compare-and-swap on "did the file move under me for *this* write" — like `git`'s
-non-fast-forward push refusal (you `pull`/reload and proceed), not "git refuses to
-work because you committed." Because the file is the only truth, there is no second
-copy to drift: goddns always edits against what's on disk right now. No lost edits,
-no silent clobber.
+Views are never refused (they always read fresh). The refusal is a per-write
+freshness check (you reload and proceed), never "goddns sulks because you
+hand-edited." Because the file is the only truth, there is no second copy to
+drift: goddns always edits against what's on disk right now.
 
 ## 4. Surgical edits vs raw mode
 
-- **Structured** (the default): add/del/change one record → goddns computes the
-  **minimal text change** to the relevant line(s) and leaves everything else byte
-  for byte — your comments, `$TTL`/`$ORIGIN`, ordering, and spacing survive. This
-  is the key difference from a full canonical re-render (which would flatten your
-  hand-crafted file).
-- **Raw** (power mode, webmin-style): edit the whole file in a textarea; checkzone
-  gates the save. You own the consequences; the optimistic lock + snapshot still
-  protect you.
-- **Refuse** surgical editing of a file containing `$INCLUDE` / `$GENERATE` (the
-  line-mapper can't safely reason about generated/incremented content) or **in-file
-  DNSSEC records** (an explicitly key-signed zone — editing the signed file breaks
-  signatures). Those fall back to raw mode or are refused with a clear reason.
+**[R] miekg `dns.ZoneParser` cannot drive surgical editing.** It emits fully
+*resolved* RRs (FQDN owners, inherited TTLs, expanded `@`, applied
+`$ORIGIN`/`$TTL`) and discards the surface syntax — there is no parsed-RR →
+source-line map, and inverting that resolution is exactly where hand-crafted zones
+break (a record with an **omitted owner** inherited from the line above, a TTL from
+a `$TTL` 100 lines up, a parenthesised multi-line SOA, mid-file `$ORIGIN`
+re-scoping). Nothing in the existing code preserves source formatting
+(`named.Canonical` deliberately flattens). So:
+
+- **Structured** edits run on a **custom line-aware tokenizer** that tracks, per
+  physical line: implied-owner inheritance, current `$ORIGIN`/`$TTL` scope, paren
+  continuation, and trailing comments. It rewrites only the target line(s) and
+  leaves everything else byte for byte. **miekg is used only as a validator** —
+  parse the candidate to confirm it's well-formed, never to locate edits.
+- **Stage 0 handles the safe subset and REFUSES the rest** (→ raw mode, with a
+  clear reason): a record is surgically editable only if its source line carries an
+  **explicit owner** (and the line below it doesn't depend on owner inheritance),
+  is single-line, and sits outside any paren group except the SOA-serial bump.
+  Refuse (raw-only): owner-name omission on the target or adjacent record,
+  multi-line records, mid-file `$ORIGIN` re-scope, `$INCLUDE` / `$GENERATE`, and
+  **in-file DNSSEC records** (`RRSIG`/`DNSKEY`/`NSEC*` — reuse `named.Signed` /
+  `recordmut.managed`; an explicitly key-signed file would break on edit).
+- **Raw** (power mode, webmin-style): edit the whole file; checkzone gates the save.
+  **[R] Raw mode is far more dangerous** (arbitrary whole-file content — a smuggled
+  in-bailiwick delegation/glue or wholesale rdata rewrite passes checkzone), so it
+  is **CLI-only / off for the daemon by default** (S2); the option-(b) helper
+  rejects raw whole-file content (§7).
+
+The line-aware tokenizer + an **adversarial corpus** of hand-zones (implied owners,
+comments inside SOA parens, mixed tabs, `$ORIGIN` switches) is the explicit
+**Stage 0 deliverable and gate** — building Stage 0 on miekg's resolved records
+would corrupt zones.
 
 ## 5. Serial — read from the file, bump, never regress
 
-goddns reads the current SOA serial **from the file** (truth) and writes
+goddns reads the current SOA serial **from the file** (via the §4 tokenizer — for
+a parenthesised SOA the serial is one token across lines) and writes
 `next = max(current + 1, YYYYMMDD00-for-today)`. Because the file is the only
 truth, there is **no floor-vs-store split-brain**: if a hand-edit already bumped
-the serial, goddns simply reads the new value next time. The only rule is "never
-write a serial below what the file already has" — trivially satisfied by reading
-it first.
+the serial, goddns reads the new value next time. The only rule is "never write a
+serial below what the file already has" — satisfied by reading it first.
+
+**[R] One subtlety for provenance (S1):** for an **inline-signed** zone the *file*
+serial goddns writes and the *served* serial named publishes differ (named keeps
+its own signed serial). The history poller reads the **served** serial (a DNS
+query). So goddns records, in its audit line, the **file serial it wrote** — that,
+not the served value, is what §6 matches on.
 
 ## 6. History — the dual purpose
 
@@ -126,11 +169,14 @@ in `serve`) **watches the enabled static zones**. So:
 - a **nano** edit bumps the serial → the poller snapshots it **too**.
 
 History / diff / rollback then work **uniformly for both**, and you get a change
-feed for hand-edits you'd otherwise have no record of. "Who" is inferred: a serial
-move with a matching `admin-audit` line = goddns; a serial move without one =
-external (a hand-edit). This is the dual purpose: the same zones are **editable**
-and **continuously tracked**, and the optimistic lock + the poller reinforce each
-other (a hand-edit is both captured *and* makes goddns's next write re-read fresh).
+feed for hand-edits you'd otherwise have no record of. **[R] "Who" is a best-effort
+hint, not a guarantee** (S1): a serial move whose value matches a `record-edit`
+audit line = goddns; otherwise external (a hand-edit). It can mislabel when a
+hand-edit and a goddns edit collapse into one poll cycle, or on inline-signed zones
+where the served serial differs (so match on the **file** serial goddns audited,
+§5). This is the dual purpose: the same zones are **editable** and **continuously
+tracked**, and the lock + the poller reinforce each other (a hand-edit is both
+captured *and* makes goddns's next write re-read fresh).
 
 ## 7. Safety & risk surface (the dangerous part, honestly)
 
@@ -140,42 +186,59 @@ goddns now **writes static zone files** — the thing to be careful about.
   but necessary-not-sufficient: it passes some semantically broken states (dangling
   NS, broken delegation, missing glue). So step 10 adds a **post-reload semantic
   verify** (apex SOA serial + NS set match what was written); on mismatch, restore
-  the pre-edit snapshot and reload.
+  the pre-edit bytes and reload. **[R]** checkzone must be the **same BIND build as
+  the running `named`** (S5) — a version/flag skew can pass a zone the live server
+  then rejects on reload (caught only by the semantic verify, more expensively).
+- **[R] Rollback artifact is the raw pre-edit file BYTES** (step 7), a **separate**
+  store from the Phase-1 canonical AXFR snapshot — the latter is sorted/flattened
+  canonical text (good for diff/history, wrong for a byte-faithful file restore).
+  Recovery restores those bytes verbatim through the locked pipeline (O3).
 - **Atomic + path-safe write**: temp + rename + fsync, `O_NOFOLLOW`, refuse a
   symlink target; the filename is taken from the zone's **named.conf-declared
-  `file` path**, never from request input; reject any zone not on the editable
-  allowlist. Defeats a symlink/path pivot to another file.
-- **Pre-edit snapshot = backup**: even a bad surgical edit is one `restore` away;
-  reloads are per-zone (blast radius = one zone). If `rndc` is unreachable, the
-  write is treated as failed.
-- **Daemon blast radius**: the internet-facing daemon (admin UI) writing
-  `/var/named`-class files is the real exposure. Bound it: (i) editing is limited
-  to the operator's **explicit allowlist** of static zones (never panel, never
-  auto-added); (ii) for an exposed daemon, prefer **option (b)** — the daemon
-  proposes the edit, a small **root helper** validates (checkzone) + writes +
-  reloads, so the daemon never holds a file descriptor into the zone dir; the CLI
-  (root) writes directly. Daemon editing can also be left **off by default**
-  (CLI-only) for the most conservative posture.
-- **Panel safety**: panel-managed zones are detected (file path under a panel's
-  tree / known markers) and are **hard read-only**; the allowlist is the primary
-  guard (the operator can't enable a panel zone), panel-detection the secondary.
-- **Parse fidelity**: the surgical line-mapper must handle multi-line records
-  (parenthesised SOA), `$TTL`/`$ORIGIN` scoping, mixed tabs/spaces, and trailing
-  comments — covered by test vectors before any live write.
+  `file` path**, never from request input; reject any zone not on the allowlist.
+  Reloads are per-zone; if `rndc` is unreachable the write is **failed**.
+- **[R] Daemon blast radius — the real exposure.** A compromised internet-facing
+  daemon controls record rdata and which allowlisted zone to target. Bounds:
+  (i) editing limited to the **explicit allowlist** (never panel, never auto-added);
+  (ii) **raw whole-file mode is CLI-only** — never on the daemon path (S2), since
+  it can rewrite an entire allowlisted zone past checkzone; (iii) for an exposed
+  daemon, **option (b)**: the daemon sends only **structured ops** `{zone, op, rr}`
+  to a small **root helper** that **re-reads the file and re-derives the edit
+  itself** (its own tokenizer + flock + checkzone + write + reload) and
+  **re-validates the allowlist** — it **never accepts a full file** from the daemon
+  (S3). So the daemon controls only `(zone ∈ allowlist, one op, rdata)`. Daemon
+  editing is **off by default** (CLI-only) until enabled.
+- **[R] Panel safety — fail CLOSED** (S4): `zone enable` performs a **positive
+  not-panel-managed check** at enable time (path not under any known panel tree
+  **and** no panel markers in the file) and records the assertion; if panel status
+  is **unknown, refuse to enable** (don't allow). Otherwise goddns could surgically
+  edit a file a panel re-renders from its DB — goddns's edit vanishes and a serial
+  war starts. A `dns.RR` Op can't smuggle `$INCLUDE`/`$GENERATE` (directives, not
+  rdata), but an `AddRR` of `NS`/`DNAME`/`CNAME` can still break the zone
+  semantically — caught by the §3-step-10 verify, not checkzone.
 
 ## 8. Decisions
 
-1. **Editable set** → an **explicit allowlist** (config or a CLI `zone enable`);
-   goddns never edits a zone the operator didn't opt in, and never a panel/dynamic
-   zone.
-2. **Daemon write path** → **option (b)** (daemon proposes, root helper writes) for
-   any internet-exposed deployment; CLI writes directly; daemon editing off by
-   default until enabled.
-3. **Serial** → read from the file, `next = max(current+1, todayNN)`.
-4. **DNSSEC** → refuse in-file key-signed zones; a zone signed by named's
-   inline-signing has an **unsigned source** that is safe to edit (named re-signs
-   on reload). Same `managed()` exclusion primitive as `record restore`.
-5. **Panel zones** → hard read-only, always.
+1. **Editable set** → an **explicit allowlist**, set **only by the root CLI
+   `zone enable`** (never a daemon endpoint — O2), with a positive
+   not-panel-managed check that **fails closed** on unknown (S4). goddns never
+   edits a zone not on it, nor a panel/dynamic zone. The option-(b) helper reads
+   the allowlist from a path the daemon cannot write.
+2. **Concurrency** → advisory `flock(LOCK_EX)` held across the read-modify-write +
+   a **byte-compare under the lock** before writing (M1) — not stat/mtime
+   comparison. Stated as a narrowed window vs `nano`, not a guarantee.
+3. **Daemon write path** → **option (b)**, **structured ops only** (the helper
+   re-derives the edit; never accepts a full file — S3); CLI writes directly;
+   **raw whole-file mode is CLI-only** (S2); daemon editing off by default.
+4. **Surgical editing** → a **custom line-aware tokenizer** (miekg as validator
+   only), restricted to the safe subset; everything else falls back to raw mode
+   (M2).
+5. **Serial** → read from the file, `next = max(current+1, todayNN)`; provenance
+   matched on the **file** serial goddns audited (S1).
+6. **DNSSEC** → refuse in-file key-signed zones (detect via `named.Signed` from the
+   file records; "is it inline-signed?" is answered from **named.conf**, not the
+   unsigned source — O1); inline-signing source edits are safe (named re-signs).
+7. **Panel zones** → hard read-only, always.
 
 ## 9. What this dissolves from the store-owned draft
 
@@ -189,20 +252,22 @@ raw-mode replace (checkzone-gated).
 
 ## 10. Staged build (independent review per step, as in Phase 2)
 
-- **Stage 0** — the zone-file **surgical-edit engine**: parse (miekg) + line-map +
-  insert/replace/remove a record preserving everything else, SOA serial bump, and
-  the strict `named-checkzone` wrapper. Pure and testable; writes nothing live.
-  (This is the real new code — budget it.)
-- **Stage 1** — the `filezone` apply path (optimistic-lock → snapshot → atomic
-  write → `rndc reload` → semantic verify) behind `ddns.Mutator`; the editable-zone
-  allowlist + panel/dynamic refusal; CLI record CRUD on an enabled static zone.
-- **Stage 2** — raw-text mode (whole-file edit, checkzone-gated) + export
-  (download) + import (raw replace).
-- **Stage 3** — admin UI: structured record CRUD + the raw editor + the
-  optimistic-lock UX ("changed under you — reload"); reuse the record-editor
-  components.
+- **Stage 0** — **[R] the line-aware tokenizer** (implied-owner / `$ORIGIN`/`$TTL`
+  scope / paren continuation / comments) + the surgical insert/replace/remove
+  preserving everything else + SOA-serial bump + the strict `named-checkzone`
+  wrapper (miekg as validator only). Gated by an **adversarial hand-zone corpus**.
+  Pure and testable; writes nothing live. This is the real new code — budget it.
+- **Stage 1** — the `filezone` apply path (**flock + byte-compare** → raw-bytes
+  snapshot → atomic write → `rndc reload` → semantic verify) behind `ddns.Mutator`;
+  the CLI-only allowlist + fail-closed panel/dynamic refusal; CLI record CRUD on an
+  enabled static zone.
+- **Stage 2** — export (download) + import (CLI raw replace). **Raw whole-file mode
+  is CLI-only here** (S2).
+- **Stage 3** — admin UI: structured record CRUD only + the optimistic-lock UX
+  ("changed under you — reload"); reuse the record-editor components. (Raw mode
+  stays CLI.)
 - **Stage 4** — wire the history Poller to the enabled static zones (the dual
-  purpose), and the option-(b) root helper for daemon writes.
+  purpose), and the option-(b) **structured-ops** root helper for daemon writes.
 - **Stage 5** — DNSSEC interaction polish (inline-signing source edits; refuse
   in-file-signed).
 
