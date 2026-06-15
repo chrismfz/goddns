@@ -406,3 +406,33 @@ func TestRotateAndHelp(t *testing.T) {
 		t.Fatalf("rotate without csrf: %d", rr.Code)
 	}
 }
+
+func TestInEditableRouting(t *testing.T) {
+	h := &Handler{}
+	cfg := &config.Config{EditableZones: []string{"myip.gr", "Other.GR."}}
+	if !h.inEditable(cfg, "myip.gr.") {
+		t.Error("myip.gr (trailing dot) should be editable")
+	}
+	if !h.inEditable(cfg, "other.gr") {
+		t.Error("case/dot-insensitive match should hold")
+	}
+	if h.inEditable(cfg, "ddns.myip.gr") {
+		t.Error("a non-listed zone must not route to file editing")
+	}
+}
+
+func TestParseRRZoneQualifies(t *testing.T) {
+	// a short owner qualifies under the zone (the file path matches literally)
+	rr, err := parseRRZone("www 60 IN A 1.2.3.4", "example.gr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr.Header().Name != "www.example.gr." {
+		t.Fatalf("owner = %q, want www.example.gr.", rr.Header().Name)
+	}
+	// an already-FQDN owner is unchanged
+	rr2, err := parseRRZone("mail.example.gr. 60 IN A 5.6.7.8", "example.gr")
+	if err != nil || rr2.Header().Name != "mail.example.gr." {
+		t.Fatalf("FQDN owner = %q (%v)", rr2.Header().Name, err)
+	}
+}
