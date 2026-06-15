@@ -372,3 +372,30 @@ allow = ["10.0.0.0/8"]
 		t.Errorf("expected fragment-scope error, got %v", err)
 	}
 }
+
+func TestTSIGKeysFile(t *testing.T) {
+	dir := t.TempDir()
+	kf := filepath.Join(dir, "tsig.keys")
+	mustWrite(t, kf, `key "ddns-update" { algorithm hmac-sha256; secret "ZmFrZXNlY3JldGZha2VzZWNyZXRmYWtlc2VjMDA="; };`)
+	main := filepath.Join(dir, "goddns.conf")
+	body := "tls_mode=\"files\"\ncert_file=\"/x/c.pem\"\nkey_file=\"/x/k.pem\"\ntsig_name=\"ddns-update\"\ntsig_keys_file=\"" + kf + "\"\n"
+	mustWrite(t, main, body)
+
+	c, err := Load(main)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if c.TSIGSecret != "ZmFrZXNlY3JldGZha2VzZWNyZXRmYWtlc2VjMDA=" {
+		t.Errorf("secret not sourced from key file: %q", c.TSIGSecret)
+	}
+	if len(c.TSIGKeys()) != 1 {
+		t.Errorf("keyring not loaded: %v", c.TSIGKeys())
+	}
+
+	// tsig_name absent from the file -> a clear error
+	bad := "tls_mode=\"files\"\ncert_file=\"/x/c.pem\"\nkey_file=\"/x/k.pem\"\ntsig_name=\"missing\"\ntsig_keys_file=\"" + kf + "\"\n"
+	mustWrite(t, main, bad)
+	if _, err := Load(main); err == nil || !strings.Contains(err.Error(), "no key") {
+		t.Errorf("expected 'no key' error, got %v", err)
+	}
+}

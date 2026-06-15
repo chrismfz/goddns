@@ -70,3 +70,26 @@ func (u *RFC2136) Apply(zone string, ops []Op) error {
 	}
 	return nil
 }
+
+// Verify probes whether the server accepts this key, by sending a TSIG-signed
+// SOA query for name (a zone the server is authoritative for) and requiring the
+// response to be TSIG-signed AND verified with our secret. A bare nil error is
+// NOT enough: miekg/dns only verifies a response that actually carries a TSIG,
+// so an unsigned REFUSED/NOTAUTH (server doesn't have the key) must fail here.
+func (u *RFC2136) Verify(name string) error {
+	c := &dns.Client{
+		TsigSecret: map[string]string{u.keyName: u.secret},
+		Timeout:    4 * time.Second,
+	}
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(name), dns.TypeSOA)
+	m.SetTsig(u.keyName, u.algo, 300, time.Now().Unix())
+	resp, _, err := c.Exchange(m, u.server)
+	if err != nil {
+		return err // network error, or TSIG verification failed (BADKEY/BADSIG)
+	}
+	if resp == nil || resp.IsTsig() == nil {
+		return fmt.Errorf("response not TSIG-signed — server may not have key %q", u.keyName)
+	}
+	return nil
+}

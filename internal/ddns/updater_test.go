@@ -161,6 +161,43 @@ func TestApplyOps(t *testing.T) {
 var _ Backend = (*RFC2136)(nil)
 var _ Mutator = (*RFC2136)(nil)
 
+func TestVerifyKey(t *testing.T) {
+	// A server that answers SOA queries and TSIG-signs the response only when
+	// the request's TSIG verified — i.e. it has the key (like real named).
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{
+		PacketConn: pc,
+		TsigSecret: map[string]string{testKeyName: testSecret},
+		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+			m := new(dns.Msg)
+			m.SetReply(r)
+			soa, _ := dns.NewRR("myip.gr. 60 IN SOA ns.myip.gr. h.myip.gr. 1 3600 600 1209600 60")
+			m.Answer = append(m.Answer, soa)
+			if r.IsTsig() != nil && w.TsigStatus() == nil {
+				m.SetTsig(testKeyName, dns.HmacSHA256, 300,
+					int64(r.Extra[len(r.Extra)-1].(*dns.TSIG).TimeSigned))
+			}
+			w.WriteMsg(m)
+		}),
+	}
+	go srv.ActivateAndServe()
+	t.Cleanup(func() { srv.Shutdown() })
+	addr := pc.LocalAddr().String()
+
+	u, _ := NewRFC2136(addr, testKeyName, "hmac-sha256", testSecret)
+	if err := u.Verify("myip.gr"); err != nil {
+		t.Fatalf("verify with correct secret should pass: %v", err)
+	}
+	bad, _ := NewRFC2136(addr, testKeyName, "hmac-sha256",
+		"d3Jvbmctc2VjcmV0LXdyb25nLXNlY3JldC13cm9uZyE=")
+	if err := bad.Verify("myip.gr"); err == nil {
+		t.Fatal("verify with wrong secret must fail (unsigned/unverified response)")
+	}
+}
+
 func TestWrongSecretRejected(t *testing.T) {
 	addr, _ := startTestServer(t)
 	u, err := NewRFC2136(addr, testKeyName, "hmac-sha256",

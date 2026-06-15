@@ -259,16 +259,22 @@ func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource, adminH http.H
 	}
 }
 
-// proxyDSig is a cheap signature of the proxy.d/*.conf drop-in fragments next
-// to the config file (sorted name+size+mtime), so the reload poll picks up a
-// fragment change even though filewatch only watches the main config file.
-func proxyDSig(confPath string) string {
+// watchSig is a cheap signature of the side files the reload poll must track
+// even though filewatch only hashes the main config file: the proxy.d/*.conf
+// fragments and the tsig_keys_file. A change in either triggers a reload (so a
+// `goddns rotate-key` is picked up by the running daemon automatically).
+func watchSig(confPath string, cfg *config.Config) string {
+	var b strings.Builder
 	files, _ := filepath.Glob(filepath.Join(filepath.Dir(confPath), "proxy.d", "*.conf"))
 	slices.Sort(files)
-	var b strings.Builder
 	for _, f := range files {
 		if fi, err := os.Stat(f); err == nil {
 			fmt.Fprintf(&b, "%s:%d:%d\n", f, fi.Size(), fi.ModTime().UnixNano())
+		}
+	}
+	if cfg.TSIGKeysFile != "" {
+		if fi, err := os.Stat(cfg.TSIGKeysFile); err == nil {
+			fmt.Fprintf(&b, "tsig:%d:%d\n", fi.Size(), fi.ModTime().UnixNano())
 		}
 	}
 	return b.String()
@@ -330,15 +336,16 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 	t := time.NewTicker(interval)
 	defer t.Stop()
 
-	// proxy.d/ fragments aren't the watched file, so track their signature
-	// separately and reload when it changes (matches inline-edit ergonomics).
-	lastSig := proxyDSig(path)
+	// proxy.d/ fragments and the tsig key file aren't the watched file, so
+	// track their signature separately and reload when it changes (matches
+	// inline-edit ergonomics; picks up a key rotation automatically).
+	lastSig := watchSig(path, cur.Load().cfg)
 
 	for {
 		select {
 		case <-t.C:
 			_, mainChanged := w.Changed()
-			sig := proxyDSig(path)
+			sig := watchSig(path, cur.Load().cfg)
 			if !mainChanged && sig == lastSig {
 				if proxyDirty {
 					applyProxy(cur.Load().cfg)
@@ -349,7 +356,7 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 		case <-hup:
 			log.Printf("SIGHUP: re-reading config")
 			w.Changed() // refresh watcher state so the ticker doesn't re-fire
-			lastSig = proxyDSig(path)
+			lastSig = watchSig(path, cur.Load().cfg)
 		}
 
 		old := cur.Load()
