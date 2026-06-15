@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -134,6 +135,9 @@ func (e *Editor) resolve(zone string) (*named.Zone, error) {
 	} else if fi.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("zone file %s is a symlink — refusing to edit", z.Path)
 	}
+	if p := panelPath(z.Path); p != "" {
+		return nil, fmt.Errorf("zone file %s is under a panel tree (%s) — goddns won't edit a panel's zone", z.Path, p)
+	}
 	return z, nil
 }
 
@@ -149,7 +153,7 @@ func PreflightEnable(namedConf, zone string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	orig, err := os.ReadFile(z.Path)
+	orig, err := readNoFollow(z.Path)
 	if err != nil {
 		return "", err
 	}
@@ -168,7 +172,7 @@ func (e *Editor) Preview(zone string, ops []ddns.Op) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	orig, err := os.ReadFile(z.Path)
+	orig, err := readNoFollow(z.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +200,7 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 	}
 	defer unlock()
 
-	orig, err := os.ReadFile(z.Path)
+	orig, err := readNoFollow(z.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +228,7 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 	}
 	// Nano guard: re-read under the lock; if the file moved since we read it,
 	// refuse rather than clobber a concurrent (e.g. hand) edit.
-	cur, err := os.ReadFile(z.Path)
+	cur, err := readNoFollow(z.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +254,13 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 		reload = rndcReload
 	}
 	if err := reload(zone); err != nil {
-		return res, fmt.Errorf("zone written, but reload failed: %w — restore the backup %s if needed", err, backup)
+		// Best-effort rollback: put the previous file back so the running named
+		// keeps serving the old zone and a later restart won't load the
+		// un-reloaded change.
+		if rerr := writePreserving(z.Path, orig); rerr != nil {
+			return res, fmt.Errorf("reload failed (%w) AND restoring the previous file failed (%v) — recover manually from backup %s", err, rerr, backup)
+		}
+		return res, fmt.Errorf("reload failed (%w) — restored the previous zone file (backup at %s)", err, backup)
 	}
 
 	if e.Verify != nil {
@@ -344,12 +354,28 @@ func pruneBackups(dir string, keep int) {
 	}
 }
 
+// readNoFollow reads a file, refusing to follow a final-component symlink.
+func readNoFollow(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(f)
+}
+
 // writePreserving writes content to path atomically (temp + rename + fsync),
-// preserving the original file's mode and owner so named keeps reading it.
+// preserving the original file's mode and owner so named keeps reading it. It
+// re-checks the target is not a symlink (Lstat) inside the locked window, and
+// fails closed if it can't preserve a different owner (so a non-root run never
+// silently re-homes a named-owned zone to the CLI user).
 func writePreserving(path string, content []byte) error {
-	fi, err := os.Stat(path)
+	fi, err := os.Lstat(path)
 	if err != nil {
 		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s became a symlink — refusing to write", path)
 	}
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".goddns-zone-*.tmp")
@@ -367,7 +393,10 @@ func writePreserving(path string, content []byte) error {
 		return err
 	}
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		_ = tmp.Chown(int(st.Uid), int(st.Gid)) // best-effort (needs root)
+		if err := tmp.Chown(int(st.Uid), int(st.Gid)); err != nil && int(st.Uid) != os.Geteuid() {
+			tmp.Close()
+			return fmt.Errorf("can't preserve the zone file's owner (uid %d) — run as root: %w", st.Uid, err)
+		}
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
@@ -386,18 +415,31 @@ func writePreserving(path string, content []byte) error {
 	return nil
 }
 
-// panelMarker returns a recognizable control-panel signature found in the zone
-// file (best-effort), or "" — goddns refuses to edit a panel's zone. The
-// allowlist is the primary guard; this is the secondary, fail-on-detection one.
+var panelNames = []string{"cpanel", "directadmin", "virtualmin", "plesk", "ispconfig"}
+
+// panelMarker returns a recognizable control-panel signature found anywhere in
+// the zone file (best-effort), or "" — goddns refuses to edit a panel's zone.
+// The operator's allowlist is the PRIMARY guard; this is the secondary,
+// fail-on-detection one (panel zones often carry no marker, so a clean result
+// is not proof a zone is unmanaged).
 func panelMarker(content []byte) string {
-	head := content
-	if len(head) > 4096 {
-		head = head[:4096]
-	}
-	low := strings.ToLower(string(head))
-	for _, m := range []string{"cpanel", "directadmin", "virtualmin", "plesk", "ispconfig"} {
+	low := strings.ToLower(string(content))
+	for _, m := range panelNames {
 		if strings.Contains(low, m) {
 			return m
+		}
+	}
+	return ""
+}
+
+// panelPath returns a panel signature in the zone file's PATH (a file under a
+// known panel control tree), or "". Best-effort: cPanel/DirectAdmin keep zones
+// in the shared /var/named, so this only catches panels with distinct trees.
+func panelPath(path string) string {
+	low := strings.ToLower(path)
+	for _, p := range []string{"/var/cpanel/", "/usr/local/directadmin/", "/usr/local/psa/", "/etc/virtualmin", "/var/lib/virtualmin"} {
+		if strings.Contains(low, p) {
+			return p
 		}
 	}
 	return ""
@@ -410,18 +452,16 @@ func diff(zone, file string, orig, newBytes []byte) *Result {
 	if f, err := zonefile.Parse(newBytes, zone); err == nil {
 		res.Serial = f.SOASerial()
 	}
-	oldRRs := parseRecords(orig, zone)
-	newRRs := parseRecords(newBytes, zone)
-	oldSet := canonSet(oldRRs)
-	newSet := canonSet(newRRs)
-	for k, s := range newSet {
-		if _, ok := oldSet[k]; !ok && !isSOA(s) {
-			res.Added = append(res.Added, s)
+	oldSet := canonSet(parseRecords(orig, zone))
+	newSet := canonSet(parseRecords(newBytes, zone))
+	for k := range newSet {
+		if _, ok := oldSet[k]; !ok {
+			res.Added = append(res.Added, k)
 		}
 	}
-	for k, s := range oldSet {
-		if _, ok := newSet[k]; !ok && !isSOA(s) {
-			res.Removed = append(res.Removed, s)
+	for k := range oldSet {
+		if _, ok := newSet[k]; !ok {
+			res.Removed = append(res.Removed, k)
 		}
 	}
 	sort.Strings(res.Added)
@@ -439,14 +479,17 @@ func parseRecords(data []byte, origin string) []dns.RR {
 	return out
 }
 
-func canonSet(rrs []dns.RR) map[string]string {
-	m := make(map[string]string, len(rrs))
+// canonSet maps each record's zone-file form, dropping the SOA (its serial
+// always changes and would be diff noise) — classified by type, not by string.
+func canonSet(rrs []dns.RR) map[string]bool {
+	m := make(map[string]bool, len(rrs))
 	for _, rr := range rrs {
-		m[rr.String()] = rr.String()
+		if rr.Header().Rrtype == dns.TypeSOA {
+			continue
+		}
+		m[rr.String()] = true
 	}
 	return m
 }
-
-func isSOA(s string) bool { return strings.Contains(s, "\tSOA\t") || strings.Contains(s, " SOA ") }
 
 var errRndcMissing = errors.New("rndc not found in PATH")

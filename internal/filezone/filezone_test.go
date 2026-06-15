@@ -182,6 +182,49 @@ func TestPreviewDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestDelRRsetQualifiedName(t *testing.T) {
+	// The CLI qualifies short names to FQDN-under-zone; the engine matches the
+	// parsed (fully-qualified) owner. A qualified name removes the RRset...
+	e, path := testEditor(t, staticZone(), "example")
+	qualified := []ddns.Op{{Action: ddns.DelRRset, RR: &dns.RFC3597{Hdr: dns.RR_Header{
+		Name: "www.example.", Rrtype: dns.TypeA, Class: dns.ClassINET}}}}
+	res, err := e.Apply("example", qualified)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 1 {
+		t.Fatalf("qualified delset should remove www A, Removed=%v", res.Removed)
+	}
+	if out, _ := os.ReadFile(path); strings.Contains(string(out), "www\tIN\tA") {
+		t.Fatalf("www A not removed:\n%s", out)
+	}
+
+	// ...while a root-level "www." (the pre-fix bug) matches nothing.
+	e2, path2 := testEditor(t, staticZone(), "example")
+	rootlevel := []ddns.Op{{Action: ddns.DelRRset, RR: &dns.RFC3597{Hdr: dns.RR_Header{
+		Name: "www.", Rrtype: dns.TypeA, Class: dns.ClassINET}}}}
+	res2, _ := e2.Apply("example", rootlevel)
+	if len(res2.Removed) != 0 {
+		t.Fatalf("a root-level www. should match nothing, Removed=%v", res2.Removed)
+	}
+	if out, _ := os.ReadFile(path2); !strings.Contains(string(out), "www\tIN\tA\t1.2.3.4") {
+		t.Fatal("www A should be untouched by a root-level delset")
+	}
+}
+
+func TestReloadFailureRestores(t *testing.T) {
+	e, path := testEditor(t, staticZone(), "example")
+	e.Reload = func(string) error { return errors.New("rndc down") }
+	_, err := e.Apply("example", []ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "x.example. 60 IN A 1.1.1.1")}})
+	if err == nil || !strings.Contains(err.Error(), "reload failed") {
+		t.Fatalf("expected a reload-failed error, got %v", err)
+	}
+	// the previous file must be restored (named keeps serving the old zone)
+	if out, _ := os.ReadFile(path); string(out) != zoneText {
+		t.Fatalf("reload failure didn't restore the previous file:\n%s", out)
+	}
+}
+
 func TestCheckzoneGateIntegration(t *testing.T) {
 	e, _ := testEditor(t, staticZone(), "example")
 	e.CheckZone = zonefile.CheckZone // the real one

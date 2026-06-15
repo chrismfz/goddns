@@ -52,7 +52,11 @@ func cmdRecord(args []string) {
 			fatal("usage: goddns record %s <zone> '<rr>'", sub)
 		}
 		zone = rest[0]
-		rr, err := dns.NewRR(rest[1])
+		// Parse the RR with the zone as $ORIGIN so a relative owner name (e.g.
+		// `www`) qualifies to `www.<zone>.` — without an origin a short name
+		// becomes the root-level `www.`, which silently matches nothing on a
+		// file zone (and the wrong name on a dynamic one).
+		rr, err := parseRRInZone(rest[1], zone)
 		if err != nil || rr == nil {
 			fatal("parse record %q: %v", rest[1], err)
 		}
@@ -71,7 +75,7 @@ func cmdRecord(args []string) {
 			fatal("unknown record type %q", rest[2])
 		}
 		ops = []ddns.Op{{Action: ddns.DelRRset, RR: &dns.RFC3597{Hdr: dns.RR_Header{
-			Name: dns.Fqdn(rest[1]), Rrtype: rrtype, Class: dns.ClassINET}}}}
+			Name: qualifyName(rest[1], zone), Rrtype: rrtype, Class: dns.ClassINET}}}}
 	default:
 		recordUsage()
 		os.Exit(2)
@@ -115,6 +119,35 @@ func cmdRecord(args []string) {
 		fmt.Printf(" — snapshot #%d taken; `goddns record restore %s` to roll back", res.Snapshot, res.Zone)
 	}
 	fmt.Println()
+}
+
+// parseRRInZone parses an RR string with the zone as $ORIGIN, so a relative
+// owner name qualifies against the zone (standard zone-file semantics) instead
+// of becoming a root-level name.
+func parseRRInZone(s, zone string) (dns.RR, error) {
+	zp := dns.NewZoneParser(strings.NewReader(s), dns.Fqdn(zone), "")
+	rr, ok := zp.Next()
+	if err := zp.Err(); err != nil {
+		return nil, err
+	}
+	if !ok || rr == nil {
+		return nil, fmt.Errorf("no record in %q", s)
+	}
+	return rr, nil
+}
+
+// qualifyName resolves an owner name against the zone: "@" → apex, a trailing
+// dot → absolute as-typed, otherwise relative to the zone.
+func qualifyName(name, zone string) string {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "@" || name == "":
+		return dns.Fqdn(zone)
+	case strings.HasSuffix(name, "."):
+		return name
+	default:
+		return dns.Fqdn(name + "." + zone)
+	}
 }
 
 // inEditable reports whether the zone is on the operator's file-edit allowlist.

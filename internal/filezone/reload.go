@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -28,7 +29,7 @@ func rndcReload(zone string) error {
 func verifySerial(server, zone string, wantSerial uint32) error {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
-	c := &dns.Client{}
+	c := &dns.Client{Timeout: 5 * time.Second}
 	resp, _, err := c.Exchange(m, server)
 	if err != nil {
 		return fmt.Errorf("SOA query: %w", err)
