@@ -152,6 +152,45 @@ func TestRestoreOps(t *testing.T) {
 	}
 }
 
+func TestOwnedByDropsDelegatedChild(t *testing.T) {
+	in := &named.Inventory{Zones: []named.Zone{
+		{Name: "myip.gr", Type: "master", Dynamic: true, UpdateKeys: []string{"ddns-update"}},
+		{Name: "ddns.myip.gr", Type: "master", Dynamic: true, UpdateKeys: []string{"ddns-update"}},
+	}}
+	rrs := []dns.RR{
+		mustRR(t, "myip.gr. 3600 IN NS ns1.myip.gr."),      // parent apex: kept
+		mustRR(t, "www.myip.gr. 60 IN A 1.1.1.1"),          // parent data: kept
+		mustRR(t, "ddns.myip.gr. 3600 IN NS ns1.myip.gr."), // child apex NS: dropped
+		mustRR(t, "host.ddns.myip.gr. 60 IN A 2.2.2.2"),    // child data/glue: dropped
+	}
+	got := ownedBy(in, dns.CanonicalName("myip.gr"), rrs)
+	if len(got) != 2 {
+		t.Fatalf("ownedBy kept %d records, want 2 (parent only): %v", len(got), got)
+	}
+	for _, rr := range got {
+		if strings.Contains(rr.Header().Name, "ddns.myip.gr") {
+			t.Fatalf("ownedBy leaked a delegated-child record: %s", rr.String())
+		}
+	}
+}
+
+func TestHasRestorable(t *testing.T) {
+	// only SOA/DNSSEC -> nothing to restore (would empty the zone)
+	managedOnly := []dns.RR{
+		mustRR(t, "ddns.myip.gr. 3600 IN SOA ns.x. h.x. 1 1 1 1 1"),
+		mustRR(t, "ddns.myip.gr. 3600 IN RRSIG A 13 3 3600 1 1 1 x. AAAA"),
+	}
+	if hasRestorable(managedOnly) {
+		t.Errorf("SOA/DNSSEC-only set must not be restorable")
+	}
+	if !hasRestorable(append(managedOnly, mustRR(t, "ddns.myip.gr. 3600 IN NS ns1.x."))) {
+		t.Errorf("a set with operator data (NS) must be restorable")
+	}
+	if hasRestorable(nil) {
+		t.Errorf("empty set must not be restorable")
+	}
+}
+
 func TestRestoreOpsNoChange(t *testing.T) {
 	rrs := []dns.RR{mustRR(t, "host.ddns.myip.gr. 60 IN A 1.1.1.1")}
 	if ops := restoreOps(rrs, rrs); len(ops) != 0 {

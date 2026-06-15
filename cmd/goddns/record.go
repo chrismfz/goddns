@@ -144,7 +144,7 @@ func cmdRecordRestore(cfg *config.Config, rest []string, yes bool) {
 	}
 
 	var id int64
-	if _, err := fmt.Sscan(rest[1], &id); err != nil {
+	if _, err := fmt.Sscan(rest[1], &id); err != nil || id <= 0 {
 		fatal("invalid snapshot id %q", rest[1])
 	}
 	snap, ok, err := st.SnapshotByID(id)

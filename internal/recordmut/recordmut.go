@@ -286,16 +286,55 @@ func (e *Editor) RestorePlan(zone, snapContent string) ([]ddns.Op, *Result, erro
 	if err != nil {
 		return nil, nil, err
 	}
+	// A snapshot is a full AXFR: it also carries any delegated child's apex NS
+	// and in-bailiwick glue, which belong to the CHILD zone. Restore only the
+	// records this zone is authoritative for, on both sides of the diff — so
+	// child/glue is left untouched rather than aborting the whole restore, and
+	// a child's record is never sent to the parent.
+	target := dns.CanonicalName(zone)
+	want = ownedBy(inv, target, want)
+	live = ownedBy(inv, target, live)
+	// Guard against a corrupt/empty snapshot: with no restorable records, the
+	// delta would delete every live record (apex NS included) and empty the
+	// zone. A real Phase-1 snapshot always has the apex NS, so this only fires
+	// on a bad snapshot.
+	if !hasRestorable(want) {
+		return nil, nil, fmt.Errorf("snapshot has no restorable records for %q — refusing to empty the zone", zone)
+	}
 	ops := restoreOps(want, live)
 	if len(ops) == 0 {
 		return nil, &Result{Zone: zone, Key: key.Name}, nil
 	}
-	// The delta is derived from live + snapshot, so every op is in-zone by
-	// construction; validate anyway as a belt-and-braces guard.
+	// The delta is derived from in-zone live + snapshot records, so every op is
+	// in-zone by construction; validate anyway as a belt-and-braces guard.
 	if err := e.validateOps(inv, zone, ops); err != nil {
 		return nil, nil, err
 	}
 	return ops, buildResult(zone, key.Name, ops, live), nil
+}
+
+// ownedBy keeps only the records whose most-specific enclosing zone is target —
+// i.e. the records THIS zone is authoritative for, excluding any delegated
+// child's data that a full AXFR happens to include.
+func ownedBy(inv *named.Inventory, target string, rrs []dns.RR) []dns.RR {
+	out := rrs[:0:0]
+	for _, rr := range rrs {
+		if mostSpecificZone(inv, rr.Header().Name) == target {
+			out = append(out, rr)
+		}
+	}
+	return out
+}
+
+// hasRestorable reports whether any record is operator data (not BIND-managed
+// SOA/DNSSEC) — the records a restore would actually re-create.
+func hasRestorable(rrs []dns.RR) bool {
+	for _, rr := range rrs {
+		if !managed(rr) {
+			return true
+		}
+	}
+	return false
 }
 
 // restoreOps computes the delta that turns live into want, ignoring
