@@ -162,6 +162,12 @@ func (e *Editor) keyFor(z *named.Zone) *tsig.Key {
 	return nil
 }
 
+// CanEdit reports whether goddns can edit this zone: it must be dynamic and
+// grant a TSIG key goddns holds. Used to show edit controls only where they work.
+func (e *Editor) CanEdit(z *named.Zone) bool {
+	return z != nil && z.Dynamic && e.keyFor(z) != nil
+}
+
 // mostSpecificZone returns the canonical name of the longest user zone that
 // encloses name (the zone authoritative for that record), or "" if none.
 func mostSpecificZone(inv *named.Inventory, name string) string {

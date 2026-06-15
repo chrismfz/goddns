@@ -412,6 +412,10 @@ enforcer**, so the blast radius is exactly what that key is granted — an
 out-of-policy edit is rejected by named (NOTAUTH/REFUSED). Every change is
 snapshotted first (it refuses to mutate if it can't capture a restore point).
 
+The same editing is in the **admin per-zone page**: dynamic zones show an "add
+record" box and a `del` button per row, each with a CSRF-checked confirm + diff
+(static/panel zones stay read-only). Audited, snapshotted, same invariant.
+
 ## Logging
 
 By default goddns logs to stderr (journald under systemd). On a busy DNS
