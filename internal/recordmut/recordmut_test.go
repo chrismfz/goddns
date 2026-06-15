@@ -55,8 +55,39 @@ func TestValidateDynamicAndKey(t *testing.T) {
 
 	// op name outside the zone -> refused
 	out := []ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "evil.example. 60 IN A 6.6.6.6")}}
-	if _, _, err := e.validate(inv(), "ddns.myip.gr", out); err == nil || !strings.Contains(err.Error(), "not inside zone") {
+	if _, _, err := e.validate(inv(), "ddns.myip.gr", out); err == nil || !strings.Contains(err.Error(), "not inside") {
 		t.Errorf("out-of-zone record should be refused, got %v", err)
+	}
+
+	// uppercase name in the zone is accepted (DNS names are case-insensitive)
+	up := []ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "HOST.DDNS.MYIP.GR. 60 IN A 1.2.3.4")}}
+	if _, _, err := e.validate(inv(), "ddns.myip.gr", up); err != nil {
+		t.Errorf("uppercase in-zone name should pass: %v", err)
+	}
+}
+
+func TestDelegatedChildRefused(t *testing.T) {
+	e := testEditor()
+	in := &named.Inventory{Zones: []named.Zone{
+		{Name: "myip.gr", Type: "master", Dynamic: true, UpdateKeys: []string{"ddns-update"}},
+		{Name: "ddns.myip.gr", Type: "master", Dynamic: true, UpdateKeys: []string{"ddns-update"}},
+	}}
+	op := []ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "host.ddns.myip.gr. 60 IN A 1.2.3.4")}}
+	// targeting the PARENT for a record that belongs to the delegated child -> refused
+	if _, _, err := e.validate(in, "myip.gr", op); err == nil || !strings.Contains(err.Error(), "more specific") {
+		t.Errorf("parent-target for a child record should be refused, got %v", err)
+	}
+	// targeting the CHILD correctly -> ok
+	if _, _, err := e.validate(in, "ddns.myip.gr", op); err != nil {
+		t.Errorf("child-target should pass: %v", err)
+	}
+}
+
+func TestEmptySecretKeyUnusable(t *testing.T) {
+	e := &Editor{Keys: []tsig.Key{{Name: "ddns-update", Algo: "hmac-sha256", Secret: ""}}}
+	op := []ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "host.ddns.myip.gr. 60 IN A 1.2.3.4")}}
+	if _, _, err := e.validate(inv(), "ddns.myip.gr", op); err == nil || !strings.Contains(err.Error(), "no goddns TSIG key") {
+		t.Errorf("a key with an empty secret must not be usable, got %v", err)
 	}
 }
 

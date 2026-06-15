@@ -55,14 +55,18 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 	}
 	res := buildResult(zone, key.Name, ops, live)
 
-	if e.Snap != nil && len(live) > 0 {
+	// Snapshot before the change is a guarantee, not best-effort: refuse to
+	// mutate if we couldn't capture a restore point.
+	if e.Snap != nil {
 		var serial uint32
 		if soa := named.SOAOf(live); soa != nil {
 			serial = soa.Serial
 		}
-		if id, err := e.Snap.SnapshotPut(zone, serial, named.Canonical(live), e.Keep); err == nil {
-			res.Snapshot = id
+		id, err := e.Snap.SnapshotPut(zone, serial, named.Canonical(live), e.Keep)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot before change failed (%w) — refusing to mutate without a restore point", err)
 		}
+		res.Snapshot = id
 	}
 
 	be, err := ddns.NewRFC2136(e.DNSServer, key.Name, key.Algo, key.Secret)
@@ -94,7 +98,13 @@ func (e *Editor) prepare(zone string, ops []ddns.Op) (*named.Zone, *tsig.Key, []
 	if server == "" {
 		server = "127.0.0.1:53"
 	}
-	live, _, _ := named.TransferAuto(zone, server, inv.AXFRKeys(z, key.Name)) // best-effort
+	// AXFR is required: it's both the snapshot (restore point) and the basis of
+	// the diff. If the zone can't be transferred, don't proceed on a blind diff.
+	live, _, err := named.TransferAuto(zone, server, inv.AXFRKeys(z, key.Name))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("can't transfer %q to snapshot/diff it (%w) — "+
+			"record editing needs the zone transferable: allow-transfer { localhost; } or a key", zone, err)
+	}
 	return z, key, live, nil
 }
 
@@ -114,33 +124,58 @@ func (e *Editor) validate(inv *named.Inventory, zone string, ops []ddns.Op) (*na
 	}
 	key := e.keyFor(z)
 	if key == nil {
-		return nil, nil, fmt.Errorf("no goddns TSIG key is granted update on %q (zone grants: %s)",
+		return nil, nil, fmt.Errorf("no goddns TSIG key with a secret is granted update on %q (zone grants: %s)",
 			zone, strings.Join(z.UpdateKeys, ", "))
 	}
-	apex := dns.Fqdn(zone)
+	target := dns.CanonicalName(zone)
 	for _, op := range ops {
 		if op.RR == nil {
 			return nil, nil, fmt.Errorf("a record operation has no record")
 		}
-		n := dns.Fqdn(op.RR.Header().Name)
-		if n != apex && !strings.HasSuffix(n, "."+apex) {
-			return nil, nil, fmt.Errorf("record %q is not inside zone %q", strings.TrimSuffix(n, "."), zone)
+		// The name must belong to THIS zone as its most-specific enclosing
+		// zone — so a record for a delegated child isn't sent to the parent.
+		owner := mostSpecificZone(inv, op.RR.Header().Name)
+		name := strings.TrimSuffix(dns.CanonicalName(op.RR.Header().Name), ".")
+		if owner == "" {
+			return nil, nil, fmt.Errorf("record %q is not inside any zone served here", name)
+		}
+		if owner != target {
+			return nil, nil, fmt.Errorf("record %q belongs to the more specific zone %q — target that zone",
+				name, strings.TrimSuffix(owner, "."))
 		}
 	}
 	return z, key, nil
 }
 
-// keyFor returns the first key goddns holds that the zone grants update rights.
+// keyFor returns the first key goddns HOLDS (with a secret) that the zone grants.
 func (e *Editor) keyFor(z *named.Zone) *tsig.Key {
 	for i := range e.Keys {
-		kn := strings.TrimSuffix(e.Keys[i].Name, ".")
+		if e.Keys[i].Secret == "" {
+			continue
+		}
 		for _, gk := range z.UpdateKeys {
-			if gk == kn {
+			if strings.EqualFold(strings.TrimSuffix(e.Keys[i].Name, "."), strings.TrimSuffix(gk, ".")) {
 				return &e.Keys[i]
 			}
 		}
 	}
 	return nil
+}
+
+// mostSpecificZone returns the canonical name of the longest user zone that
+// encloses name (the zone authoritative for that record), or "" if none.
+func mostSpecificZone(inv *named.Inventory, name string) string {
+	cn := dns.CanonicalName(name)
+	best := ""
+	for _, z := range inv.UserZones() {
+		zn := dns.CanonicalName(z.Name)
+		if cn == zn || strings.HasSuffix(cn, "."+zn) {
+			if len(zn) > len(best) {
+				best = zn
+			}
+		}
+	}
+	return best
 }
 
 // buildResult renders the added records and resolves the removed ones against

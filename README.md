@@ -404,9 +404,13 @@ to confirm, and snapshots the zone first so the change is reversible:
 
 Per the invariant it **refuses** a static/panel-managed zone (cPanel/DirectAdmin/
 Virtualmin/hand-edited) and never converts one — it only touches zones that are
-already dynamic and grant a TSIG key goddns holds. The right key is auto-selected
-from the keyring per the zone's `update-policy`. Blast radius stays bounded by
-what that key grants.
+already dynamic and grant a TSIG key goddns holds, and it targets the
+most-specific zone (a record for a delegated child isn't sent to the parent).
+The right key is auto-selected from the keyring per the zone's `update-policy`.
+goddns checks zone+key; **BIND's `update-policy` is the actual per-name/type
+enforcer**, so the blast radius is exactly what that key is granted — an
+out-of-policy edit is rejected by named (NOTAUTH/REFUSED). Every change is
+snapshotted first (it refuses to mutate if it can't capture a restore point).
 
 ## Logging
 
