@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
 
@@ -310,6 +311,14 @@ func writeFragment(path, content string) error {
 		tmp.Close()
 		return err
 	}
+	// Match the fragment's group to proxy.d/ so the goddns daemon can read what
+	// the CLI wrote. Without this, `sudo goddns vhost set` (run as root) leaves a
+	// root:root 0640 file the daemon — which runs as the goddns user — can't
+	// read, crash-looping it at the next reload. Best-effort: a no-op when the
+	// writer already matches (e.g. the daemon itself), and harmless if it fails.
+	if gid := dirGID(dir); gid >= 0 {
+		_ = tmp.Chown(-1, gid)
+	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
 		return err
@@ -325,4 +334,16 @@ func writeFragment(path, content string) error {
 		d.Close()
 	}
 	return nil
+}
+
+// dirGID returns the group owner of dir, or -1 if it can't be determined.
+func dirGID(dir string) int {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return -1
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return int(st.Gid)
+	}
+	return -1
 }

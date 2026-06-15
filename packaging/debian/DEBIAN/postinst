@@ -36,9 +36,15 @@ fi
 
 # drop-in dir for proxy vhost fragments (proxy.d/*.conf merged into the config);
 # seed it with the example template so the format is discoverable in place.
+# 2770 root:goddns — setgid so fragments written by the CLI (run as root) or the
+# admin UI (run as the goddns user) always land group goddns and stay
+# daemon-readable; group-write lets the admin UI manage vhosts.
 mkdir -p /etc/goddns/proxy.d
 chown root:goddns /etc/goddns/proxy.d
-chmod 0750 /etc/goddns/proxy.d
+chmod 2770 /etc/goddns/proxy.d
+# heal any fragment an older root CLI left root:root (would crash-loop the daemon)
+chgrp goddns /etc/goddns/proxy.d/*.conf 2>/dev/null || true
+chmod 0640 /etc/goddns/proxy.d/*.conf 2>/dev/null || true
 if [ -f /usr/share/goddns/configs/vhost.conf.example ] && \
    [ ! -f /etc/goddns/proxy.d/vhost.conf.example ]; then
     install -m0640 -o root -g goddns \
