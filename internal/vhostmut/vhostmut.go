@@ -118,6 +118,12 @@ func (e *Editor) PreviewRemove(host string) (*Result, error) {
 		return nil, fmt.Errorf("no config path: don't know where proxy.d/ lives")
 	}
 	host = normalize(host)
+	// Validate the host shape before it ever becomes a filesystem path — the
+	// fragment filename is derived from it, so traversal-safety is explicit,
+	// not a lucky side effect of the glob never matching.
+	if !proxy.ValidHost(host) {
+		return nil, fmt.Errorf("invalid vhost %q", host)
+	}
 	managed, conflict, err := e.ownership(host)
 	if err != nil {
 		return nil, err
@@ -184,15 +190,27 @@ func (e *Editor) ownership(host string) (managed bool, conflict string, err erro
 		if err != nil {
 			return false, "", fmt.Errorf("read %s: %w", f, err)
 		}
+		definesHost := false
 		for k := range rules {
-			if normalize(k) != host {
-				continue
+			if normalize(k) == host {
+				definesHost = true
 			}
-			if f == own {
+		}
+		switch {
+		case f == own:
+			// goddns owns proxy.d/<host>.conf ONLY if it is a single-host
+			// fragment for exactly this host — the shape goddns renders.
+			// A hand-made fragment that happens to share the name but defines
+			// other/multiple hosts is NOT ours: overwriting or deleting it
+			// would silently destroy those vhosts, so treat it as a conflict.
+			if len(rules) == 1 && definesHost {
 				managed = true
 			} else {
-				conflict = relName(f)
+				conflict = relName(own)
 			}
+		case definesHost:
+			// host is defined in some other fragment we don't own.
+			conflict = relName(f)
 		}
 	}
 	return managed, conflict, nil

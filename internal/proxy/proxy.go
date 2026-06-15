@@ -88,6 +88,12 @@ func ValidateRule(host string, pr config.ProxyRule) error {
 	if u.Host == "" {
 		return fmt.Errorf("upstream %q: missing host", pr.Upstream)
 	}
+	// The upstream is used as a host root; a path/query/userinfo/fragment would
+	// land in the fragment verbatim and surprise at routing time. Reject them at
+	// write time (a bare trailing "/" is fine).
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("upstream %q: just scheme://host[:port], no path/query/credentials", pr.Upstream)
+	}
 	for _, cidr := range pr.Allow {
 		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
 			return fmt.Errorf("allow %q: %w", cidr, err)

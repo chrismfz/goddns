@@ -86,6 +86,49 @@ upstream = "https://1.1.1.1"
 	}
 }
 
+// A hand-made fragment named like one goddns would write (proxy.d/<host>.conf)
+// but containing MORE than that one host must NOT be treated as managed —
+// overwriting/deleting it would silently destroy the other vhosts.
+func TestForeignMultiHostFragmentRefused(t *testing.T) {
+	e := newEditor(t, "")
+	// craft proxy.d/idrac.x.conf defining idrac.x AND cam.y by hand
+	frag := filepath.Join(e.dir(), "idrac.x.conf")
+	if err := os.MkdirAll(e.dir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	body := `[proxy."idrac.x"]
+upstream = "https://1.1.1.1"
+[proxy."cam.y"]
+upstream = "https://2.2.2.2"
+`
+	if err := os.WriteFile(frag, []byte(body), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// Set must refuse (not clobber the file and lose cam.y)
+	if _, err := e.Set("idrac.x", rule()); err == nil ||
+		!strings.Contains(err.Error(), "won't override") {
+		t.Fatalf("Set on a foreign multi-host fragment must be refused, got %v", err)
+	}
+	// Remove must refuse (not delete the whole file)
+	if _, err := e.Remove("idrac.x"); err == nil ||
+		!strings.Contains(err.Error(), "doesn't manage") {
+		t.Fatalf("Remove on a foreign multi-host fragment must be refused, got %v", err)
+	}
+	// and the file is still intact with both hosts
+	got, err := os.ReadFile(frag)
+	if err != nil || !strings.Contains(string(got), "cam.y") {
+		t.Fatalf("foreign fragment was damaged: %q (err %v)", got, err)
+	}
+}
+
+func TestRemoveRejectsInvalidHost(t *testing.T) {
+	e := newEditor(t, "")
+	if _, err := e.Remove("../../etc/passwd"); err == nil ||
+		!strings.Contains(err.Error(), "invalid vhost") {
+		t.Fatalf("Remove must reject a traversal-shaped host, got %v", err)
+	}
+}
+
 func TestRemoveManaged(t *testing.T) {
 	e := newEditor(t, "")
 	if _, err := e.Set("cam.internal.myip.gr", rule()); err != nil {
@@ -115,6 +158,9 @@ func TestSetRejectsInvalidHostAndUpstream(t *testing.T) {
 	}
 	if _, err := e.Set("ok.example", config.ProxyRule{Upstream: "https://x", BasicAuth: []string{"user:notbcrypt"}}); err == nil {
 		t.Errorf("a non-bcrypt basic_auth entry must be rejected")
+	}
+	if _, err := e.Set("ok.example", config.ProxyRule{Upstream: "https://x/some/path"}); err == nil {
+		t.Errorf("an upstream with a path must be rejected")
 	}
 }
 
