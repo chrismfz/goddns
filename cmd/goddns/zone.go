@@ -221,15 +221,19 @@ func cmdZoneEdit(args []string) {
 	if err != nil {
 		fatal("%v", err)
 	}
+	// On a normal return (success / no-change / abort) the temp is removed; on a
+	// fatal (checkzone/apply error) os.Exit skips this defer, so the operator's
+	// edit survives — and we print its path below before bailing.
 	defer os.Remove(tmp.Name())
 	tmp.Write(base)
 	tmp.Close()
 
-	editor := cmp.Or(os.Getenv("EDITOR"), os.Getenv("VISUAL"), "vi")
-	c := exec.Command(editor, tmp.Name())
+	// $EDITOR may carry args (e.g. "code -w"); split it as argv, not shell.
+	ed0 := strings.Fields(cmp.Or(os.Getenv("EDITOR"), os.Getenv("VISUAL"), "vi"))
+	c := exec.Command(ed0[0], append(ed0[1:], tmp.Name())...)
 	c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := c.Run(); err != nil {
-		fatal("editor %q: %v", editor, err)
+		fatal("editor %q: %v", ed0, err)
 	}
 	edited, err := os.ReadFile(tmp.Name())
 	if err != nil {
@@ -241,6 +245,7 @@ func cmdZoneEdit(args []string) {
 	}
 	res, _, err := ed.PreviewRaw(zone, edited)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "your edit is preserved at %s\n", tmp.Name())
 		fatal("%v", err)
 	}
 	printRawDiff(res)
@@ -250,6 +255,7 @@ func cmdZoneEdit(args []string) {
 	}
 	res, err = ed.ReplaceRaw(zone, edited, base)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "your edit is preserved at %s\n", tmp.Name())
 		fatal("apply: %v", err)
 	}
 	fmt.Printf("edited %s (serial %d) — backup %s\n", res.File, res.Serial, res.Backup)

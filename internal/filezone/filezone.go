@@ -251,7 +251,11 @@ func (e *Editor) ReplaceRaw(zone string, newBytes, base []byte) (*Result, error)
 	if base != nil && !bytes.Equal(cur, base) {
 		return nil, fmt.Errorf("zone %q changed under you (a concurrent edit) — reload and reapply", zone)
 	}
-	return e.commit(z, zone, cur, normalizeRawSerial(zone, cur, newBytes))
+	normalized, err := normalizeRawSerial(zone, cur, newBytes)
+	if err != nil {
+		return nil, err
+	}
+	return e.commit(z, zone, cur, normalized)
 }
 
 // PreviewRaw checkzones a proposed whole-file replacement and returns the
@@ -269,7 +273,10 @@ func (e *Editor) PreviewRaw(zone string, newBytes []byte) (*Result, []byte, erro
 	if m := panelMarker(cur); m != "" {
 		return nil, nil, fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", z.Path, m)
 	}
-	newBytes = normalizeRawSerial(zone, cur, newBytes)
+	newBytes, err = normalizeRawSerial(zone, cur, newBytes)
+	if err != nil {
+		return nil, nil, err
+	}
 	check := e.CheckZone
 	if check == nil {
 		check = zonefile.CheckZone
@@ -280,21 +287,36 @@ func (e *Editor) PreviewRaw(zone string, newBytes []byte) (*Result, []byte, erro
 	return diff(zone, z.Path, cur, newBytes), cur, nil
 }
 
-// normalizeRawSerial bumps a raw replacement's SOA serial so it can't regress
-// below the live zone (an imported file may carry an old/equal serial). If the
-// content isn't surgically locatable ($GENERATE etc.), the operator's serial is
-// left as-is.
-func normalizeRawSerial(zone string, cur, newBytes []byte) []byte {
-	curSerial := uint32(0)
-	if f, err := zonefile.Parse(cur, zone); err == nil {
-		curSerial = f.SOASerial()
-	}
+// normalizeRawSerial keeps a raw replacement's SOA serial monotonic vs the live
+// zone. Surgically-locatable content is rewritten above the current serial. When
+// goddns can't auto-bump (e.g. $GENERATE), it REFUSES if the operator's serial
+// doesn't already exceed the current one — never silently regressing secondaries.
+func normalizeRawSerial(zone string, cur, newBytes []byte) ([]byte, error) {
+	floor, _ := currentSerial(cur, zone) // 0 if the current file can't be read
 	if f, err := zonefile.Parse(newBytes, zone); err == nil && f.Surgical() {
-		if b, err := f.SerialFloor(curSerial); err == nil {
-			return b
+		if b, err := f.SerialFloor(floor); err == nil {
+			return b, nil
 		}
 	}
-	return newBytes
+	newSerial, ok := currentSerial(newBytes, zone)
+	if !ok || newSerial <= floor {
+		return nil, fmt.Errorf("raw content goddns can't auto-bump (e.g. $GENERATE) has SOA serial %d, not above the current %d — set a higher serial in the file", newSerial, floor)
+	}
+	return newBytes, nil
+}
+
+// currentSerial reads a zone's SOA serial, tolerant of non-surgical content
+// (implied owners, $GENERATE with a normal SOA at the top): it returns the first
+// SOA found even if a later directive stops the parse.
+func currentSerial(content []byte, zone string) (uint32, bool) {
+	zp := dns.NewZoneParser(bytes.NewReader(content), dns.Fqdn(zone), "")
+	zp.SetIncludeAllowed(false)
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		if soa, ok := rr.(*dns.SOA); ok {
+			return soa.Serial, true
+		}
+	}
+	return 0, false
 }
 
 // commit is the shared write tail: checkzone the new bytes (HARD GATE), re-read

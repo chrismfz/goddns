@@ -264,6 +264,21 @@ func TestRawImportStaleSerialNormalized(t *testing.T) {
 	}
 }
 
+func TestRawGenerateSerialFloor(t *testing.T) {
+	e, _ := testEditor(t, staticZone(), "example") // current serial 2024010101
+	// $GENERATE content goddns can't auto-bump: a low serial must be REFUSED
+	// (else it silently regresses secondaries).
+	lo := []byte("$ORIGIN example.\n$TTL 60\n@ IN SOA ns.example. host.example. 5 3600 600 1209600 60\n@ IN NS ns.example.\n$GENERATE 1-3 host$ IN A 10.0.0.$\n")
+	if _, _, err := e.PreviewRaw("example", lo); err == nil || !strings.Contains(err.Error(), "not above the current") {
+		t.Fatalf("a $GENERATE import with a low serial must be refused, got %v", err)
+	}
+	// the operator can bump the SOA serial themselves (it's a normal record)
+	hi := []byte("$ORIGIN example.\n$TTL 60\n@ IN SOA ns.example. host.example. 2030010100 3600 600 1209600 60\n@ IN NS ns.example.\n$GENERATE 1-3 host$ IN A 10.0.0.$\n")
+	if _, _, err := e.PreviewRaw("example", hi); err != nil {
+		t.Fatalf("a $GENERATE import with a high serial should be allowed: %v", err)
+	}
+}
+
 func TestRawNanoGuard(t *testing.T) {
 	e, path := testEditor(t, staticZone(), "example")
 	staleBase := []byte("stale base that differs from the file")
