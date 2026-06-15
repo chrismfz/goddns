@@ -13,6 +13,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/filezone"
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
 )
@@ -88,7 +89,45 @@ func cmdZoneHistory(name, cfgPath string, list bool) {
 // answers, not a possibly-stale zone file) and prints every record. With
 // -export it emits a loadable zone-file snapshot, handy as a backup. It never
 // writes anything.
+// cmdZoneEnable is the advisory check before adding a static zone to
+// editable_zones: it verifies the zone is a static master goddns can safely edit
+// in place, then prints the config line for the operator to add (goddns never
+// writes goddns.conf itself).
+func cmdZoneEnable(args []string) {
+	fs := flag.NewFlagSet("zone enable", flag.ExitOnError)
+	cfgPath := fs.String("config", defaultConf, "config file")
+	fs.Parse(args)
+	rest := fs.Args()
+	if len(rest) != 1 {
+		fatal("usage: goddns zone enable <zone>")
+	}
+	zone := rest[0]
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		fatal("%v", err)
+	}
+	path, err := filezone.PreflightEnable(cfg.NamedConf, zone)
+	if err != nil {
+		fatal("cannot enable %q for editing: %v", zone, err)
+	}
+	if inEditable(cfg, zone) {
+		fmt.Printf("%s is already in editable_zones (file %s) — nothing to do.\n", zone, path)
+		return
+	}
+	fmt.Printf("%s is a static master zone goddns can edit in place (file: %s).\n\n", zone, path)
+	fmt.Printf("Add it to editable_zones in %s (goddns never edits that file itself):\n\n", *cfgPath)
+	fmt.Printf("    editable_zones = [ ..., %q ]\n\n", zone)
+	fmt.Println("Then `goddns record add|del|delset` edits it in place (checkzone + backup + rndc reload).")
+}
+
 func cmdZone(args []string) {
+	// `goddns zone enable <name>` — the advisory check before adding a static
+	// zone to editable_zones for file-as-truth editing.
+	if len(args) >= 1 && args[0] == "enable" {
+		cmdZoneEnable(args[1:])
+		return
+	}
+
 	// The zone name is the first positional arg; allow it before the flags.
 	var name string
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {

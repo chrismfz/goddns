@@ -10,6 +10,7 @@ import (
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
+	"github.com/chrismfz/goddns/internal/filezone"
 	"github.com/chrismfz/goddns/internal/recordmut"
 	"github.com/chrismfz/goddns/internal/tsig"
 )
@@ -51,7 +52,11 @@ func cmdRecord(args []string) {
 			fatal("usage: goddns record %s <zone> '<rr>'", sub)
 		}
 		zone = rest[0]
-		rr, err := dns.NewRR(rest[1])
+		// Parse the RR with the zone as $ORIGIN so a relative owner name (e.g.
+		// `www`) qualifies to `www.<zone>.` — without an origin a short name
+		// becomes the root-level `www.`, which silently matches nothing on a
+		// file zone (and the wrong name on a dynamic one).
+		rr, err := parseRRInZone(rest[1], zone)
 		if err != nil || rr == nil {
 			fatal("parse record %q: %v", rest[1], err)
 		}
@@ -70,10 +75,17 @@ func cmdRecord(args []string) {
 			fatal("unknown record type %q", rest[2])
 		}
 		ops = []ddns.Op{{Action: ddns.DelRRset, RR: &dns.RFC3597{Hdr: dns.RR_Header{
-			Name: dns.Fqdn(rest[1]), Rrtype: rrtype, Class: dns.ClassINET}}}}
+			Name: qualifyName(rest[1], zone), Rrtype: rrtype, Class: dns.ClassINET}}}}
 	default:
 		recordUsage()
 		os.Exit(2)
+	}
+
+	// Route by ownership: a static zone the operator enabled for file editing
+	// goes through the file-as-truth path; everything else is RFC2136 (dynamic).
+	if inEditable(cfg, zone) {
+		cmdRecordFile(cfg, zone, ops, *yes)
+		return
 	}
 
 	st := openStore(cfg)
@@ -107,6 +119,80 @@ func cmdRecord(args []string) {
 		fmt.Printf(" — snapshot #%d taken; `goddns record restore %s` to roll back", res.Snapshot, res.Zone)
 	}
 	fmt.Println()
+}
+
+// parseRRInZone parses an RR string with the zone as $ORIGIN, so a relative
+// owner name qualifies against the zone (standard zone-file semantics) instead
+// of becoming a root-level name.
+func parseRRInZone(s, zone string) (dns.RR, error) {
+	zp := dns.NewZoneParser(strings.NewReader(s), dns.Fqdn(zone), "")
+	rr, ok := zp.Next()
+	if err := zp.Err(); err != nil {
+		return nil, err
+	}
+	if !ok || rr == nil {
+		return nil, fmt.Errorf("no record in %q", s)
+	}
+	return rr, nil
+}
+
+// qualifyName resolves an owner name against the zone: "@" → apex, a trailing
+// dot → absolute as-typed, otherwise relative to the zone.
+func qualifyName(name, zone string) string {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "@" || name == "":
+		return dns.Fqdn(zone)
+	case strings.HasSuffix(name, "."):
+		return name
+	default:
+		return dns.Fqdn(name + "." + zone)
+	}
+}
+
+// inEditable reports whether the zone is on the operator's file-edit allowlist.
+func inEditable(cfg *config.Config, zone string) bool {
+	z := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone)), ".")
+	for _, x := range cfg.EditableZones {
+		if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(x)), ".") == z {
+			return true
+		}
+	}
+	return false
+}
+
+// cmdRecordFile edits a record in an enabled STATIC zone in place (file-as-truth):
+// preview the diff, confirm, then surgically rewrite the zone file (checkzone +
+// backup + atomic write + rndc reload). A surgically-unsafe edit is refused with
+// guidance to use raw mode (a later stage).
+func cmdRecordFile(cfg *config.Config, zone string, ops []ddns.Op, yes bool) {
+	ed := &filezone.Editor{
+		NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
+		Editable: cfg.EditableZones, Keep: cfg.HistoryKeep,
+	}
+	res, err := ed.Preview(zone, ops)
+	if err != nil {
+		fatal("%v", err)
+	}
+	for _, l := range res.Removed {
+		fmt.Printf("- %s\n", l)
+	}
+	for _, l := range res.Added {
+		fmt.Printf("+ %s\n", l)
+	}
+	if len(res.Added) == 0 && len(res.Removed) == 0 {
+		fmt.Println("(nothing would change)")
+		return
+	}
+	if !yes && !confirmPrompt("edit static zone "+zone+" in place?") {
+		fmt.Println("aborted")
+		return
+	}
+	res, err = ed.Apply(zone, ops)
+	if err != nil {
+		fatal("apply: %v", err)
+	}
+	fmt.Printf("edited %s (serial %d) — backup %s\n", res.File, res.Serial, res.Backup)
 }
 
 // cmdRecordRestore rolls a dynamic zone back to a Phase-1 snapshot. With no id
