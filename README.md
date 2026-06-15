@@ -535,6 +535,31 @@ all-or-nothing applies at **startup** too — a broken fragment will stop
 `goddns` from booting, so fix fragment errors via a reload (which keeps the old
 config live and logs the offending file) before relying on a restart.
 
+### Managing vhosts (`goddns vhost`)
+
+Instead of hand-writing fragments you can let goddns manage them — one
+`proxy.d/<host>.conf` per vhost, written atomically, validated before it lands:
+
+    goddns vhost list                       # every vhost + whether goddns manages it
+    goddns vhost set idrac.internal.myip.gr \
+        -upstream https://10.23.0.5 -allow 10.23.0.0/16 -rate 5
+    goddns vhost del idrac.internal.myip.gr
+        -y    skip the confirmation prompt
+
+`set` shows the rendered fragment and asks to confirm; it validates the upstream
+(must be http/https), the `allow` CIDRs and the `user:bcrypt` `basic_auth`
+entries up front, so a bad value is caught at write time, not on the next
+reload. `set` is declarative — it writes the whole vhost each time. Per the
+invariant goddns manages **only its own fragments**: a vhost you put in
+`goddns.conf` (or a fragment goddns didn't name `<host>.conf`) is shown
+read-only and `set`/`del` **refuse** it — edit it where it lives. Changes apply
+within `reload_interval`, or run `systemctl reload goddns`.
+
+The same is in the **admin dashboard**: managed vhosts get `edit`/`del` buttons
+and there's an "add vhost" form, each with a CSRF-checked confirm showing the
+fragment; base-config vhosts are marked `conf` and stay read-only. A write from
+the UI reloads immediately. Generate `basic_auth` hashes with `goddns passwd`.
+
 ### DNS + certificates for the proxied names
 
 The records never point at the 10.x addresses — every proxied name

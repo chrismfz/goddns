@@ -46,6 +46,74 @@ func New() *Proxy {
 	return p
 }
 
+// ValidHost reports whether h is a syntactically valid proxy vhost key: a
+// lowercase hostname (labels of letters/digits/hyphens separated by dots, no
+// port, no path, no trailing dot). This is also what makes h safe to use as a
+// proxy.d/<host>.conf fragment filename — it can't contain a slash or "..".
+func ValidHost(h string) bool {
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// ValidateRule checks a proxy vhost is well-formed BEFORE it is written to a
+// proxy.d/ fragment: a valid host, a parseable http(s) upstream with a host,
+// valid allow CIDRs, and well-formed user:bcrypt basic_auth entries. It is
+// deliberately stricter than the runtime loader (compile, which stays lenient
+// for backward compatibility) so a bad value is rejected at write time rather
+// than failing the next reload.
+func ValidateRule(host string, pr config.ProxyRule) error {
+	if !ValidHost(host) {
+		return fmt.Errorf("invalid vhost %q: want a hostname (lowercase letters, digits, hyphens, dots; no port/path)", host)
+	}
+	u, err := url.Parse(strings.TrimSpace(pr.Upstream))
+	if err != nil {
+		return fmt.Errorf("upstream %q: %w", pr.Upstream, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("upstream %q: scheme must be http or https", pr.Upstream)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("upstream %q: missing host", pr.Upstream)
+	}
+	// The upstream is used as a host root; a path/query/userinfo/fragment would
+	// land in the fragment verbatim and surprise at routing time. Reject them at
+	// write time (a bare trailing "/" is fine).
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return fmt.Errorf("upstream %q: just scheme://host[:port], no path/query/credentials", pr.Upstream)
+	}
+	for _, cidr := range pr.Allow {
+		if _, _, err := net.ParseCIDR(strings.TrimSpace(cidr)); err != nil {
+			return fmt.Errorf("allow %q: %w", cidr, err)
+		}
+	}
+	for _, cred := range pr.BasicAuth {
+		user, hash, ok := strings.Cut(cred, ":")
+		if !ok || user == "" {
+			return fmt.Errorf("basic_auth %q: want user:bcrypt-hash", cred)
+		}
+		if _, err := bcrypt.Cost([]byte(hash)); err != nil {
+			return fmt.Errorf("basic_auth for %q: not a bcrypt hash (generate one with `goddns passwd`)", user)
+		}
+	}
+	if pr.RateLimit < 0 {
+		return fmt.Errorf("rate_limit must be >= 0")
+	}
+	return nil
+}
+
 // accessLogger optionally routes the per-request "proxy-access" lines to a
 // dedicated logger (access_log in the config, nginx-style). nil = the
 // process-wide logger, i.e. merged into the main log. Errors/warnings

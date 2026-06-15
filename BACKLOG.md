@@ -64,32 +64,30 @@ zones, pointing the operator at the panel backend or an explicit conversion.
 The trust boundary is BIND's `update-policy`; blast radius stays bounded by what
 the key grants.
 
-### Phase 2B — goddns-owned object CRUD (proxy vhosts + tunnels)
+### Phase 2B — goddns-owned object CRUD (proxy vhosts) — SHIPPED
 
 A SEPARATE track: CRUD of goddns's OWN config objects, not BIND records. It
 writes only goddns state, so the trust model is self-contained (admin auth, no
 BIND/panel invariant). DDNS tokens already work this way (SQLite, full CRUD);
-this brings the proxy vhosts and tunnels up to the same.
+this brought the proxy vhosts up to the same.
 
-- **Proxy vhosts → managed `proxy.d/` fragments** (the nginx `conf.d` model,
-  chosen to preserve hand-editing). The hand-authored `goddns.conf` stays
-  100% operator-owned — nano + comments untouched; the UI/CLI writes ONLY
-  `proxy.d/*.conf` TOML fragments; the daemon loads the main file + every
-  fragment at reload. No clobbering of comments, and both workflows (hand-edit
-  the base, UI-manage the fragments) coexist. Design points:
-  - loader merges `goddns.conf` + `proxy.d/*.conf` (deterministic order),
-    validates the whole as one unit — a broken fragment is rejected like any
-    bad reload and the previous config stays live;
-  - fragment writes are atomic (temp + rename) so a half-written file is never
-    loaded; the UI never touches the main file;
-  - conflict policy when a host is defined in both the base and a fragment
-    (e.g. surface it as an error in the UI, or last-wins with a clear marker of
-    which source a live rule came from).
-  This also unblocks the older "Proxy CRUD from the UI" backlog item below
-  without the "move everything into SQLite and lose the TOML" tradeoff.
-- **Tunnels → SQLite, tokens-style, CRUD-first** from day one (a tunnel is a
-  name + token + target, exactly the shape of a DDNS token), built together
-  with `goddns tunnel` (see below).
+- **Proxy vhosts → managed `proxy.d/` fragments** — DONE (`internal/vhostmut`,
+  `goddns vhost list|set|del`, admin add/edit/del). The nginx `conf.d` model:
+  the hand-authored `goddns.conf` stays 100% operator-owned; the UI/CLI writes
+  ONLY `proxy.d/<host>.conf` TOML fragments (one vhost per file), validated
+  before write and applied atomically (temp + rename + fsync). A vhost defined
+  in the base config — or in a fragment goddns didn't name `<host>.conf` — is
+  reported as not-managed and refused for set/del (the ownership invariant).
+  An immediate reload (SIGHUP) follows a UI write; the loader already merges
+  base + fragments and rejects a broken fragment as a whole, keeping the
+  previous config live. This also closed the older "Proxy CRUD from the UI" item.
+- **Tunnels → NOT building a native `goddns tunnel`.** The supported path is
+  **SSH reverse tunnels**, fully documented in the README (a dedicated
+  forwarding-only `tunnel` account + a `systemd` keep-alive unit, proxy upstream
+  pointed at the local tunnel end). It needs zero new moving parts in goddns and
+  the proxy already does everything in front of it (TLS, allow, basic_auth,
+  rate-limit, access log). The native-tunnel sketch below is kept only as a
+  someday-maybe; there is no plan to build it.
 
 ### Phase 3 — Health-driven automation (failover / round-robin / IP checks)
 

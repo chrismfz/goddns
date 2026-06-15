@@ -154,7 +154,13 @@ func cmdServe(args []string) {
 			if err != nil {
 				fatal("admin secret: %v", err)
 			}
-			adminH = admin.New(func() *config.Config { return cur.Load().cfg }, st, secret, Version)
+			ah := admin.New(func() *config.Config { return cur.Load().cfg }, st, secret, Version)
+			// Let the admin UI manage proxy.d/ vhost fragments, and reload
+			// immediately after a write (SIGHUP, same path the poll uses).
+			ah.EnableVhostEditing(*cfgPath, func() {
+				_ = syscall.Kill(os.Getpid(), syscall.SIGHUP)
+			})
+			adminH = ah
 			log.Printf("admin UI enabled at https://%s%s", cfg.Admin.Host, cfg.ProxyListen)
 			if len(cfg.Admin.Allow) == 0 && len(cfg.Admin.BasicAuth) == 0 {
 				log.Printf("WARNING: admin has no 'allow' CIDR list and no 'basic_auth' — the login " +
