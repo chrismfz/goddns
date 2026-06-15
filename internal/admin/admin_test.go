@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -200,6 +201,29 @@ func TestProxyFormPasswordHashed(t *testing.T) {
 	}
 	if strings.Contains(body, "s3kritpw") {
 		t.Fatalf("the plaintext password must never appear in the preview/fragment")
+	}
+
+	// Confirm phase: resubmit the preview's hidden fields (auth = the HASH, no
+	// plaintext) with confirm=1 — this is where a regression that re-introduced
+	// the plaintext into the round-trip would surface. The written fragment must
+	// carry the bcrypt hash, never the password.
+	entry := regexp.MustCompile(`chris:\$2a\$[./A-Za-z0-9$]+`).FindString(body)
+	if entry == "" {
+		t.Fatalf("could not locate the hashed entry in the preview")
+	}
+	rr2 := do(h, "POST", "/proxy/set", "127.0.0.1:1", map[string]string{
+		"csrf": csrf, "host": "idrac.example", "upstream": "https://1.1.1.1",
+		"auth": entry, "confirm": "1",
+	}, cookie)
+	if rr2.Code != http.StatusSeeOther {
+		t.Fatalf("confirm POST: got %d, want 303\n%s", rr2.Code, rr2.Body.String())
+	}
+	frag, err := os.ReadFile(filepath.Join(filepath.Dir(confPath), "proxy.d", "idrac.example.conf"))
+	if err != nil {
+		t.Fatalf("read written fragment: %v", err)
+	}
+	if !strings.Contains(string(frag), "$2a$") || strings.Contains(string(frag), "s3kritpw") {
+		t.Fatalf("written fragment must carry the hash, not the plaintext:\n%s", frag)
 	}
 }
 

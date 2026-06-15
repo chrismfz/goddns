@@ -715,6 +715,8 @@ func (h *Handler) handlePasswd(w http.ResponseWriter, r *http.Request, user stri
 			data["Error"] = "user and password are both required"
 		case strings.Contains(u, ":"):
 			data["Error"] = "user must not contain ':'"
+		case len(pw) < 8:
+			data["Error"] = "password too short (min 8 characters)"
 		default:
 			hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 			if err != nil {
@@ -751,11 +753,20 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule, error) {
 		RateLimit:      rate,
 	}
 	if pw := r.FormValue("auth_pass"); pw != "" {
+		u := strings.TrimSpace(r.FormValue("auth_user"))
+		switch {
+		case u == "":
+			return host, rule, fmt.Errorf("a login user is required when you set a password")
+		case strings.Contains(u, ":"):
+			return host, rule, fmt.Errorf("login user must not contain ':'")
+		case len(pw) < 8:
+			return host, rule, fmt.Errorf("login password too short (min 8 characters)")
+		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
 		if err != nil {
 			return host, rule, fmt.Errorf("hash login password: %w", err)
 		}
-		rule.BasicAuth = append(rule.BasicAuth, strings.TrimSpace(r.FormValue("auth_user"))+":"+string(hash))
+		rule.BasicAuth = append(rule.BasicAuth, u+":"+string(hash))
 	}
 	return host, rule, nil
 }
