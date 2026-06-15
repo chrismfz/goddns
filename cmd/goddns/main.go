@@ -36,6 +36,7 @@ Usage:
   goddns token del  -fqdn home.myip.gr [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth
   goddns rotate-key [name]         # rotate a TSIG key in tsig_keys_file + rndc reconfig
+  goddns record add|del|delset ... # edit records in a dynamic zone (diff + snapshot)
   goddns zones [-check]                        # read-only: zones, dynamic, TSIG health (-check: NS serials)
   goddns zone home.myip.gr [-export|-check]    # read-only: live records via AXFR (+ backup, NS serials)
   goddns zone myip.gr -history | -diff         # zone snapshot history / what changed last
@@ -101,6 +102,8 @@ func main() {
 		cmdPasswd(os.Args[2:])
 	case "rotate-key":
 		cmdRotateKey(os.Args[2:])
+	case "record":
+		cmdRecord(os.Args[2:])
 	case "zones":
 		cmdZones(os.Args[2:])
 	case "zone":

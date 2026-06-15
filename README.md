@@ -391,6 +391,23 @@ without ever touching how they're managed. Tunables (defaults shown):
     history_interval = 300   # SOA poll period in seconds; 0 disables
     history_keep     = 50    # snapshots retained per zone
 
+### Editing records (`goddns record`)
+
+Edit arbitrary records in a **dynamic** zone via signed RFC2136 UPDATEs — any
+type (A/AAAA/CNAME/MX/TXT/SRV/CAA…), not just DDNS A/AAAA. It shows a diff, asks
+to confirm, and snapshots the zone first so the change is reversible:
+
+    goddns record add    ddns.myip.gr 'vpn.ddns.myip.gr. 60 IN A 203.0.113.9'
+    goddns record del    ddns.myip.gr 'vpn.ddns.myip.gr. 60 IN A 203.0.113.9'
+    goddns record delset ddns.myip.gr mail.ddns.myip.gr MX     # delete a whole RRset
+        -y    skip the confirmation prompt
+
+Per the invariant it **refuses** a static/panel-managed zone (cPanel/DirectAdmin/
+Virtualmin/hand-edited) and never converts one — it only touches zones that are
+already dynamic and grant a TSIG key goddns holds. The right key is auto-selected
+from the keyring per the zone's `update-policy`. Blast radius stays bounded by
+what that key grants.
+
 ## Logging
 
 By default goddns logs to stderr (journald under systemd). On a busy DNS
