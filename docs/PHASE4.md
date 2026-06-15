@@ -1,325 +1,194 @@
-# Phase 4 — goddns-owned zones (design)
+# Phase 4 — in-place zone editing (file-as-truth)
 
-Status: **proposal, revised after independent design review.** Phases 1–2
-shipped (read-only history/diff; the audited, reversible write layer: record
-CRUD on dynamic zones, snapshot rollback, TSIG rotation, proxy-vhost CRUD).
-Phase 4 adds a **new zone ownership category** so goddns can do full record
-CRUD — plus import/export and zone lifecycle — on zones the operator
-**explicitly hands to it**, with managed serials and `named-checkzone` before
-every write. This is the panel-backend / "own your authoritative DNS"
-direction. This document is the architecture we build to, so the pieces land
-coherently. The design-review changes are marked **[R]** at the point they
-apply.
+Status: **proposal (model revised after operator review).** An earlier draft made
+goddns the *sole authority* for a zone with a SQLite canonical store and forbade
+hand-editing. That reintroduces the exact collision the original invariant exists
+to prevent: **two sources of truth (store ↔ file) that diverge the moment an
+operator `nano`s the zone** — and operators do nano zones, by habit, in a hurry.
+Rejected. This design makes **the zone file the single source of truth**. goddns
+is a validating, history-keeping editor that works **in place** and **alongside**
+hand-editing — never a replacement authority. No second copy of the truth → no
+split-brain. Phases 1–2 shipped (history/diff; record CRUD on dynamic zones,
+snapshot rollback, TSIG rotation, proxy-vhost CRUD); this is the static-zone
+editing layer.
 
-## 0. The line we're crossing — and the line we're NOT
+## 0. Principles (carried + the new one)
 
-The hard invariant has been: *goddns never changes a zone's ownership model.*
-Phase 4 does **not** weaken it — it adds a **fourth branch**. A zone is exactly
-one of:
+1. Read-only is the default; every write is deliberate, audited, **reversible**.
+2. **The file is the single source of truth.** goddns keeps no canonical copy; it
+   reads the file fresh, edits it, and writes it back. A hand-edit and a goddns
+   edit are the same kind of event to the system.
+3. **It coexists with nano** via optimistic concurrency (§3), so the two writers
+   can never silently clobber each other.
+4. Phase-1 history is the undo, and now also the **change feed** for hand-edits
+   (§6) — the "dual purpose".
 
-| Category | Source of truth | goddns does |
-|---|---|---|
-| **dynamic** (RFC2136) | named's journal + file | sends signed `UPDATE` (today) |
-| **goddns-owned** (NEW) | goddns's store (SQLite) | renders + owns the zone file |
-| hand-edited static | the operator's zone file | **read-only** (diff/history only) |
-| panel (cPanel/DA/Virtualmin) | the panel | **read-only** (panel API is its own track) |
+## 1. Scope & the (revised) invariant
 
-goddns still **never** touches a hand-edited static zone, a panel zone, or a
-dynamic zone's file. It writes a zone file **only** when that zone is explicitly
-goddns-owned, and a zone becomes owned **only** by an operator-confirmed action
-(`create` / `adopt`). One owner per zone, always; goddns refuses to file-edit a
-dynamic zone (use UPDATE) and to UPDATE an owned zone (re-render).
+- **Editable**: plain **static master** zones the operator **explicitly enables**
+  for goddns editing (an allowlist — goddns never auto-enables a zone), whose file
+  goddns has write access to.
+- **Never touched**: **panel-managed** zones (cPanel / DirectAdmin / Virtualmin —
+  detected, read-only), **dynamic** zones (the RFC2136 path — different
+  mechanism), slaves, and **named.conf** itself.
+- **Invariant**: *the zone file is the single source of truth; goddns edits it in
+  place — surgically, validated with `named-checkzone`, atomically, with
+  optimistic concurrency — so it coexists with hand-editing. It keeps no second
+  copy of the truth, never writes a panel zone, and never writes named.conf.*
 
-Why a separate model instead of "just edit the static file in place": rewriting
-a hand-edited file loses the operator's comments/formatting/ordering, forces a
-serial-bump + `checkzone` + reload dance, and collides with panel ownership —
-exactly what the invariant exists to prevent. "Edit records with a correctly
-managed serial" is what dynamic update gives for free; goddns-owned zones give
-the same guarantee for zones the operator wants goddns, not named's journal, to
-be the canonical source for.
+The original "never write a hand-edited static zone" rule was a *means* to an end
+(no clobber, no split-brain, respect the operator). File-as-truth + surgical edits
++ optimistic locking + checkzone serve that end **better** than store-as-truth for
+an operator who hand-edits — so the means is updated, the end is unchanged.
 
-## 1. Source of truth: the store
+## 2. The edit pipeline
 
-Two new SQLite tables (alongside the existing `records` token store and Phase-1
-`snapshots`):
-
-- `owned_zones` — apex params per owned zone: SOA (primary, mailbox, refresh/
-  retry/expire/min-TTL), `$TTL`, current serial, dnssec mode, created/updated.
-  **[R]** plus `file_path` (the exact path goddns owns and will write — the
-  consistency anchor, §2) and `serial_floor` (the live SOA serial captured at
-  adopt/import time, so the managed serial can never regress below what
-  secondaries already hold, §3).
-- `zone_records` — `(zone, name, ttl, type, rdata)` rows; the canonical record
-  set goddns renders from. **[R]** rows also carry the last writer's identity
-  (cli / daemon-admin) for the audit trail, so a render can surface which rows
-  the internet-facing daemon last touched (§6).
-
-Owned zones' truth lives here; dynamic zones' truth stays in named's journal
-(goddns never stores those). Clean separation, no double-bookkeeping. **[R]
-A row in `owned_zones` is the SOLE authority for "this zone is goddns-owned"
-(§2) — the on-disk file and its marker are consistency checks, never the
-ownership decision.**
-
-## 2. Authority & detection — how goddns knows a zone is "owned" **[R]**
-
-**The authority is a row in `owned_zones`, full stop.** A zone is goddns-owned
-iff goddns recorded it as owned in SQLite — set ONLY by the root CLI
-`create`/`adopt` (§5). The on-disk file path and its `; goddns-owned` marker are
-**not** the ownership decision (a comment line is self-asserted and forgeable; a
-hand-static zone — or a restored backup, or a compromised daemon dropping a
-file — could carry the marker and get clobbered). Keying authority on the store
-makes false-positive clobber impossible: no row → never owned → never written.
-
-The path + marker become a **tamper tripwire checked immediately before any
-write**: goddns confirms the zone's live `file` directive equals the
-`file_path` it recorded **and** the existing file still carries the marker, and
-**refuses to write if either disagrees** (someone moved/replaced/renamed it out
-of band). `named.Zone` gains `Owned bool` (set from the store, not the file);
-`Kind()` returns `"managed"`.
-
-Hard refusals at adopt time (state of the world goddns cannot safely own):
-
-- a zone that appears in **more than one view** (`ZoneByName` is first-match;
-  ownership across views is ambiguous);
-- a `file` that is a **symlink**, or resolves outside the goddns zone dir;
-- an on-disk file containing **`$INCLUDE` or `$GENERATE`** (the canonical
-  renderer cannot represent them — §5, M3).
-
-The goddns zone dir is a hard precondition checked at startup: it must be a path
-**no hand-static zone ever uses**, so a path collision can't even arise.
-
-## 3. The write pipeline (reuses the Phase-2 backbone)
-
-Every owned-zone change flows through the same
-`Authorize → Validate → Preview(diff) → Snapshot → Apply → Audit → Verify →
-Rollback` pipeline as Phase 2, with the **Apply** stage being the new bit:
+For a record change (add / delete / change) on an enabled static zone:
 
 ```
-[R] build candidate record-set (in a store txn) → render → named-checkzone (HARD GATE)
-    → commit the txn → atomic write into the goddns zone dir → rndc reload <zone> → verify
-    (checkzone fails → roll back the txn; store and file stay in agreement, nothing changed)
+1. read the file fresh; capture its (mtime, sha256) = the version you're editing
+2. parse it (miekg dns.ZoneParser) into records + keep the raw text & line map
+3. apply the Op surgically: insert/replace/remove the exact record line(s),
+   leaving comments / $directives / ordering / whitespace untouched
+4. bump the SOA serial (read current → max(current+1, todayNN); never below current)
+5. named-checkzone (strict flags) on the candidate  ← HARD GATE
+6. optimistic-lock re-check: re-stat the file; if (mtime, sha256) changed since
+   step 1, REFUSE ("changed under you — reload & reapply")  ← the nano-safety
+7. snapshot the current (pre-edit) file content (Phase-1 history)
+8. atomic write: temp + rename + fsync, O_NOFOLLOW, refuse if target is a symlink
+9. rndc reload <zone>  (per-zone blast radius)
+10. verify (apex SOA serial bumped + apex NS set matches) + audit
 ```
 
-- **Render** — deterministic zone file: `$TTL`, `$ORIGIN`, SOA with the managed
-  serial, the apex NS set, then records sorted the way `named.SortZone` orders
-  them, plus the `; goddns-owned` marker. **[R]** This is **new code**, not a
-  reuse of `named.Canonical` (which is a record *sorter*, not a zone-file
-  renderer — no directives, no owner-name FQDN/relative choice); it needs its
-  own test vectors (apex SOA/NS emission, RFC3597 `\#` for unknown types).
-- **Serial** — goddns owns it, date-based `YYYYMMDDnn`. **[R]** The monotonic
-  guard must **floor on the live serial, not just the stored one**:
-  `next = max(store_serial, live_serial, todayNN) + 1`, where `live_serial`
-  comes from a cheap SOA query against the local named (which Verify already
-  does). This kills three split-brain cases: adopting a zone whose live serial
-  already exceeds ours (secondaries would reject a backwards serial), a human/
-  panel bumping the file out of band, and inline-signing maintaining its own
-  serial axis. On `nn` overflow (>100 changes/day) fall through to
-  `live_serial + 1` rather than wrapping/stalling.
-- **Validate** — **[R]** `named-checkzone` with explicit strict flags
-  (`-k fail -m fail -n fail -i full`), run on the rendered candidate **before
-  the store txn commits**. goddns never writes a zone named would reject. But
-  checkzone is **necessary, not sufficient** — it passes many semantically
-  broken states (dangling NS, missing in-bailiwick glue, broken delegation,
-  CNAME-at-apex in lenient modes). So Verify (below) adds a semantic check.
-- **Apply** — atomic temp + rename + fsync into the goddns zone dir, `O_NOFOLLOW`,
-  **refusing if the target is a symlink** (§6); filename derived solely from the
-  `owned_zones` row, never from request input. Then `rndc reload <zone>`
-  (per-zone blast radius). **[R]** If `rndc` is unreachable / named is down, the
-  write is **failed**: do not leave a new file active without a confirmed reload.
-- **Verify** — **[R]** beyond "serial bumped": re-query the live resolver and
-  confirm the apex **SOA serial and NS set match what was rendered**, so a
-  silently-broken delegation is caught while rollback is still one step. Use the
-  apex SOA as the sentinel (no need to inject a record into operator data).
-  Recovery on any failure: restore the previous rendered file + `rndc reload`
-  (mirrors the `rotate-key` rollback discipline).
-- **Snapshot + Rollback** — **[R]** for owned zones, snapshot the **store's
-  canonical record set** (what goddns rendered), not the AXFR — that is the
-  byte-exact thing to roll back to, and it sidesteps the AXFR≠source mismatch
-  (an AXFR of a signed zone carries `managed()` DNSSEC records and named's
-  serial). Rollback re-loads that record set into the store and re-renders
-  through the same pipeline; the restore is itself snapshotted (undoable). AXFR
-  snapshots stay as secondary history for cross-checking.
+Rollback = restore a snapshot's content → checkzone → write → reload. The same
+pipeline backs both structured edits and the raw-text mode (§4); `recordmut`'s
+preview/diff/confirm/snapshot/audit machinery is reused, with a new `filezone`
+apply backend behind the existing `ddns.Mutator` seam.
 
-## 4. The Mutator abstraction — reuse, not reinvent
+## 3. Coexisting with nano — optimistic concurrency (the headline guarantee)
 
-`ddns.Mutator` (`Apply(zone string, ops []Op)`) already abstracts "how a write
-reaches the zone", with one implementation (`RFC2136`). Phase 4 adds a **second
-implementation** — `filezone` — that applies the same `Op`s (AddRR / DelRR /
-DelRRset / DelName) to the **store**, then renders + checkzones + reloads.
+This is the answer to "if I nano it in a hurry, will we kill each other?" — **no.**
+Step 1 captures the file's `(mtime, sha256)`; step 6 re-checks it just before
+writing. If you (or another admin session) changed the file in between, goddns
+**refuses** and tells you to reload — it never writes over a change it didn't see.
+Because the file is the only truth, there is no second copy to drift: goddns
+always edits against exactly what's on disk right now. Covers human-vs-goddns and
+goddns-vs-goddns. No lost edits, no silent clobber. (This is how a careful editor
+behaves — read-modify-write with a compare-and-swap, like `git`'s non-fast-forward
+refusal.)
 
-`recordmut`'s pipeline (validate → preview/diff → confirm → snapshot → apply →
-audit) becomes **backend-agnostic**: it selects the Mutator by zone ownership —
-dynamic → `RFC2136`, owned → `filezone`. The record-editing CLI and admin UI we
-already shipped then work on owned zones with minimal change. This is the payoff:
-the `Op` model maps cleanly onto store mutations (`DelRRset`/`DelName`/exact
-`DelRR` are all expressible as scoped SQL deletes; `buildResult` already resolves
-them against a record set).
+## 4. Surgical edits vs raw mode
 
-**[R] The one real mismatch to respect:** `RFC2136.Apply` is **one atomic signed
-transaction**; `filezone` is a multi-step pipeline (mutate → render → checkzone →
-write → reload) that can fail partway. The resolution is the §3 ordering:
-render + checkzone happen on a **candidate** record-set inside a store
-transaction that **commits only after checkzone passes**. So "the store and the
-live file always agree" is an enforced invariant, not a hope — a checkzone
-failure rolls the transaction back and nothing changed.
+- **Structured** (the default): add/del/change one record → goddns computes the
+  **minimal text change** to the relevant line(s) and leaves everything else byte
+  for byte — your comments, `$TTL`/`$ORIGIN`, ordering, and spacing survive. This
+  is the key difference from a full canonical re-render (which would flatten your
+  hand-crafted file).
+- **Raw** (power mode, webmin-style): edit the whole file in a textarea; checkzone
+  gates the save. You own the consequences; the optimistic lock + snapshot still
+  protect you.
+- **Refuse** surgical editing of a file containing `$INCLUDE` / `$GENERATE` (the
+  line-mapper can't safely reason about generated/incremented content) or **in-file
+  DNSSEC records** (an explicitly key-signed zone — editing the signed file breaks
+  signatures). Those fall back to raw mode or are refused with a clear reason.
 
-## 5. Zone lifecycle — create / adopt / import / export / delete
+## 5. Serial — read from the file, bump, never regress
 
-- **export** — render the store → a zone file (download in the UI / stdout in the
-  CLI). The AXFR-based `-export` we have already covers the read side; this adds
-  the store-render path for owned zones.
-- **import** — parse a BIND zone file (miekg `dns.ZoneParser`) → records into the
-  store → render + checkzone + reload. The on-ramp for "bring my existing zone
-  under goddns".
-- **adopt** (static → owned, the migration) — read the live zone (AXFR), load its
-  records into the store, render goddns's canonical version, `checkzone`, and
-  show a diff vs the live zone. **[R] The diff proves *record-set equivalence for
-  operator data only*, NOT byte equivalence** — it is computed record-set vs
-  record-set with `managed()` (SOA/RRSIG/NSEC\*/DNSKEY/…) excluded on **both**
-  sides, because AXFR carries DNSSEC + named's serial that goddns deliberately
-  doesn't own. Comments/formatting/`$TTL` scoping are **not** preserved (goddns
-  owns the content now). Hard refusals: **refuse to adopt a currently-signed
-  zone** (adopting it as "unsigned-owned" would strip its DNSSEC source material
-  and, without `dnssec-policy`, take it bogus — defer to Stage 5); **refuse if
-  the on-disk file contains `$GENERATE`/`$INCLUDE`** (unrepresentable, §2).
-  **[R] Adopt is reversible:** keep the original `file` directive and pre-adopt
-  named.conf state; commit the switch only **after** a post-reload SOA+NS verify
-  (§3); on any failure, restore the old `file` directive and `rndc reconfig` —
-  no point-of-no-return.
-- **create** — a brand-new owned zone (SOA/NS from flags or sane defaults) →
-  render → checkzone → write file → emit the named.conf glue.
-- **delete** — remove the zone file + the named.conf glue + `rndc reconfig`,
-  store rows archived (recoverable).
+goddns reads the current SOA serial **from the file** (truth) and writes
+`next = max(current + 1, YYYYMMDD00-for-today)`. Because the file is the only
+truth, there is **no floor-vs-store split-brain**: if a hand-edit already bumped
+the serial, goddns simply reads the new value next time. The only rule is "never
+write a serial below what the file already has" — trivially satisfied by reading
+it first.
 
-### named.conf glue — the one place the invariant needs a decision
+## 6. History — the dual purpose
 
-A goddns-owned zone needs a `zone "x" { type master; file "..."; };` stanza in
-named.conf. Per the invariant goddns **never writes named.conf**. Two models
-(open question §8):
+The Phase-1 history Poller (SOA-poll → on-change AXFR → snapshot, already running
+in `serve`) **watches the enabled static zones**. So:
 
-1. **(recommended) a goddns-owned `zones.d/*.conf` fragment dir**, `include`d once
-   by named.conf — the exact `tsig.keys` / `proxy.d/` pattern. goddns writes the
-   zone-config fragment + `rndc reconfig`. The operator opts in by adding **one**
-   include line, and in doing so consents to goddns declaring/removing master
-   zones (a real, named privilege — see §6).
-2. **(conservative)** goddns prints the `zone{}` stanza; the operator pastes it
-   into named.conf by hand. No blanket power; more friction.
+- a **goddns** edit bumps the serial → the poller snapshots it;
+- a **nano** edit bumps the serial → the poller snapshots it **too**.
 
-The recommendation: ship the fragment dir for convenience, **but gate zone
-create/delete (the lifecycle that touches the fragment dir) to the root CLI** —
-the daemon never declares or removes zones (§6).
+History / diff / rollback then work **uniformly for both**, and you get a change
+feed for hand-edits you'd otherwise have no record of. "Who" is inferred: a serial
+move with a matching `admin-audit` line = goddns; a serial move without one =
+external (a hand-edit). This is the dual purpose: the same zones are **editable**
+and **continuously tracked**, and the optimistic lock + the poller reinforce each
+other (a hand-edit is both captured *and* makes goddns's next write re-read fresh).
 
-## 6. Risk surface & the daemon/CLI privilege split (the important part)
+## 7. Safety & risk surface (the dangerous part, honestly)
 
-goddns now writes zone-data files, runs `rndc reload/reconfig`, and (via the
-fragment dir) can declare master zones. A compromised internet-facing daemon
-must not be able to hijack DNS. The control is a **privilege split**:
+goddns now **writes static zone files** — the thing to be careful about.
 
-- **Zone lifecycle — create / delete / adopt / import a *new* zone, and any write
-  to the named.conf fragment dir — is CLI-only, run by root.** The daemon and the
-  admin UI **cannot** create, delete, or declare zones.
-- **Record CRUD *within an already-owned zone* — daemon / admin-UI allowed**, the
-  same trust level as editing a dynamic zone today. Bounded to the set of zones
-  the operator already created; it can never make named authoritative for a new
-  name.
+- **`named-checkzone` (strict: `-k fail -m fail -n fail -i full`) is a hard gate**,
+  but necessary-not-sufficient: it passes some semantically broken states (dangling
+  NS, broken delegation, missing glue). So step 10 adds a **post-reload semantic
+  verify** (apex SOA serial + NS set match what was written); on mismatch, restore
+  the pre-edit snapshot and reload.
+- **Atomic + path-safe write**: temp + rename + fsync, `O_NOFOLLOW`, refuse a
+  symlink target; the filename is taken from the zone's **named.conf-declared
+  `file` path**, never from request input; reject any zone not on the editable
+  allowlist. Defeats a symlink/path pivot to another file.
+- **Pre-edit snapshot = backup**: even a bad surgical edit is one `restore` away;
+  reloads are per-zone (blast radius = one zone). If `rndc` is unreachable, the
+  write is treated as failed.
+- **Daemon blast radius**: the internet-facing daemon (admin UI) writing
+  `/var/named`-class files is the real exposure. Bound it: (i) editing is limited
+  to the operator's **explicit allowlist** of static zones (never panel, never
+  auto-added); (ii) for an exposed daemon, prefer **option (b)** — the daemon
+  proposes the edit, a small **root helper** validates (checkzone) + writes +
+  reloads, so the daemon never holds a file descriptor into the zone dir; the CLI
+  (root) writes directly. Daemon editing can also be left **off by default**
+  (CLI-only) for the most conservative posture.
+- **Panel safety**: panel-managed zones are detected (file path under a panel's
+  tree / known markers) and are **hard read-only**; the allowlist is the primary
+  guard (the operator can't enable a panel zone), panel-detection the secondary.
+- **Parse fidelity**: the surgical line-mapper must handle multi-line records
+  (parenthesised SOA), `$TTL`/`$ORIGIN` scoping, mixed tabs/spaces, and trailing
+  comments — covered by test vectors before any live write.
 
-Layered on top:
+## 8. Decisions
 
-- **`named-checkzone` (strict flags) is a hard gate** — never publishes a zone
-  named would reject; reloads are per-zone — but it is **necessary, not
-  sufficient** (§3 Verify adds the semantic apex SOA+NS check).
-- **Every change is snapshotted** — a bad edit is one `restore` away.
-- **[R] File access — option (b) is the default for any internet-exposed daemon.**
-  *Something* writes the owned zone's file on record CRUD. **(a)** daemon writes
-  the file directly (write into the zone dir, like `proxy.d/`) — acceptable only
-  for a CLI-only / non-exposed deployment. **(b)** the daemon writes the **store
-  only**; a small privileged renderer (root, via a local socket/queue) does
-  render + checkzone + write + reload. (b) removes the internet-facing surface's
-  file descriptor into the zone dir entirely — a daemon compromise is contained
-  to store rows the root renderer then re-validates. One extra moving part (a
-  socket) against a real blast-radius reduction.
-- **[R] Path-traversal hardening (both options):** the zone filename comes
-  **solely from the `owned_zones` row**, never from request input; reject a zone
-  name with `/` or `..` or with no owned row; render to a temp file in the same
-  dir and rename `O_NOFOLLOW`, refusing if the target is a symlink — defeats a
-  symlink pivot to `/var/named`/`named.conf`/the binary. `$INCLUDE`/`$GENERATE`
-  are **directives, not rdata**, so a `dns.RR` Op can't smuggle them in (an
-  `AddRR` of `NS`/`CNAME`/`DNAME` can still break the zone *semantically* —
-  caught by §3 Verify, not checkzone).
-- **[R] Store-poisoning survives the split — so validate at RENDER time.** The
-  daemon and CLI share the store; a compromised daemon with record-CRUD can write
-  arbitrary `zone_records`, and a later root `render`/`export`/`rollback` would
-  ship that with root's privilege. The renderer therefore **re-runs checkzone +
-  semantic verify on every render** (never trusting that store content was
-  validated at write time), and the writer-identity column (§1) lets a render
-  surface rows the daemon last touched. The split stops the daemon *declaring*
-  zones; it does not stop it *poisoning* existing ones — validation must live at
-  render, not only at write.
+1. **Editable set** → an **explicit allowlist** (config or a CLI `zone enable`);
+   goddns never edits a zone the operator didn't opt in, and never a panel/dynamic
+   zone.
+2. **Daemon write path** → **option (b)** (daemon proposes, root helper writes) for
+   any internet-exposed deployment; CLI writes directly; daemon editing off by
+   default until enabled.
+3. **Serial** → read from the file, `next = max(current+1, todayNN)`.
+4. **DNSSEC** → refuse in-file key-signed zones; a zone signed by named's
+   inline-signing has an **unsigned source** that is safe to edit (named re-signs
+   on reload). Same `managed()` exclusion primitive as `record restore`.
+5. **Panel zones** → hard read-only, always.
 
-## 7. Interaction with what's already shipped
+## 9. What this dissolves from the store-owned draft
 
-- **History / snapshots / rollback** — work; for owned zones the snapshot is the
-  store's canonical record set (§3), so rollback re-renders byte-exactly. AXFR
-  snapshots stay as secondary cross-check history.
-- **Record editor (CLI + admin)** — reused via the `filezone` Mutator; owned zones
-  gain the same add/del/edit/restore UX as dynamic zones.
-- **Zones viewer** — owned zones show as kind `managed`, with edit controls and
-  import/export.
-- **Dynamic zones, proxy, DDNS tokens, TSIG keyring** — untouched.
-- Implements the long-standing `BACKLOG.md` "Phase 4 — Platform: backends" item
-  for the self-hosted (non-panel) case.
+Folding to file-as-truth **removes** most of the prior design-review hazards
+outright: ownership detection / the `; goddns-owned` marker, the serial floor
+vs the store, store-poisoning, and the adopt/import *migration* (there's nothing
+to migrate — you just start editing the existing file). The `owned_zones` /
+`zone_records` schema is **not needed**; history uses the existing snapshot store.
+Import/export reduce to trivialities: **export** = download the file; **import** =
+raw-mode replace (checkzone-gated).
 
-## 8. Decisions (resolved by the design review) **[R]**
+## 10. Staged build (independent review per step, as in Phase 2)
 
-1. **named.conf glue → manual paste is the DEFAULT; the `zones.d/` fragment dir is
-   an explicit opt-in.** The fragment dir grants "goddns may make named
-   authoritative for arbitrary names" — a strictly larger privilege than goddns
-   holds today — and store-poisoning (§6) means the daemon can influence content
-   even with lifecycle gated. Convenience isn't worth making that grant the
-   default. When opted in, fragment writes stay **root-CLI with operator-typed
-   zone names only** (never names sourced from the store/daemon).
-2. **Daemon file access → option (b) (store-only daemon + privileged renderer) for
-   any internet-exposed deployment;** option (a) (direct file write) only for a
-   CLI-only / non-exposed install. Contains a daemon compromise to store rows the
-   root renderer re-validates (§6).
-3. **Zone dir → `/var/lib/goddns/zones/`** (data goddns owns/rewrites, not config;
-   no `/etc` config-management collisions). Hard startup precondition: it must be
-   a path **no hand-static zone uses**, so a path collision can't arise (§2).
-4. **Serial → date-based `YYYYMMDDnn`, floored on the live serial:**
-   `next = max(store, live, todayNN) + 1`, `nn`-overflow → `live + 1` (§3). The
-   integrity is the floor, not the format; plain unixtime is the safer-by-
-   construction alternative if we'd rather not implement the floor, but date-based
-   is fine *with* the floor.
-5. **DNSSEC → unsigned-only, confirmed, with a hard refusal gate.** goddns manages
-   the unsigned zone and never writes RRSIG/DNSKEY/NSEC\* (the `managed()`
-   exclusion); named's `dnssec-policy` / inline-signing signs on top. "Unsigned
-   first" is safe for **create**; it is **not** safe for **adopt of an
-   already-signed zone** — so adopt/import **refuses a currently-signed zone**
-   until Stage 5 (else it silently drops the zone's DNSSEC source and risks
-   bogus). The exclusion is the right primitive; the missing piece was the refusal
-   gate, now in §5.
+- **Stage 0** — the zone-file **surgical-edit engine**: parse (miekg) + line-map +
+  insert/replace/remove a record preserving everything else, SOA serial bump, and
+  the strict `named-checkzone` wrapper. Pure and testable; writes nothing live.
+  (This is the real new code — budget it.)
+- **Stage 1** — the `filezone` apply path (optimistic-lock → snapshot → atomic
+  write → `rndc reload` → semantic verify) behind `ddns.Mutator`; the editable-zone
+  allowlist + panel/dynamic refusal; CLI record CRUD on an enabled static zone.
+- **Stage 2** — raw-text mode (whole-file edit, checkzone-gated) + export
+  (download) + import (raw replace).
+- **Stage 3** — admin UI: structured record CRUD + the raw editor + the
+  optimistic-lock UX ("changed under you — reload"); reuse the record-editor
+  components.
+- **Stage 4** — wire the history Poller to the enabled static zones (the dual
+  purpose), and the option-(b) root helper for daemon writes.
+- **Stage 5** — DNSSEC interaction polish (inline-signing source edits; refuse
+  in-file-signed).
 
-## 9. Staged build (independent review per step, as in Phase 2)
-
-- **Stage 0** — store schema (`owned_zones` incl. `file_path` + `serial_floor`;
-  `zone_records` incl. writer-identity), the canonical zone **renderer** (new
-  code, not `named.Canonical` reuse — with test vectors for SOA/NS/`$TTL`/
-  `$ORIGIN`/RFC3597), and the strict `named-checkzone` validator. Pure and
-  testable; writes nothing live. **The M1 store-as-authority and M2 serial-floor
-  models must be reflected here** — they shape the schema.
-- **Stage 1** — the `filezone` Mutator (store → render → checkzone → atomic write
-  → `rndc reload` → verify) behind `ddns.Mutator`; route `recordmut` to pick the
-  backend by ownership; CLI record CRUD on an owned zone. **[R]** plus a
-  `goddns owned-zone verify` tripwire that re-checks store ↔ file ↔ live-serial
-  agreement for every owned zone (catches out-of-band edits / the split-brain
-  class cheaply).
-- **Stage 2** — zone lifecycle: `create` / `delete` + the named.conf fragment glue,
-  CLI/root-only; the privilege split enforced.
-- **Stage 3** — `adopt` / `import` (zone-file parse → store, diff vs live, the
-  migration path) + store-render `export`.
-- **Stage 4** — admin UI: owned-zone record CRUD (reuse the record editor),
-  import/export buttons; the daemon never crosses into zone lifecycle.
-- **Stage 5** — DNSSEC interop (inline-signing), signed owned zones.
-
-Each stage: design-conformant, snapshot-before, `checkzone`-gated, independently
-reviewed, squash-merged — same rhythm that carried Phase 2.
+Each stage: snapshot-before, checkzone-gated, optimistic-locked, independently
+reviewed, squash-merged — the rhythm that carried Phase 2.
