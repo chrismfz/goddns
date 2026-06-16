@@ -26,6 +26,8 @@ $TTL 3600
 			60 )		; minimum
 	IN	NS	ns1.example.
 	IN	NS	ns2.example.
+ns1	IN	A	9.9.9.1
+ns2	IN	A	9.9.9.2
 
 ; hosts
 www	IN	A	1.2.3.4		; the web

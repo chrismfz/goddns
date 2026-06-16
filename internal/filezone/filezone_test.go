@@ -19,6 +19,7 @@ $TTL 3600
 ; the apex
 @	IN	SOA	ns.example. host.example. 2024010101 3600 600 1209600 60
 @	IN	NS	ns.example.
+ns	IN	A	9.9.9.1
 www	IN	A	1.2.3.4		; the web
 mail	IN	A	5.6.7.8
 `
