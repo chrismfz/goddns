@@ -25,7 +25,8 @@ type Record struct {
 	TTL        uint32
 	TokenHash  string // sha256 hex of the bearer token
 	LastIP     string
-	LastUpdate time.Time
+	LastUpdate time.Time // when the IP last CHANGED (a DNS write happened)
+	LastSeen   time.Time // when the client last checked in (incl. nochg polls)
 	Disabled   bool
 }
 
@@ -49,9 +50,17 @@ func Open(path string) (*Store, error) {
 		token_hash  TEXT NOT NULL UNIQUE,
 		last_ip     TEXT NOT NULL DEFAULT '',
 		last_update INTEGER NOT NULL DEFAULT 0,
+		last_seen   INTEGER NOT NULL DEFAULT 0,
 		disabled    INTEGER NOT NULL DEFAULT 0
 	);`
 	if _, err := db.Exec(schema); err != nil {
+		return nil, err
+	}
+	// Migrate DBs created before last_seen existed. ADD COLUMN errors with
+	// "duplicate column name" once the column is present, so the column-already-
+	// exists case is the expected no-op, not a failure.
+	if _, err := db.Exec(`ALTER TABLE records ADD COLUMN last_seen INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
 		return nil, err
 	}
 	// Zone history snapshots (Phase 1): one row per captured zone state.
@@ -113,18 +122,19 @@ func (s *Store) Add(name, zone string, ttl uint32) (Record, string, error) {
 
 func (s *Store) scan(row interface{ Scan(...any) error }) (Record, error) {
 	var r Record
-	var ts int64
+	var updTs, seenTs int64
 	var dis int
-	err := row.Scan(&r.ID, &r.FQDN, &r.Zone, &r.TTL, &r.TokenHash, &r.LastIP, &ts, &dis)
+	err := row.Scan(&r.ID, &r.FQDN, &r.Zone, &r.TTL, &r.TokenHash, &r.LastIP, &updTs, &seenTs, &dis)
 	if err != nil {
 		return Record{}, err
 	}
-	r.LastUpdate = time.Unix(ts, 0)
+	r.LastUpdate = time.Unix(updTs, 0)
+	r.LastSeen = time.Unix(seenTs, 0)
 	r.Disabled = dis != 0
 	return r, nil
 }
 
-const cols = `id, fqdn, zone, ttl, token_hash, last_ip, last_update, disabled`
+const cols = `id, fqdn, zone, ttl, token_hash, last_ip, last_update, last_seen, disabled`
 
 // Lookup finds an enabled record by plaintext token (matched on its hash).
 func (s *Store) Lookup(tok string) (Record, error) {
@@ -191,21 +201,34 @@ func (s *Store) Get(name string) (Record, error) {
 	return r, err
 }
 
+// MarkUpdated records an IP change: it stamps both last_update (the change)
+// and last_seen (a change is also a check-in).
 func (s *Store) MarkUpdated(id int64, ip string) error {
-	_, err := s.db.Exec(`UPDATE records SET last_ip=?, last_update=? WHERE id=?`,
-		ip, time.Now().Unix(), id)
+	now := time.Now().Unix()
+	_, err := s.db.Exec(`UPDATE records SET last_ip=?, last_update=?, last_seen=? WHERE id=?`,
+		ip, now, now, id)
+	return err
+}
+
+// MarkSeen records a check-in without an IP change (a nochg poll): it stamps
+// last_seen only, leaving last_ip/last_update untouched. This is the liveness
+// signal — proof the client is still polling even though DNS didn't change.
+func (s *Store) MarkSeen(id int64) error {
+	_, err := s.db.Exec(`UPDATE records SET last_seen=? WHERE id=?`, time.Now().Unix(), id)
 	return err
 }
 
 func (r Record) String() string {
-	last := "never"
-	if !r.LastUpdate.IsZero() && r.LastUpdate.Unix() > 0 {
-		last = r.LastUpdate.Format(time.RFC3339)
+	fmtTime := func(t time.Time) string {
+		if t.IsZero() || t.Unix() <= 0 {
+			return "never"
+		}
+		return t.Format(time.RFC3339)
 	}
 	state := "enabled"
 	if r.Disabled {
 		state = "disabled"
 	}
-	return fmt.Sprintf("#%d %-30s zone=%-20s ttl=%-4d last=%-15s (%s) %s",
-		r.ID, r.FQDN, r.Zone, r.TTL, r.LastIP, last, state)
+	return fmt.Sprintf("#%d %-30s zone=%-20s ttl=%-4d last=%-15s (changed %s, seen %s) %s",
+		r.ID, r.FQDN, r.Zone, r.TTL, r.LastIP, fmtTime(r.LastUpdate), fmtTime(r.LastSeen), state)
 }

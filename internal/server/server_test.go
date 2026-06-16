@@ -89,13 +89,20 @@ func TestSimpleUpdateFlow(t *testing.T) {
 	if code != 200 || body != "good 2.85.101.222" {
 		t.Fatalf("first update: %d %q", code, body)
 	}
-	// same IP again -> nochg, no backend call
+	// same IP again -> nochg, no backend call, but the check-in is recorded
+	// (last_seen) so a stable-IP client still shows as alive on the dashboard.
 	code, body = get(t, h, "/update/"+tok, nil, "2.85.101.222:55555")
 	if code != 200 || body != "nochg 2.85.101.222" {
 		t.Fatalf("nochg: %d %q", code, body)
 	}
 	if len(fb.calls) != 1 {
 		t.Fatalf("backend calls: %v", fb.calls)
+	}
+	if rec, err := st.Get("home.myip.gr"); err != nil {
+		t.Fatalf("get: %v", err)
+	} else if rec.LastSeen.Unix() <= 0 || rec.LastIP != "2.85.101.222" {
+		t.Fatalf("nochg poll should record a check-in without changing the IP, got seen=%v ip=%q",
+			rec.LastSeen, rec.LastIP)
 	}
 
 	// explicit override via query
