@@ -451,7 +451,9 @@ line(s) (your comments / `$TTL` / ordering survive), bumps the serial,
 `rndc reload`s. It **coexists with `nano`**: an edit is done under an advisory
 lock with a byte-compare, so a concurrent hand-edit is refused ("changed under
 you — reload"), never clobbered. It never touches a dynamic zone (those use
-`record`), a slave, a panel-managed zone, or one you didn't enable.
+`record`), a slave, a panel-managed zone, a zone **signed in its file**
+(RRSIG/DNSKEY present — edit those via `named`'s inline-signing, whose *unsigned*
+source goddns happily edits and lets named re-sign), or one you didn't enable.
 
     goddns zone enable myip.gr            # checks it's a safe static master, prints the line to add
     # add it to editable_zones in goddns.conf, then:

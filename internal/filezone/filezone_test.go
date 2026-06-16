@@ -106,6 +106,19 @@ func TestRefuseOutOfZoneRecord(t *testing.T) {
 	}
 }
 
+func TestRefuseInFileSignedZone(t *testing.T) {
+	e, path := testEditor(t, staticZone(), "example")
+	// a zone signed IN the file (a DNSSEC record present) must be refused — a
+	// record edit + serial bump would invalidate the signatures.
+	os.WriteFile(path, []byte(zoneText+"example. 3600 IN NSEC www.example. A NS SOA RRSIG NSEC\n"), 0o640)
+	op := []ddns.Op{{Action: ddns.AddRR, RR: mustRR(t, "new.example. 60 IN A 9.9.9.9")}}
+	if _, err := e.Apply("example", op); err == nil || !strings.Contains(err.Error(), "signed in the file") {
+		t.Fatalf("an in-file-signed zone must be refused, got %v", err)
+	}
+	// (an inline-signed zone has an UNSIGNED source — no DNSSEC records in the
+	// file — so it passes; that's the plain-zone path, covered elsewhere.)
+}
+
 func TestRefuseDynamic(t *testing.T) {
 	z := staticZone()
 	z.Dynamic = true
