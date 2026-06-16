@@ -71,6 +71,7 @@ fi
 if [ -f "%{buildroot}/lib/systemd/system/goddns.service" ]; then
   mkdir -p "%{buildroot}%{_unitdir}"
   mv "%{buildroot}/lib/systemd/system/goddns.service" "%{buildroot}%{_unitdir}/"
+  mv "%{buildroot}/lib/systemd/system/goddns-zoned.service" "%{buildroot}%{_unitdir}/" 2>/dev/null || true
   rm -rf "%{buildroot}/lib/systemd"
 fi
 
@@ -83,6 +84,7 @@ mkdir -p "%{buildroot}/etc/goddns/proxy.d"
 %license /usr/share/licenses/goddns/LICENSE
 %{_bindir}/goddns
 %{_unitdir}/goddns.service
+%{_unitdir}/goddns-zoned.service
 %attr(0750,root,goddns) %dir /etc/goddns
 %attr(2770,root,goddns) %dir /etc/goddns/proxy.d
 %attr(0640,root,goddns) %config(noreplace) /etc/goddns/goddns.conf
