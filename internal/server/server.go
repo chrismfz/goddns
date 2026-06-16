@@ -109,7 +109,15 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 
 func (s *Server) doUpdate(rec store.Record, ip net.IP) (changed bool, err error) {
 	if rec.LastIP == ip.String() {
-		return false, nil // nochg: skip the DNS write entirely
+		// nochg: skip the DNS write, but still record the check-in so the
+		// dashboard's "last seen" reflects that the client is alive and
+		// polling even when its IP is stable. Best-effort: a stamp failure
+		// here must not turn a healthy nochg into an error to the client.
+		if err := s.Store.MarkSeen(rec.ID); err != nil {
+			log.Printf("warning: could not persist last-seen for %s "+
+				"(check /var/lib/goddns ownership): %v", rec.FQDN, err)
+		}
+		return false, nil
 	}
 	if err := s.Backend().Update(rec.FQDN, rec.Zone, ip, rec.TTL); err != nil {
 		return false, err

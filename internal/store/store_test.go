@@ -15,6 +15,44 @@ func openTemp(t *testing.T) *Store {
 	return st
 }
 
+func TestMarkSeenVsUpdated(t *testing.T) {
+	st := openTemp(t)
+	rec, tok, err := st.Add("home.myip.gr", "myip.gr", 60)
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// a fresh record has never changed nor been seen
+	got, _ := st.Lookup(tok)
+	if !got.LastUpdate.IsZero() && got.LastUpdate.Unix() > 0 {
+		t.Fatalf("new record should have no last_update, got %v", got.LastUpdate)
+	}
+	if !got.LastSeen.IsZero() && got.LastSeen.Unix() > 0 {
+		t.Fatalf("new record should have no last_seen, got %v", got.LastSeen)
+	}
+
+	// a nochg check-in stamps last_seen ONLY — last_ip/last_update untouched
+	if err := st.MarkSeen(rec.ID); err != nil {
+		t.Fatalf("markSeen: %v", err)
+	}
+	got, _ = st.Lookup(tok)
+	if got.LastSeen.Unix() <= 0 {
+		t.Fatal("MarkSeen did not stamp last_seen")
+	}
+	if got.LastIP != "" || got.LastUpdate.Unix() > 0 {
+		t.Fatalf("MarkSeen must not touch last_ip/last_update, got ip=%q update=%v", got.LastIP, got.LastUpdate)
+	}
+
+	// an IP change stamps both last_update and last_seen
+	if err := st.MarkUpdated(rec.ID, "203.0.113.10"); err != nil {
+		t.Fatalf("markUpdated: %v", err)
+	}
+	got, _ = st.Lookup(tok)
+	if got.LastIP != "203.0.113.10" || got.LastUpdate.Unix() <= 0 || got.LastSeen.Unix() <= 0 {
+		t.Fatalf("MarkUpdated should set ip+update+seen, got ip=%q update=%v seen=%v",
+			got.LastIP, got.LastUpdate, got.LastSeen)
+	}
+}
+
 func TestAddLookupDel(t *testing.T) {
 	st := openTemp(t)
 

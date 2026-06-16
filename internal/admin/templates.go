@@ -100,10 +100,11 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <main>
 
 <h2>DDNS records</h2>
-<table><thead><tr><th>FQDN</th><th>zone</th><th>TTL</th><th>last IP</th><th>last seen</th><th>state</th><th></th></tr></thead><tbody>
+<table><thead><tr><th>FQDN</th><th>zone</th><th>TTL</th><th>last IP</th><th>last change</th><th>last seen</th><th>state</th><th></th></tr></thead><tbody>
 {{range .Records}}<tr>
 <td>{{.FQDN}}</td><td class="muted">{{.Zone}}</td><td>{{.TTL}}</td>
 <td>{{if .LastIP}}{{.LastIP}}{{else}}<span class="muted">—</span>{{end}}</td>
+<td class="muted">{{.LastChange}}</td>
 <td class="muted">{{.LastSeen}}</td>
 <td>{{if eq .State "enabled"}}<span class="ok">{{.State}}</span>{{else}}<span class="warn">{{.State}}</span>{{end}}</td>
 <td style="white-space:nowrap">
@@ -111,7 +112,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <form class="inline" method="post" action="/ddns/rotate"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fqdn" value="{{.FQDN}}"><button type="submit">rotate</button></form>
 <form class="inline" method="post" action="/ddns/del"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fqdn" value="{{.FQDN}}"><button class="danger" type="submit">delete</button></form>
 </td>
-</tr>{{else}}<tr><td colspan="7" class="muted">(no records)</td></tr>{{end}}
+</tr>{{else}}<tr><td colspan="8" class="muted">(no records)</td></tr>{{end}}
 </tbody></table>
 
 <div class="card"><form method="post" action="/ddns/add"><div class="row">

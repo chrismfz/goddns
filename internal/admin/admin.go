@@ -722,8 +722,8 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, ad *config
 }
 
 type recordView struct {
-	FQDN, Zone, LastIP, LastSeen, State string
-	TTL                                 uint32
+	FQDN, Zone, LastIP, LastChange, LastSeen, State string
+	TTL                                             uint32
 }
 
 type proxyView struct {
@@ -741,19 +741,21 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 		log.Printf("admin: list: %v", err)
 		return
 	}
+	stamp := func(t time.Time) string {
+		if t.IsZero() || t.Unix() <= 0 {
+			return "never"
+		}
+		return t.Format("2006-01-02 15:04")
+	}
 	var rv []recordView
 	for _, rec := range recs {
-		seen := "never"
-		if !rec.LastUpdate.IsZero() && rec.LastUpdate.Unix() > 0 {
-			seen = rec.LastUpdate.Format("2006-01-02 15:04")
-		}
 		state := "enabled"
 		if rec.Disabled {
 			state = "disabled"
 		}
 		rv = append(rv, recordView{
-			FQDN: rec.FQDN, Zone: rec.Zone, TTL: rec.TTL,
-			LastIP: rec.LastIP, LastSeen: seen, State: state,
+			FQDN: rec.FQDN, Zone: rec.Zone, TTL: rec.TTL, LastIP: rec.LastIP,
+			LastChange: stamp(rec.LastUpdate), LastSeen: stamp(rec.LastSeen), State: state,
 		})
 	}
 
