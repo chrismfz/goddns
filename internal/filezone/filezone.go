@@ -7,7 +7,9 @@
 //
 // It refuses anything outside its remit: a zone not in named.conf, a dynamic
 // zone (that's RFC2136 / recordmut), a slave, a zone not on the operator's
-// editable allowlist, a symlinked file, or a file that looks panel-managed.
+// editable allowlist, a symlinked file, a file that looks panel-managed, or one
+// signed IN the file (DNSSEC) — goddns edits only unsigned sources, leaving
+// named's inline-signing to re-sign on reload.
 package filezone
 
 import (
@@ -183,8 +185,8 @@ func PreflightEnable(namedConf, zone string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if m := panelMarker(orig); m != "" {
-		return "", fmt.Errorf("%s looks panel-managed (%s)", z.Path, m)
+	if err := screen(z.Path, orig, zone); err != nil {
+		return "", err
 	}
 	if _, err := zonefile.Parse(orig, zone); err != nil {
 		return "", fmt.Errorf("zone file doesn't parse: %w", err)
@@ -202,8 +204,8 @@ func (e *Editor) Preview(zone string, ops []ddns.Op) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if m := panelMarker(orig); m != "" {
-		return nil, fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", z.Path, m)
+	if err := screen(z.Path, orig, zone); err != nil {
+		return nil, err
 	}
 	newBytes, err := e.compute(zone, orig, ops)
 	if err != nil {
@@ -230,8 +232,8 @@ func (e *Editor) Apply(zone string, ops []ddns.Op) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if m := panelMarker(orig); m != "" {
-		return nil, fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", z.Path, m)
+	if err := screen(z.Path, orig, zone); err != nil {
+		return nil, err
 	}
 
 	newBytes, err := e.compute(zone, orig, ops)
@@ -271,8 +273,8 @@ func (e *Editor) ReplaceRaw(zone string, newBytes, base []byte) (*Result, error)
 	if err != nil {
 		return nil, err
 	}
-	if m := panelMarker(cur); m != "" {
-		return nil, fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", z.Path, m)
+	if err := screen(z.Path, cur, zone); err != nil {
+		return nil, err
 	}
 	if base != nil && !bytes.Equal(cur, base) {
 		return nil, fmt.Errorf("zone %q changed under you (a concurrent edit) — reload and reapply", zone)
@@ -296,8 +298,8 @@ func (e *Editor) PreviewRaw(zone string, newBytes []byte) (*Result, []byte, erro
 	if err != nil {
 		return nil, nil, err
 	}
-	if m := panelMarker(cur); m != "" {
-		return nil, nil, fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", z.Path, m)
+	if err := screen(z.Path, cur, zone); err != nil {
+		return nil, nil, err
 	}
 	newBytes, err = normalizeRawSerial(zone, cur, newBytes)
 	if err != nil {
@@ -558,6 +560,42 @@ func writePreserving(path string, content []byte) error {
 }
 
 var panelNames = []string{"cpanel", "directadmin", "virtualmin", "plesk", "ispconfig"}
+
+// screen rejects content goddns must not edit: a panel-managed file (panelMarker)
+// or a zone it can't certify is an unsigned source (unsignedConcern). A zone
+// using named's inline-signing / dnssec-policy has an UNSIGNED source — no DNSSEC
+// records, fully parseable — so it passes here and named re-signs it on reload.
+func screen(path string, content []byte, zone string) error {
+	if m := panelMarker(content); m != "" {
+		return fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", path, m)
+	}
+	if reason := unsignedConcern(content, zone); reason != "" {
+		return fmt.Errorf("%s %s — goddns edits only unsigned sources it can fully read; "+
+			"use named's inline-signing (dnssec-policy), or unsign/inline the file first", path, reason)
+	}
+	return nil
+}
+
+// unsignedConcern returns why the file can't be safely edited as an unsigned
+// source, or "". It FAILS CLOSED: it refuses both a file carrying DNSSEC records
+// itself (RRSIG/DNSKEY/NSEC/NSEC3/NSEC3PARAM/CDS/CDNSKEY) AND one it can't fully
+// parse ($INCLUDE — which could pull in key material — or a line it can't read),
+// since a record edit + serial bump would break any signatures it didn't see.
+func unsignedConcern(content []byte, zone string) string {
+	zp := dns.NewZoneParser(bytes.NewReader(content), dns.Fqdn(zone), "")
+	zp.SetIncludeAllowed(false)
+	var rrs []dns.RR
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		rrs = append(rrs, rr)
+	}
+	if signed, _ := named.Signed(rrs); signed {
+		return "is signed in the file (RRSIG/DNSKEY/NSEC* present)"
+	}
+	if err := zp.Err(); err != nil {
+		return fmt.Sprintf("can't be fully parsed (%v) — possibly $INCLUDE'd key material", err)
+	}
+	return ""
+}
 
 // panelMarker returns a recognizable control-panel signature found anywhere in
 // the zone file (best-effort), or "" — goddns refuses to edit a panel's zone.
