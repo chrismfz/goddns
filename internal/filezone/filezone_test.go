@@ -115,8 +115,27 @@ func TestRefuseInFileSignedZone(t *testing.T) {
 	if _, err := e.Apply("example", op); err == nil || !strings.Contains(err.Error(), "signed in the file") {
 		t.Fatalf("an in-file-signed zone must be refused, got %v", err)
 	}
-	// (an inline-signed zone has an UNSIGNED source — no DNSSEC records in the
-	// file — so it passes; that's the plain-zone path, covered elsewhere.)
+}
+
+func TestUnsignedConcern(t *testing.T) {
+	// a clean unsigned zone (incl. inline-signing's unsigned source) is fine
+	if r := unsignedConcern([]byte(zoneText), "example"); r != "" {
+		t.Fatalf("clean zone flagged: %q", r)
+	}
+	// a delegation DS is NOT a signing artifact (DS lives in the parent) — allow
+	ds := zoneText + "sub.example. 3600 IN DS 12345 13 2 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+	if r := unsignedConcern([]byte(ds), "example"); r != "" {
+		t.Fatalf("a delegation DS was falsely flagged as signed: %q", r)
+	}
+	// in-file DNSSEC -> refuse
+	if r := unsignedConcern([]byte(zoneText+"example. 3600 IN NSEC www.example. A NS SOA NSEC\n"), "example"); r == "" {
+		t.Fatal("an in-file NSEC was not flagged")
+	}
+	// $INCLUDE'd material (a manually-signed BIND pattern) -> fail closed, since
+	// the parser stops and DNSSEC records behind it would be invisible
+	if r := unsignedConcern([]byte("$INCLUDE Kexample.+008+12345.key\n"+zoneText), "example"); r == "" {
+		t.Fatal("an $INCLUDE'd zone was not refused (fail-closed)")
+	}
 }
 
 func TestRefuseDynamic(t *testing.T) {

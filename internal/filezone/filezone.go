@@ -562,26 +562,39 @@ func writePreserving(path string, content []byte) error {
 var panelNames = []string{"cpanel", "directadmin", "virtualmin", "plesk", "ispconfig"}
 
 // screen rejects content goddns must not edit: a panel-managed file (panelMarker)
-// or a zone signed IN the file (RRSIG/DNSKEY/NSEC* present). A zone using named's
-// inline-signing / dnssec-policy has an UNSIGNED source — no DNSSEC records in
-// the file — so it passes here and named re-signs it on reload.
+// or a zone it can't certify is an unsigned source (unsignedConcern). A zone
+// using named's inline-signing / dnssec-policy has an UNSIGNED source — no DNSSEC
+// records, fully parseable — so it passes here and named re-signs it on reload.
 func screen(path string, content []byte, zone string) error {
 	if m := panelMarker(content); m != "" {
 		return fmt.Errorf("%s looks panel-managed (%s) — goddns won't edit a panel's zone", path, m)
 	}
-	if signedInFile(content, zone) {
-		return fmt.Errorf("%s is signed in the file (RRSIG/DNSKEY/NSEC* present) — goddns edits only unsigned sources; "+
-			"use named's inline-signing (dnssec-policy), or unsign the file first", path)
+	if reason := unsignedConcern(content, zone); reason != "" {
+		return fmt.Errorf("%s %s — goddns edits only unsigned sources it can fully read; "+
+			"use named's inline-signing (dnssec-policy), or unsign/inline the file first", path, reason)
 	}
 	return nil
 }
 
-// signedInFile reports whether the zone file carries DNSSEC records itself
-// (RRSIG/DNSKEY/NSEC/NSEC3/NSEC3PARAM/CDS/CDNSKEY) — i.e. an in-file-signed zone,
-// which a record edit + serial bump would break.
-func signedInFile(content []byte, zone string) bool {
-	signed, _ := named.Signed(parseRecords(content, zone))
-	return signed
+// unsignedConcern returns why the file can't be safely edited as an unsigned
+// source, or "". It FAILS CLOSED: it refuses both a file carrying DNSSEC records
+// itself (RRSIG/DNSKEY/NSEC/NSEC3/NSEC3PARAM/CDS/CDNSKEY) AND one it can't fully
+// parse ($INCLUDE — which could pull in key material — or a line it can't read),
+// since a record edit + serial bump would break any signatures it didn't see.
+func unsignedConcern(content []byte, zone string) string {
+	zp := dns.NewZoneParser(bytes.NewReader(content), dns.Fqdn(zone), "")
+	zp.SetIncludeAllowed(false)
+	var rrs []dns.RR
+	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
+		rrs = append(rrs, rr)
+	}
+	if signed, _ := named.Signed(rrs); signed {
+		return "is signed in the file (RRSIG/DNSKEY/NSEC* present)"
+	}
+	if err := zp.Err(); err != nil {
+		return fmt.Sprintf("can't be fully parsed (%v) — possibly $INCLUDE'd key material", err)
+	}
+	return ""
 }
 
 // panelMarker returns a recognizable control-panel signature found anywhere in
