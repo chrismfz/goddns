@@ -67,8 +67,25 @@ func TestStatsBytesIn(t *testing.T) {
 	}
 }
 
+func TestStatsSeedsConfiguredHosts(t *testing.T) {
+	// configured hosts appear in the snapshot immediately (at zero), before any
+	// request, so the dashboard lists them instead of looking empty.
+	p := newProxy(t, map[string]config.ProxyRule{
+		"a.myip.gr": {Upstream: "http://127.0.0.1:1"},
+		"b.myip.gr": {Upstream: "http://127.0.0.1:1"},
+	})
+	if n := len(p.Stats()); n != 2 {
+		t.Fatalf("configured hosts not seeded: %d entries, want 2", n)
+	}
+	s, ok := stat(p, "a.myip.gr")
+	if !ok || s.Requests != 0 || !s.LastSeen.IsZero() {
+		t.Fatalf("seeded host should start at zero/never: ok=%v %+v", ok, s)
+	}
+}
+
 func TestStatsUnknownHostNoEntry(t *testing.T) {
 	p := newProxy(t, map[string]config.ProxyRule{"a.myip.gr": {Upstream: "http://127.0.0.1:1"}})
+	before := len(p.Stats()) // the seeded configured host(s)
 	// a flood of random Host headers (the 404 path) must NOT create counters,
 	// or the map would grow without bound on the public listener.
 	for _, h := range []string{"evil1.example", "evil2.example", "random-scan.example"} {
@@ -76,8 +93,13 @@ func TestStatsUnknownHostNoEntry(t *testing.T) {
 			t.Fatalf("unknown host %s: code %d, want 404", h, code)
 		}
 	}
-	if n := len(p.Stats()); n != 0 {
-		t.Fatalf("unknown hosts created %d stat entries, want 0", n)
+	if n := len(p.Stats()); n != before {
+		t.Fatalf("unknown hosts created %d new stat entries, want 0", n-before)
+	}
+	for _, s := range p.Stats() {
+		if s.Host != "a.myip.gr" {
+			t.Fatalf("an unknown host leaked into stats: %q", s.Host)
+		}
 	}
 }
 
