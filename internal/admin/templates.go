@@ -154,6 +154,21 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 </form></div>
 <div class="muted" style="font-size:.72rem;margin-top:.4rem">goddns manages <code>proxy.d/&lt;host&gt;.conf</code> fragments; vhosts marked <span class="muted">conf</span> live in goddns.conf and stay read-only here.</div>
 {{else}}<div class="muted" style="font-size:.72rem;margin-top:.4rem">proxy hosts are read-only here — edit goddns.conf (hot-reloaded). DDNS records are managed above.</div>{{end}}
+
+{{if .HasStats}}
+<h2>Proxy traffic <span class="muted" style="font-size:.7rem;font-weight:normal">since start · live</span></h2>
+<table><thead><tr><th>host</th><th>active</th><th>requests</th><th>in</th><th>out</th><th>2xx / 3xx / 4xx / 5xx</th><th>last seen</th></tr></thead><tbody>
+{{range .ProxyStats}}<tr>
+<td>{{.Host}}</td>
+<td>{{.Active}}</td>
+<td>{{.Requests}}</td>
+<td>{{.In}}</td>
+<td>{{.Out}}</td>
+<td class="muted">{{.Codes}}</td>
+<td class="muted">{{.LastSeen}}</td>
+</tr>{{else}}<tr><td colspan="7" class="muted">(no traffic yet)</td></tr>{{end}}
+</tbody></table>
+{{end}}
 {{end}}
 
 </main></body></html>{{end}}

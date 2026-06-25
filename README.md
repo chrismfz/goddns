@@ -274,8 +274,13 @@ the same TLS and port — no extra listener, no port games):
     allow   = ["84.54.49.0/24", "94.67.0.0/16"]
     users   = ["chris:$2a$10$..."]      # goddns passwd -user chris
 
-It shows the DDNS records (last IP / last seen), the proxy table, and a tail
-of the logs, and lets you **add / rotate / delete DDNS tokens**. Each record
+It shows the DDNS records (last IP / last seen), the proxy table, a
+**per-host traffic panel** (live active connections, request count, bytes
+in/out and a 2xx/3xx/4xx/5xx breakdown — including blocked/forbidden hits, so
+attack traffic is visible — and bandwidth from long-lived BMC/console sessions
+too), and a tail of the logs, and lets you **add / rotate / delete DDNS
+tokens**. The traffic counters are in-memory and cumulative since start (they
+reset on restart; no disk I/O on the request path). Each record
 has a **help** link with ready copy-paste client snippets (curl, cron,
 MikroTik, router DynDNS2) for that hostname — set `public_host` so they're
 filled in with your server name and port. Tokens are stored hashed and

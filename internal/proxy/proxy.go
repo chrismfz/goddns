@@ -37,14 +37,19 @@ type rule struct {
 // Proxy routes requests by Host header. Zero value is unusable; use New.
 type Proxy struct {
 	rules atomic.Pointer[map[string]*rule]
+	stats *stats
 }
 
 func New() *Proxy {
-	p := &Proxy{}
+	p := &Proxy{stats: newStats()}
 	empty := map[string]*rule{}
 	p.rules.Store(&empty)
 	return p
 }
+
+// Stats returns a per-host traffic snapshot (cumulative since start) for the
+// admin dashboard.
+func (p *Proxy) Stats() []HostStat { return p.stats.snapshot() }
 
 // ValidHost reports whether h is a syntactically valid proxy vhost key: a
 // lowercase hostname (labels of letters/digits/hyphens separated by dots, no
@@ -153,6 +158,9 @@ func (p *Proxy) Update(cfg *config.Config) error {
 			old.transport.CloseIdleConnections()
 		}
 	}
+	// Forget counters for hosts the reload removed, so the stats map mirrors
+	// the live table rather than growing across config churn.
+	p.stats.prune(table)
 	return nil
 }
 
@@ -277,6 +285,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		alog().Printf("proxy-access %s %s \"%s %s\" %d %dB %s",
 			host, peerStr, r.Method, r.URL.RequestURI(),
 			lw.status, lw.bytes, time.Since(start).Round(time.Millisecond))
+		// Per-host accounting (only for a known host; lw.stat stays nil for a
+		// 404'd unknown host so random Host headers can't allocate counters).
+		if lw.stat != nil {
+			lw.stat.bytesOut.Add(lw.bytes) // post-hijack bytes are counted live via countConn
+			lw.stat.note(lw.status)
+		}
 	}()
 
 	table := *p.rules.Load()
@@ -285,6 +299,16 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(lw, "unknown host", http.StatusNotFound)
 		return
 	}
+
+	// The host is real: start counting. Done before the allow/auth gates so
+	// blocked traffic (403/401/429) is visible too, not just successful hits.
+	c := p.stats.host(host)
+	c.requests.Add(1)
+	c.lastSeen.Store(start.Unix())
+	c.active.Add(1)
+	defer c.active.Add(-1)
+	lw.stat = c
+	r.Body = &countReadCloser{rc: r.Body, n: &c.bytesIn}
 	if len(rl.allow) > 0 {
 		allowed := false
 		for _, n := range rl.allow {
@@ -341,6 +365,7 @@ type logWriter struct {
 	http.ResponseWriter
 	status int
 	bytes  int64
+	stat   *counters // nil for an unknown host; set once the route is known
 }
 
 func (l *logWriter) Unwrap() http.ResponseWriter { return l.ResponseWriter }
@@ -368,12 +393,19 @@ func (l *logWriter) Flush() {
 }
 
 func (l *logWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
-	h, ok := l.ResponseWriter.(http.Hijacker)
+	hj, ok := l.ResponseWriter.(http.Hijacker)
 	if !ok {
 		return nil, nil, fmt.Errorf("hijack not supported")
 	}
 	if l.status == 0 {
 		l.status = http.StatusSwitchingProtocols
 	}
-	return h.Hijack()
+	conn, rw, err := hj.Hijack()
+	if err != nil || l.stat == nil {
+		return conn, rw, err
+	}
+	// Wrap the hijacked conn so a long-lived console/websocket session still
+	// contributes its bytes to the per-host counters (the access log already
+	// gives up at 101/0B here).
+	return &countConn{Conn: conn, in: &l.stat.bytesIn, out: &l.stat.bytesOut}, rw, nil
 }
