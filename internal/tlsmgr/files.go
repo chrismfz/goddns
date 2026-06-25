@@ -42,7 +42,13 @@ func (c *Files) load() error {
 	// Leaf populated on recent Go, but parse defensively to be version-proof.
 	leaf := cert.Leaf
 	if leaf == nil && len(cert.Certificate) > 0 {
-		leaf, _ = x509.ParseCertificate(cert.Certificate[0])
+		var perr error
+		if leaf, perr = x509.ParseCertificate(cert.Certificate[0]); perr != nil {
+			// Hybrid name-matching needs the leaf; without it the file cert can
+			// still be served as a last resort, but log so the operator knows
+			// why a name they expected the file to cover keeps hitting ACME.
+			log.Printf("tls: parsing leaf of %s failed — hybrid name-matching disabled for it: %v", c.certFile, perr)
+		}
 	}
 	st, _ := os.Stat(c.certFile)
 	c.mu.Lock()

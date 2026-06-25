@@ -50,7 +50,7 @@ func (h *Hybrid) SetACME(a certSource) { h.acme = a }
 func (h *Hybrid) SetAllowed(names []string) {
 	m := make(map[string]struct{}, len(names))
 	for _, n := range names {
-		if n = normName(n); n != "" {
+		if n = NormName(n); n != "" {
 			m[n] = struct{}{}
 		}
 	}
@@ -67,13 +67,13 @@ func (h *Hybrid) Decide(name string) error {
 
 func (h *Hybrid) allowed(name string) bool {
 	m := *h.allow.Load()
-	_, ok := m[normName(name)]
+	_, ok := m[NormName(name)]
 	return ok
 }
 
 // GetCertificate is plugged into tls.Config.GetCertificate.
 func (h *Hybrid) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	name := normName(hello.ServerName)
+	name := NormName(hello.ServerName)
 
 	// 1. The static file cert, if it actually covers this name and is in date.
 	if h.files != nil {
@@ -105,6 +105,9 @@ func (h *Hybrid) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, e
 	return nil, fmt.Errorf("hybrid: no certificate source available for %q", name)
 }
 
-func normName(s string) string {
+// NormName canonicalises a hostname for SNI/allowlist comparison: trimmed,
+// lowercased, trailing dot stripped. Exported so callers building the allowlist
+// (serve.go) normalise names exactly as the matcher does.
+func NormName(s string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
 }

@@ -251,8 +251,7 @@ func buildTLS(cfg *config.Config) (*tlsSource, error) {
 func hybridNames(cfg *config.Config) []string {
 	set := map[string]struct{}{}
 	add := func(s string) {
-		s = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(s)), ".")
-		if s != "" {
+		if s = tlsmgr.NormName(s); s != "" {
 			set[s] = struct{}{}
 		}
 	}
