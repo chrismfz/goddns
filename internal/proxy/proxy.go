@@ -158,9 +158,13 @@ func (p *Proxy) Update(cfg *config.Config) error {
 			old.transport.CloseIdleConnections()
 		}
 	}
-	// Forget counters for hosts the reload removed, so the stats map mirrors
-	// the live table rather than growing across config churn.
+	// Forget counters for hosts the reload removed, and seed a zero entry for
+	// every configured host so the dashboard lists them immediately (at 0)
+	// rather than hiding the whole panel until the first request lands.
 	p.stats.prune(table)
+	for host := range table {
+		p.stats.host(host)
+	}
 	return nil
 }
 

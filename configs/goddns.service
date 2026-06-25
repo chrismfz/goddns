@@ -25,6 +25,13 @@ PrivateTmp=true
 ReadWritePaths=/var/lib/goddns
 ReadWritePaths=-/var/log/goddns.log
 ReadWritePaths=-/var/log/goddns-access.log
+# Web-UI proxy-vhost editing writes goddns-managed proxy.d/<host>.conf
+# fragments here. Without this, ProtectSystem=strict makes /etc read-only and
+# the edit fails with "read-only file system". Only proxy.d is opened up —
+# goddns.conf and goddns.env stay read-only to the daemon (it never rewrites
+# its own config). The leading "-" tolerates the dir being absent (pure-DDNS
+# installs that never created proxy.d).
+ReadWritePaths=-/etc/goddns/proxy.d
 ReadOnlyPaths=-/etc/letsencrypt
 ProtectKernelTunables=true
 ProtectControlGroups=true
