@@ -19,8 +19,9 @@ import (
 
 // TLS modes.
 const (
-	TLSFiles = "files" // cert_file/key_file from disk, hot-reloaded on renewal
-	TLSACME  = "acme"  // self-issued Let's Encrypt cert via DNS-01 over RFC2136
+	TLSFiles  = "files"  // cert_file/key_file from disk, hot-reloaded on renewal
+	TLSACME   = "acme"   // self-issued Let's Encrypt cert via DNS-01 over RFC2136
+	TLSHybrid = "hybrid" // file cert when it covers the SNI, else ACME on-demand (gated)
 )
 
 // Config holds the server configuration. Secrets can be overridden by env
@@ -234,8 +235,16 @@ func Load(path string) (*Config, error) {
 		if c.ACMEDomain == "" {
 			return nil, fmt.Errorf("tls_mode \"acme\" requires acme_domain")
 		}
+	case TLSHybrid:
+		// hybrid serves the static file cert whenever it covers the requested
+		// name, and falls back to ACME on-demand for anything it doesn't. The
+		// file pair is the base and is required; the ACME fallback degrades to
+		// a warning (files-only) at startup if its TSIG secret isn't set.
+		if c.CertFile == "" || c.KeyFile == "" {
+			return nil, fmt.Errorf("tls_mode \"hybrid\" requires cert_file and key_file (the static base; ACME is the fallback)")
+		}
 	default:
-		return nil, fmt.Errorf("tls_mode must be %q or %q (got %q)", TLSFiles, TLSACME, c.TLSMode)
+		return nil, fmt.Errorf("tls_mode must be %q, %q or %q (got %q)", TLSFiles, TLSACME, TLSHybrid, c.TLSMode)
 	}
 
 	for _, cidr := range c.TrustedProxies {
@@ -411,10 +420,10 @@ func (c *Config) NeedsRestart(old *Config) []string {
 	if c.TLSMode != old.TLSMode {
 		fields = append(fields, "tls_mode")
 	}
-	if c.TLSMode == TLSFiles && (c.CertFile != old.CertFile || c.KeyFile != old.KeyFile) {
+	if (c.TLSMode == TLSFiles || c.TLSMode == TLSHybrid) && (c.CertFile != old.CertFile || c.KeyFile != old.KeyFile) {
 		fields = append(fields, "cert_file/key_file")
 	}
-	if c.TLSMode == TLSACME &&
+	if (c.TLSMode == TLSACME || c.TLSMode == TLSHybrid) &&
 		(c.ACMEDomain != old.ACMEDomain || c.ACMECA != old.ACMECA ||
 			c.ACMEEmail != old.ACMEEmail ||
 			c.ACMEStorage != old.ACMEStorage || c.ACMETSIGName != old.ACMETSIGName ||

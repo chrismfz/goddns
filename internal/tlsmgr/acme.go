@@ -24,6 +24,14 @@ type ACMEOptions struct {
 	TSIGName     string
 	TSIGAlgo     string // hmac-sha256 etc. (named.conf spelling)
 	TSIGSecret   string // base64
+
+	// OnDemand (hybrid mode): issue certs lazily on first handshake for a name,
+	// instead of pre-obtaining Domain+ExtraDomains up front. Decide gates which
+	// names may be issued — REQUIRED when OnDemand is set, since the listener is
+	// public and an ungated solver would let any SNI trigger unbounded ACME
+	// orders (a Let's Encrypt rate-limit DoS). Returns nil to allow.
+	OnDemand bool
+	Decide   func(name string) error
 }
 
 // ACME wraps a certmagic Config; renewals happen in the background and the
@@ -81,6 +89,23 @@ func NewACME(ctx context.Context, o ACMEOptions) (*ACME, error) {
 		Logger: logger,
 	})
 	magic.Issuers = []certmagic.Issuer{issuer}
+
+	if o.OnDemand {
+		// Hybrid: issue lazily on first handshake, gated by Decide so only
+		// known names (proxy hosts / acme_domain / admin / public_host) can
+		// trigger an order. No up-front ManageSync — certs are obtained and
+		// then renewed the moment a permitted name is first requested.
+		decide := o.Decide
+		magic.OnDemand = &certmagic.OnDemandConfig{
+			DecisionFunc: func(_ context.Context, name string) error {
+				if decide == nil {
+					return fmt.Errorf("on-demand issuance for %q refused: no decision gate", name)
+				}
+				return decide(name)
+			},
+		}
+		return &ACME{magic: magic}, nil
+	}
 
 	// Loads from storage or obtains from the CA, then keeps it renewed.
 	domains := append([]string{o.Domain}, o.ExtraDomains...)

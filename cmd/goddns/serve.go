@@ -39,8 +39,9 @@ type runtime struct {
 // tlsSource is what buildTLS hands back: the handshake callback plus, in
 // acme mode, the ability to bring new hostnames under management at reload.
 type tlsSource struct {
-	getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)
-	manage  func(context.Context, []string) error // nil in files mode
+	getCert    func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+	manage     func(context.Context, []string) error // nil outside acme mode
+	setAllowed func([]string)                        // nil outside hybrid mode; updates the on-demand allowlist
 }
 
 // logTarget owns one hot-swappable log file (log_file / access_log in the
@@ -200,6 +201,40 @@ func buildTLS(cfg *config.Config) (*tlsSource, error) {
 			return nil, err
 		}
 		return &tlsSource{getCert: a.GetCertificate, manage: a.Manage}, nil
+	case config.TLSHybrid:
+		// Static file cert is the base; ACME on-demand is the gated fallback.
+		// A bad file pair shouldn't kill TLS if ACME can still serve, so a load
+		// failure degrades to ACME-only with a warning rather than a fatal.
+		f, err := tlsmgr.NewFiles(cfg.CertFile, cfg.KeyFile)
+		if err != nil {
+			log.Printf("hybrid: file cert unusable (%v) — relying on ACME on-demand", err)
+			f = nil
+		}
+		h := tlsmgr.NewHybrid(f)
+		h.SetAllowed(hybridNames(cfg))
+		if cfg.ACMETSIGSecret == "" {
+			log.Printf("hybrid: ACME fallback disabled (no acme_tsig_secret / tsig_secret) — " +
+				"serving the file cert only until a TSIG secret is set")
+		} else {
+			a, err := tlsmgr.NewACME(context.Background(), tlsmgr.ACMEOptions{
+				Domain:     cfg.ACMEDomain,
+				Email:      cfg.ACMEEmail,
+				CA:         cfg.ACMECA,
+				Storage:    cfg.ACMEStorage,
+				DNSServer:  cfg.DNSServer,
+				TSIGName:   cfg.ACMETSIGName,
+				TSIGAlgo:   cfg.ACMETSIGAlgo,
+				TSIGSecret: cfg.ACMETSIGSecret,
+				OnDemand:   true,
+				Decide:     h.Decide,
+			})
+			if err != nil {
+				log.Printf("hybrid: ACME fallback disabled (%v) — serving the file cert only", err)
+			} else {
+				h.SetACME(a)
+			}
+		}
+		return &tlsSource{getCert: h.GetCertificate, setAllowed: h.SetAllowed}, nil
 	default: // config.TLSFiles (validated in config.Load)
 		f, err := tlsmgr.NewFiles(cfg.CertFile, cfg.KeyFile)
 		if err != nil {
@@ -207,6 +242,35 @@ func buildTLS(cfg *config.Config) (*tlsSource, error) {
 		}
 		return &tlsSource{getCert: f.GetCertificate}, nil
 	}
+}
+
+// hybridNames is the on-demand allowlist for tls_mode = hybrid: every name
+// goddns already knows about and would legitimately terminate TLS for. Any SNI
+// outside this set is refused an ACME order (the public-listener rate-limit
+// guard). Recomputed on each reload so new proxy hosts become eligible.
+func hybridNames(cfg *config.Config) []string {
+	set := map[string]struct{}{}
+	add := func(s string) {
+		if s = tlsmgr.NormName(s); s != "" {
+			set[s] = struct{}{}
+		}
+	}
+	if cfg.ProxyEnabled {
+		for _, h := range cfg.ProxyHosts() {
+			add(h)
+		}
+	}
+	add(cfg.ACMEDomain)
+	add(cfg.PublicHost)
+	if cfg.Admin.Enabled {
+		add(cfg.Admin.Host)
+	}
+	out := make([]string, 0, len(set))
+	for h := range set {
+		out = append(out, h)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // runProxy blocks serving the reverse-proxy listener; fatal on exit, same
@@ -385,6 +449,12 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 		}
 
 		applyProxy(cfg)
+
+		// hybrid mode: a reload may have added/removed proxy hosts (or moved
+		// the admin/public name), so refresh the on-demand allowlist.
+		if src.setAllowed != nil {
+			src.setAllowed(hybridNames(cfg))
+		}
 
 		cur.Store(&runtime{cfg: cfg, backend: backend})
 		log.Printf("config reloaded from %s", path)

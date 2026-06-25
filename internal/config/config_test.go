@@ -69,6 +69,24 @@ func TestBadTLSMode(t *testing.T) {
 	}
 }
 
+func TestHybridModeRequiresCert(t *testing.T) {
+	// hybrid needs the static base (cert_file/key_file); ACME is the fallback
+	if _, err := Load(write(t, `tls_mode = "hybrid"`)); err == nil {
+		t.Fatal("hybrid mode without cert_file/key_file accepted")
+	}
+	c, err := Load(write(t, `
+tls_mode  = "hybrid"
+cert_file = "/tmp/c.pem"
+key_file  = "/tmp/k.pem"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TLSMode != TLSHybrid {
+		t.Fatalf("tls_mode = %q, want hybrid", c.TLSMode)
+	}
+}
+
 func TestEnvOverride(t *testing.T) {
 	t.Setenv("GODDNS_TSIG_SECRET", "from-env")
 	c, err := Load(write(t, `
