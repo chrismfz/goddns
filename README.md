@@ -199,7 +199,7 @@ also move under `/var/named/dynamic/` (journal, see Troubleshooting).
 
 ## TLS
 
-Two modes, chosen with `tls_mode`:
+Three modes, chosen with `tls_mode`:
 
 - **`files`** (default): point `cert_file`/`key_file` at an existing cert,
   e.g. the wildcard you already distribute via rrsync, or a certbot live
@@ -214,6 +214,22 @@ Two modes, chosen with `tls_mode`:
   memory — again no restart. Grant the TXT right to a dedicated key
   (`acme_tsig_name`) as shown in `configs/named-update-policy.example`,
   and test with the staging CA first (`acme_ca`).
+
+- **`hybrid`**: serve the file cert whenever it **covers** the requested
+  SNI and is in date; for any name it doesn't (a proxy host outside your
+  wildcard) or if the file is expired/unreadable, fall back to **ACME
+  on-demand** (lazily, on the first handshake for that name; then renewed
+  automatically). This is "files with an ACME safety net": your wildcard
+  handles the common case at zero cost, the occasional extra hostname
+  self-issues, and a bad/expired file no longer takes TLS down. Set **both**
+  the `cert_file`/`key_file` pair and the `acme_*` block. On-demand issuance
+  is **gated** to names goddns already knows — proxy hosts, `acme_domain`,
+  the admin host and `public_host` (refreshed on every reload) — so a random
+  SNI hitting the public `:443` can never trigger Let's Encrypt orders (a
+  rate-limit DoS). The fallback still needs **DNS-01 authority** for the name
+  (BIND authoritative for it, or an `_acme-challenge` CNAME delegation), so a
+  name on someone else's DNS (e.g. a Cloudflare-hosted domain) needs that
+  CNAME pointing back to a zone goddns can write.
 
 ### Edge case: one shared certbot wildcard for everything (files mode)
 
@@ -242,7 +258,9 @@ restarts anywhere. Verify with:
     openssl x509 -in /etc/goddns/certs/fullchain.pem -noout -ext subjectAltName
 
 Note there is no "fallback to ACME" in files mode: the configured pair is
-served for every SNI, matching or not. Per-host issuance is what
+served for every SNI, matching or not. If you want the wildcard for the
+common case **and** automatic per-host issuance for names it doesn't cover,
+use `tls_mode = "hybrid"` (above); pure per-host issuance is what
 `tls_mode = "acme"` does.
 
 ## Admin web UI (optional)
