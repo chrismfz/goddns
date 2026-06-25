@@ -750,18 +750,22 @@ type proxyStatView struct {
 	LastSeen         string
 }
 
-// humanBytes renders a byte count as B/KB/MB/GB/TB (1024-based, one decimal).
+// humanBytes renders a byte count as B/KB/MB/GB/TB/PB/EB (1024-based, one
+// decimal). int64 maxes out in the exabyte range, so the units string covers
+// every representable value; exp is clamped as belt-and-braces so an oversized
+// total can never index past it (a panic in the dashboard handler).
 func humanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {
 		return fmt.Sprintf("%d B", n)
 	}
+	const units = "KMGTPE"
 	div, exp := int64(unit), 0
-	for x := n / unit; x >= unit; x /= unit {
+	for x := n / unit; x >= unit && exp < len(units)-1; x /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), units[exp])
 }
 
 func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user string) {
