@@ -155,6 +155,8 @@ func cmdServe(args []string) {
 				fatal("admin secret: %v", err)
 			}
 			ah := admin.New(func() *config.Config { return cur.Load().cfg }, st, secret, Version)
+			// Live per-host proxy traffic counters for the dashboard panel.
+			ah.SetProxyStats(px.Stats)
 			// Let the admin UI manage proxy.d/ vhost fragments, and reload
 			// immediately after a write (SIGHUP, same path the poll uses).
 			ah.EnableVhostEditing(*cfgPath, func() {

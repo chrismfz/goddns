@@ -28,6 +28,7 @@ import (
 	"github.com/chrismfz/goddns/internal/filezone"
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
+	"github.com/chrismfz/goddns/internal/proxy"
 	"github.com/chrismfz/goddns/internal/recordmut"
 	"github.com/chrismfz/goddns/internal/store"
 	"github.com/chrismfz/goddns/internal/tsig"
@@ -62,11 +63,19 @@ type Handler struct {
 	// fileEd overrides the static-zone file editor (tests inject stubs); nil ⇒
 	// the production builder.
 	fileEd func(*config.Config) *filezone.Editor
+
+	// proxyStats returns the live per-host traffic snapshot; nil ⇒ the proxy is
+	// off (or stats not wired) and the dashboard hides the traffic panel.
+	proxyStats func() []proxy.HostStat
 }
 
 func New(cfg func() *config.Config, st Store, secret []byte, version string) *Handler {
 	return &Handler{cfg: cfg, store: st, secret: secret, version: version, throttle: newLoginThrottle()}
 }
+
+// SetProxyStats wires the live per-host proxy traffic counters into the
+// dashboard's "Proxy traffic" panel.
+func (h *Handler) SetProxyStats(fn func() []proxy.HostStat) { h.proxyStats = fn }
 
 // EnableVhostEditing turns on proxy-vhost CRUD in the UI: confPath locates
 // proxy.d/, and reload (optional) is called after a successful write so the
@@ -733,6 +742,28 @@ type proxyView struct {
 	Managed               bool // goddns owns the proxy.d/ fragment (editable)
 }
 
+type proxyStatView struct {
+	Host             string
+	Active, Requests int64
+	In, Out          string // human-readable byte totals
+	Codes            string // "2xx / 3xx / 4xx / 5xx"
+	LastSeen         string
+}
+
+// humanBytes renders a byte count as B/KB/MB/GB/TB (1024-based, one decimal).
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for x := n / unit; x >= unit; x /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGT"[exp])
+}
+
 func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user string) {
 	cfg := h.cfg()
 	recs, err := h.store.List()
@@ -780,17 +811,31 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 		})
 	}
 
+	var ps []proxyStatView
+	if h.proxyStats != nil {
+		for _, s := range h.proxyStats() {
+			ps = append(ps, proxyStatView{
+				Host: s.Host, Active: s.Active, Requests: s.Requests,
+				In: humanBytes(s.BytesIn), Out: humanBytes(s.BytesOut),
+				Codes:    fmt.Sprintf("%d / %d / %d / %d", s.Status2xx, s.Status3xx, s.Status4xx, s.Status5xx),
+				LastSeen: stamp(s.LastSeen),
+			})
+		}
+	}
+
 	render(w, dashTmpl, map[string]any{
-		"Version":   h.version,
-		"User":      user,
-		"Active":    "dash",
-		"CSRF":      h.csrfFor(user),
-		"Records":   rv,
-		"Proxies":   pv,
-		"ProxyOn":   cfg.ProxyEnabled,
-		"ProxyEdit": h.confPath != "",
-		"HasAccess": cfg.AccessLog != "",
-		"HasEvent":  cfg.LogFile != "",
+		"Version":    h.version,
+		"User":       user,
+		"Active":     "dash",
+		"CSRF":       h.csrfFor(user),
+		"Records":    rv,
+		"Proxies":    pv,
+		"ProxyOn":    cfg.ProxyEnabled,
+		"ProxyEdit":  h.confPath != "",
+		"ProxyStats": ps,
+		"HasStats":   len(ps) > 0,
+		"HasAccess":  cfg.AccessLog != "",
+		"HasEvent":   cfg.LogFile != "",
 	})
 }
 
