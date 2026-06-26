@@ -136,6 +136,7 @@ type ProxyRule struct {
 	Upstream       string   `toml:"upstream"`        // http(s)://ip-or-host[:port]
 	UpstreamVerify bool     `toml:"upstream_verify"` // verify the upstream's TLS cert (default off: BMCs are self-signed)
 	PreserveHost   bool     `toml:"preserve_host"`   // keep the inbound Host header instead of the upstream's
+	BMCCompat      bool     `toml:"bmc_compat"`      // iDRAC/iLO mode: rewrite outbound Origin/Referer to the upstream and self-referential Location redirects back to this vhost, so a BMC that validates same-origin and emits absolute redirects to its own IP works through the proxy (its virtual console otherwise returns 400). Forces Host=upstream (ignores preserve_host).
 	Allow          []string `toml:"allow"`           // client CIDRs; empty = allow everyone (set it for BMCs!)
 	RateLimit      int      `toml:"rate_limit"`      // max requests/sec per client IP (burst 2x); 0 = unlimited
 	BasicAuth      []string `toml:"basic_auth"`      // "user:bcrypt-hash" entries (generate: goddns passwd); for clients on CGNAT/mobile where CIDRs can't work

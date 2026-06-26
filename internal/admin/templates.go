@@ -144,6 +144,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div><label>rate/s</label><input name="rate" type="number" value="0" style="width:5rem"></div>
 <div><label>verify</label><input type="checkbox" name="verify" value="1"></div>
 <div><label>preserve host</label><input type="checkbox" name="preserve" value="1"></div>
+<div><label title="iDRAC/iLO: rewrite Origin/Referer + redirects so the BMC console works">bmc compat</label><input type="checkbox" name="bmc" value="1"></div>
 <div><button type="submit">add vhost</button></div>
 </div>
 <div class="row" style="margin-top:.4rem">
@@ -190,6 +191,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div><label>rate/s</label><input name="rate" type="number" value="{{.Rate}}" style="width:5rem"></div>
 <div><label>verify upstream TLS</label><input type="checkbox" name="verify" value="1" {{if .Verify}}checked{{end}}></div>
 <div><label>preserve host</label><input type="checkbox" name="preserve" value="1" {{if .Preserve}}checked{{end}}></div>
+<div><label title="iDRAC/iLO: rewrite Origin/Referer + redirects so the BMC console works">bmc compat</label><input type="checkbox" name="bmc" value="1" {{if .BMC}}checked{{end}}></div>
 </div>
 <div style="margin-top:.8rem"><button type="submit">preview</button><a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a></div>
 </form></div></main></body></html>{{end}}
@@ -208,6 +210,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <input type="hidden" name="rate" value="{{.Rate}}">
 {{if .Verify}}<input type="hidden" name="verify" value="1">{{end}}
 {{if .Preserve}}<input type="hidden" name="preserve" value="1">{{end}}
+{{if .BMC}}<input type="hidden" name="bmc" value="1">{{end}}
 <input type="hidden" name="confirm" value="1">
 <button type="submit">{{.Action}}</button>
 <a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a>
