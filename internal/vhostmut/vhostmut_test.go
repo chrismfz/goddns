@@ -256,3 +256,12 @@ func TestRenderFragmentOmitsEmptyFields(t *testing.T) {
 		t.Fatalf("fragment should carry the managed-by marker:\n%s", out)
 	}
 }
+
+func TestSetRejectsBadConsolePort(t *testing.T) {
+	e := newEditor(t, "tls_mode = \"files\"\ncert_file = \"/x/cert.pem\"\nkey_file = \"/x/key.pem\"\n")
+	r := rule()
+	r.ConsolePorts = []int{70000} // out of range — must be refused at write time
+	if _, err := e.Set("idrac.internal.myip.gr", r); err == nil {
+		t.Fatal("an out-of-range console_ports must be rejected before the fragment is written")
+	}
+}

@@ -902,7 +902,9 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule, error) {
 		return out
 	}
 	var ports []int
-	for _, f := range splitLines(r.FormValue("console_ports")) {
+	for _, f := range strings.FieldsFunc(r.FormValue("console_ports"), func(c rune) bool {
+		return c == ',' || c == ' ' || c == '\n' || c == '\r' || c == '\t'
+	}) {
 		if p, err := strconv.Atoi(f); err == nil {
 			ports = append(ports, p)
 		} else {
@@ -978,6 +980,16 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 	if err != nil {
 		renderRecordErr(w, h.version, "%v", err)
 		return
+	}
+	// Reject a console port that collides with the proxy listener up front, so
+	// the form can't silently write a fragment that then breaks every reload.
+	if _, plPort, e := net.SplitHostPort(h.cfg().ProxyListen); e == nil && plPort != "" {
+		for _, p := range rule.ConsolePorts {
+			if strconv.Itoa(p) == plPort {
+				renderRecordErr(w, h.version, "console_ports %d collides with proxy_listen (%s)", p, plPort)
+				return
+			}
+		}
 	}
 	ed := h.vhostEditor()
 	res, err := ed.PreviewSet(host, rule)

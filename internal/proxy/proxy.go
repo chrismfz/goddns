@@ -140,6 +140,11 @@ func ValidateRule(host string, pr config.ProxyRule) error {
 	if pr.RateLimit < 0 {
 		return fmt.Errorf("rate_limit must be >= 0")
 	}
+	for _, p := range pr.ConsolePorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("console_ports value %d out of range (1-65535)", p)
+		}
+	}
 	return nil
 }
 
