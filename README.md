@@ -623,11 +623,12 @@ TLS listener for each, routes by SNI, and splices the (opaque) console stream to
 
 Notes: the listener TLS-terminates with the same cert (so the browser sees a valid cert
 for your public name) and re-originates to the BMC; the host's `allow` CIDRs and the
-console bandwidth both flow through (you'll see it on the **Proxy traffic** panel). The
-**set** of ports is fixed at startup (adding one needs a restart); which host owns a
-port hot-reloads. Set the iDRAC Virtual Console plug-in to **HTML5** (the Java/native
-viewer opens several more ports). And remember the listener is exposed — keep `allow`
-set.
+console bandwidth both flow through (you'll see it on the **Proxy traffic** panel).
+Listeners are **hot-reloaded**: a port added (or removed) in the admin UI or a fragment
+opens/closes on the next config reload — no restart — and established console sessions
+on a removed port keep running. Set the iDRAC Virtual Console plug-in to **HTML5** (the
+Java/native viewer opens several more ports). And remember the listener is exposed —
+keep `allow` set.
 
 ### Drop-in vhost fragments (`proxy.d/`)
 
