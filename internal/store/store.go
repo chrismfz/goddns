@@ -76,6 +76,19 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_snap_zone ON snapshots(zone, id DESC);`); err != nil {
 		return nil, err
 	}
+	// Persisted proxy traffic: one row per host per UTC day, accumulated from
+	// the in-memory counters by the serve loop's periodic flush. Survives
+	// restarts; monthly totals are derived by summing the days.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS proxy_traffic (
+		host       TEXT NOT NULL,
+		day        TEXT NOT NULL,
+		requests   INTEGER NOT NULL DEFAULT 0,
+		bytes_in   INTEGER NOT NULL DEFAULT 0,
+		bytes_out  INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (host, day)
+	);`); err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
@@ -215,6 +228,72 @@ func (s *Store) MarkUpdated(id int64, ip string) error {
 // signal — proof the client is still polling even though DNS didn't change.
 func (s *Store) MarkSeen(id int64) error {
 	_, err := s.db.Exec(`UPDATE records SET last_seen=? WHERE id=?`, time.Now().Unix(), id)
+	return err
+}
+
+// TrafficRow is one host's traffic over a period (a day "YYYY-MM-DD" or a
+// month "YYYY-MM"), for the admin history view.
+type TrafficRow struct {
+	Host     string
+	Period   string
+	Requests int64
+	BytesIn  int64
+	BytesOut int64
+}
+
+// AddTraffic accumulates a day's traffic delta for a host (UPSERT-add). day is
+// "YYYY-MM-DD". A zero delta is a no-op the caller may skip.
+func (s *Store) AddTraffic(host, day string, dReq, dIn, dOut int64) error {
+	_, err := s.db.Exec(
+		`INSERT INTO proxy_traffic (host, day, requests, bytes_in, bytes_out) VALUES (?,?,?,?,?)
+		 ON CONFLICT(host, day) DO UPDATE SET
+		   requests  = requests  + excluded.requests,
+		   bytes_in  = bytes_in  + excluded.bytes_in,
+		   bytes_out = bytes_out + excluded.bytes_out`,
+		host, day, dReq, dIn, dOut)
+	return err
+}
+
+// TrafficDaily returns per-host, per-day rows for the last `days` days (most
+// recent first), summing nothing — the stored granularity is already daily.
+func (s *Store) TrafficDaily(days int) ([]TrafficRow, error) {
+	return s.trafficQuery(`SELECT host, day, requests, bytes_in, bytes_out
+		FROM proxy_traffic
+		WHERE day >= date('now', ?)
+		ORDER BY day DESC, host ASC`, fmt.Sprintf("-%d days", days))
+}
+
+// TrafficMonthly returns per-host, per-month totals for the last `months`
+// months (most recent first), summing the daily rows.
+func (s *Store) TrafficMonthly(months int) ([]TrafficRow, error) {
+	return s.trafficQuery(`SELECT host, substr(day,1,7) AS m, SUM(requests), SUM(bytes_in), SUM(bytes_out)
+		FROM proxy_traffic
+		WHERE day >= date('now', 'start of month', ?)
+		GROUP BY host, m
+		ORDER BY m DESC, host ASC`, fmt.Sprintf("-%d months", months-1))
+}
+
+func (s *Store) trafficQuery(q, arg string) ([]TrafficRow, error) {
+	rows, err := s.db.Query(q, arg)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TrafficRow
+	for rows.Next() {
+		var r TrafficRow
+		if err := rows.Scan(&r.Host, &r.Period, &r.Requests, &r.BytesIn, &r.BytesOut); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// PruneTraffic deletes day rows older than keepDays, bounding the table.
+func (s *Store) PruneTraffic(keepDays int) error {
+	_, err := s.db.Exec(`DELETE FROM proxy_traffic WHERE day < date('now', ?)`,
+		fmt.Sprintf("-%d days", keepDays))
 	return err
 }
 

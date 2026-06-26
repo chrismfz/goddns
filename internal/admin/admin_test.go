@@ -166,6 +166,26 @@ func login(t *testing.T, h *Handler) *http.Cookie {
 	return nil
 }
 
+func TestTrafficPage(t *testing.T) {
+	h, st := newHandler(t, mkConfig(t, ""))
+	cookie := login(t, h)
+	day := time.Now().UTC().Format("2006-01-02")
+	if err := st.AddTraffic("idrac.internal.myip.gr", day, 7, 1024, 4096); err != nil {
+		t.Fatal(err)
+	}
+	rr := do(h, "GET", "/traffic", "127.0.0.1:1", nil, cookie)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET /traffic: %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "idrac.internal.myip.gr") || !strings.Contains(body, day[:7]) {
+		t.Fatalf("traffic page missing host/month:\n%s", body)
+	}
+	if !strings.Contains(body, "4.0 KB") { // 4096 bytes out, humanBytes-formatted
+		t.Fatalf("traffic page missing formatted bytes:\n%s", body)
+	}
+}
+
 func TestPasswdHelper(t *testing.T) {
 	h, _ := newHandler(t, mkConfig(t, ""))
 	cookie := login(t, h)

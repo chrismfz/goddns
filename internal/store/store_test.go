@@ -3,6 +3,7 @@ package store
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func openTemp(t *testing.T) *Store {
@@ -152,5 +153,64 @@ func TestRotateAndGet(t *testing.T) {
 	}
 	if _, _, err := st.Rotate("nope.myip.gr"); err != ErrNotFound {
 		t.Fatalf("rotate missing: %v", err)
+	}
+}
+
+func TestProxyTraffic(t *testing.T) {
+	st := openTemp(t)
+	today := time.Now().UTC().Format("2006-01-02")
+
+	// accumulate two deltas for the same host/day -> they sum (UPSERT-add)
+	if err := st.AddTraffic("idrac.myip.gr", today, 3, 100, 200); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddTraffic("idrac.myip.gr", today, 2, 50, 60); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AddTraffic("ha.myip.gr", today, 1, 10, 20); err != nil {
+		t.Fatal(err)
+	}
+
+	daily, err := st.TrafficDaily(7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var idrac TrafficRow
+	found := false
+	for _, r := range daily {
+		if r.Host == "idrac.myip.gr" {
+			idrac, found = r, true
+		}
+	}
+	if !found || idrac.Requests != 5 || idrac.BytesIn != 150 || idrac.BytesOut != 260 {
+		t.Fatalf("daily sum wrong: %+v (found=%v)", idrac, found)
+	}
+
+	// monthly rolls up the day(s)
+	monthly, err := st.TrafficMonthly(12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(monthly) < 2 {
+		t.Fatalf("want >=2 monthly rows (2 hosts), got %d", len(monthly))
+	}
+	for _, r := range monthly {
+		if r.Host == "idrac.myip.gr" && (r.Requests != 5 || r.Period != today[:7]) {
+			t.Fatalf("monthly idrac wrong: %+v (want period %s)", r, today[:7])
+		}
+	}
+
+	// prune removes old rows but keeps recent ones
+	if err := st.AddTraffic("old.myip.gr", "2000-01-01", 9, 9, 9); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PruneTraffic(400); err != nil {
+		t.Fatal(err)
+	}
+	daily, _ = st.TrafficDaily(100000)
+	for _, r := range daily {
+		if r.Host == "old.myip.gr" {
+			t.Fatal("a row older than the keep window should have been pruned")
+		}
 	}
 }
