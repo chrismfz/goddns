@@ -9,7 +9,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -465,11 +464,6 @@ func (c *Config) NeedsRestart(old *Config) []string {
 	if c.ProxyEnabled != old.ProxyEnabled || c.ProxyListen != old.ProxyListen ||
 		c.ProxyRedirectListen != old.ProxyRedirectListen {
 		fields = append(fields, "proxy_enabled/proxy_listen")
-	}
-	// The SET of console-port listeners is fixed at startup; which host maps to
-	// a port hot-reloads, but adding/removing a port number needs a restart.
-	if !slices.Equal(c.ConsolePorts(), old.ConsolePorts()) {
-		fields = append(fields, "console_ports")
 	}
 	// admin.users / allow / basic_auth hot-reload via the live config
 	// accessor; only enabling/disabling or moving the vhost needs a restart.

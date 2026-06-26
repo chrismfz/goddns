@@ -146,6 +146,7 @@ func cmdServe(args []string) {
 	}
 
 	var px *proxy.Proxy
+	var cm *consoleManager
 	if cfg.ProxyEnabled {
 		px = proxy.New()
 		if err := px.Update(cfg); err != nil {
@@ -174,11 +175,12 @@ func cmdServe(args []string) {
 			}
 		}
 		go runProxy(cfg, px, src, adminH)
-		runConsolePorts(cfg, px, src)
+		cm = newConsoleManager(cfg, px, src)
+		cm.sync(cfg.ConsolePorts())
 		go runTrafficFlusher(px, st)
 	}
 
-	go reloadLoop(*cfgPath, &cur, px, src)
+	go reloadLoop(*cfgPath, &cur, px, src, cm)
 
 	if err := srv.Run(); err != nil {
 		fatal("server: %v", err)
@@ -335,41 +337,71 @@ func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource, adminH http.H
 	}
 }
 
-// runConsolePorts opens one TLS listener per distinct console_ports value and
-// hands each accepted connection to the proxy's SNI-routed console splicer.
-// These ports carry BMC virtual-console (KVM) streams that live on a separate
-// port from the web UI (e.g. iDRAC8 on 5900). The set of ports is fixed at
-// startup (a change flags a restart); which host owns a port hot-reloads via
-// the shared rules table. A listener that fails to bind logs and is skipped so
-// the rest of the daemon keeps running.
-func runConsolePorts(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
-	ports := cfg.ConsolePorts()
-	if len(ports) == 0 {
-		return
-	}
+// consoleManager owns the TLS listeners that carry BMC virtual-console (KVM)
+// streams. Each listens on a port from console_ports and hands accepts to the
+// proxy's SNI-routed splicer. The set of listeners is reconciled on every config
+// reload (sync): a newly-added port opens immediately and a removed one closes —
+// no restart needed. Established console sessions on a closed port keep running
+// (only the accepting socket is closed). sync runs only on the reload goroutine
+// (and once at startup before it begins), so active needs no lock.
+type consoleManager struct {
+	bindHost string
+	px       *proxy.Proxy
+	open     func(port int) (net.Listener, error) // injectable for tests
+	active   map[int]net.Listener
+}
+
+func newConsoleManager(cfg *config.Config, px *proxy.Proxy, src *tlsSource) *consoleManager {
 	host, _, err := net.SplitHostPort(cfg.ProxyListen)
 	if err != nil {
 		host = "" // a bare ":443"-style listen address has no host part
 	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: src.getCert}
-	for _, port := range ports {
-		go func(port int) {
-			addr := net.JoinHostPort(host, strconv.Itoa(port))
-			ln, err := tls.Listen("tcp", addr, tlsCfg)
-			if err != nil {
-				log.Printf("console listener %s failed to bind: %v — the console on that port won't work", addr, err)
-				return
-			}
-			log.Printf("goddns console proxy listening on %s", addr)
-			for {
-				conn, err := ln.Accept()
-				if err != nil {
-					log.Printf("console listener %s stopped: %v", addr, err)
-					return
-				}
-				go px.ServeConsole(conn, port)
-			}
-		}(port)
+	return &consoleManager{
+		bindHost: host,
+		px:       px,
+		open: func(port int) (net.Listener, error) {
+			return tls.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(port)), tlsCfg)
+		},
+		active: map[int]net.Listener{},
+	}
+}
+
+// sync opens listeners for ports not yet active and closes those no longer wanted.
+func (m *consoleManager) sync(ports []int) {
+	want := make(map[int]bool, len(ports))
+	for _, p := range ports {
+		want[p] = true
+	}
+	for p, ln := range m.active {
+		if !want[p] {
+			ln.Close()
+			delete(m.active, p)
+			log.Printf("console proxy on :%d closed (no longer in console_ports)", p)
+		}
+	}
+	for _, p := range ports {
+		if _, ok := m.active[p]; ok {
+			continue
+		}
+		ln, err := m.open(p)
+		if err != nil {
+			log.Printf("console proxy on :%d failed to bind: %v — the console on that port won't work", p, err)
+			continue
+		}
+		m.active[p] = ln
+		log.Printf("goddns console proxy listening on %s:%d", m.bindHost, p)
+		go m.accept(ln, p)
+	}
+}
+
+func (m *consoleManager) accept(ln net.Listener, port int) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return // listener closed (reload removed the port, or shutdown)
+		}
+		go m.px.ServeConsole(conn, port)
 	}
 }
 
@@ -444,7 +476,7 @@ func watchSig(confPath string, cfg *config.Config) string {
 
 // reloadLoop polls the config file (mtime+sha256, like cfm's main tick loop)
 // and swaps the runtime bundle on change. SIGHUP forces an immediate check.
-func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src *tlsSource) {
+func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src *tlsSource, cm *consoleManager) {
 	w := filewatch.New(path)
 	w.Changed() // prime with the already-loaded state
 
@@ -546,6 +578,12 @@ func reloadLoop(path string, cur *atomic.Pointer[runtime], px *proxy.Proxy, src 
 		// the admin/public name), so refresh the on-demand allowlist.
 		if src.setAllowed != nil {
 			src.setAllowed(hybridNames(cfg))
+		}
+
+		// Open/close console-port listeners to match the new config — a port
+		// added in the admin UI starts working without a restart.
+		if cm != nil {
+			cm.sync(cfg.ConsolePorts())
 		}
 
 		cur.Store(&runtime{cfg: cfg, backend: backend})
