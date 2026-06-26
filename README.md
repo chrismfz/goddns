@@ -604,6 +604,29 @@ redirects back to your vhost so navigation stays on the proxy. Leave it **off** 
 normal apps (Home Assistant, NAS UIs) — they want the real `Origin`. It is mutually
 exclusive with `preserve_host` (it forces `Host` = upstream).
 
+#### `console_ports` — the virtual console (KVM) lives on a separate port
+
+A BMC's web UI is on 443, but its **virtual console** (the actual KVM stream) usually
+runs on its **own port** — iDRAC8's HTML5 console is `wss://<host>:5900`, and other
+vendors use other ports. goddns proxies 443; that port isn't covered, so launching the
+console fails with `ERR_CONNECTION_REFUSED`. List the extra port(s) and goddns opens a
+TLS listener for each, routes by SNI, and splices the (opaque) console stream to the
+**same upstream host** on that port:
+
+    [proxy."idrac.internal.myip.gr"]
+    upstream      = "https://10.23.201.200"
+    allow         = ["84.54.49.0/24"]   # enforced on the console port too
+    bmc_compat    = true
+    console_ports = [5900]               # iDRAC8 HTML5 KVM; other BMCs differ
+
+Notes: the listener TLS-terminates with the same cert (so the browser sees a valid cert
+for your public name) and re-originates to the BMC; the host's `allow` CIDRs and the
+console bandwidth both flow through (you'll see it on the **Proxy traffic** panel). The
+**set** of ports is fixed at startup (adding one needs a restart); which host owns a
+port hot-reloads. Set the iDRAC Virtual Console plug-in to **HTML5** (the Java/native
+viewer opens several more ports). And remember the listener is exposed — keep `allow`
+set.
+
 ### Drop-in vhost fragments (`proxy.d/`)
 
 Besides the inline `[proxy."..."]` blocks above, goddns merges every

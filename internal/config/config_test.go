@@ -417,3 +417,51 @@ func TestTSIGKeysFile(t *testing.T) {
 		t.Errorf("expected 'no key' error, got %v", err)
 	}
 }
+
+func TestConsolePortsParseAndAggregate(t *testing.T) {
+	c, err := Load(write(t, `
+tls_mode = "files"
+cert_file = "/x/c.pem"
+key_file  = "/x/k.pem"
+proxy_enabled = true
+proxy_listen  = ":443"
+
+[proxy."idrac.myip.gr"]
+upstream = "https://10.0.0.5"
+console_ports = [5900]
+
+[proxy."ilo.myip.gr"]
+upstream = "https://10.0.0.6"
+console_ports = [17990, 5900]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// distinct + sorted across hosts
+	got := c.ConsolePorts()
+	if len(got) != 2 || got[0] != 5900 || got[1] != 17990 {
+		t.Fatalf("ConsolePorts() = %v, want [5900 17990]", got)
+	}
+}
+
+func TestConsolePortRejectsCollisionAndRange(t *testing.T) {
+	bad := func(ports string) {
+		_, err := Load(write(t, `
+tls_mode = "files"
+cert_file = "/x/c.pem"
+key_file  = "/x/k.pem"
+proxy_enabled = true
+proxy_listen  = ":443"
+
+[proxy."idrac.myip.gr"]
+upstream = "https://10.0.0.5"
+console_ports = `+ports+`
+`))
+		if err == nil {
+			t.Fatalf("console_ports = %s should have been rejected", ports)
+		}
+	}
+	bad("[443]")   // collides with proxy_listen
+	bad("[70000]") // out of range
+	bad("[0]")     // out of range
+}

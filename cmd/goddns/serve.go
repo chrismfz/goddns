@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -172,6 +173,7 @@ func cmdServe(args []string) {
 			}
 		}
 		go runProxy(cfg, px, src, adminH)
+		runConsolePorts(cfg, px, src)
 	}
 
 	go reloadLoop(*cfgPath, &cur, px, src)
@@ -328,6 +330,44 @@ func runProxy(cfg *config.Config, px *proxy.Proxy, src *tlsSource, adminH http.H
 	log.Printf("goddns proxy listening on %s (%d hosts)", cfg.ProxyListen, len(cfg.Proxy))
 	if err := ps.ListenAndServeTLS("", ""); err != nil {
 		fatal("proxy server: %v", err)
+	}
+}
+
+// runConsolePorts opens one TLS listener per distinct console_ports value and
+// hands each accepted connection to the proxy's SNI-routed console splicer.
+// These ports carry BMC virtual-console (KVM) streams that live on a separate
+// port from the web UI (e.g. iDRAC8 on 5900). The set of ports is fixed at
+// startup (a change flags a restart); which host owns a port hot-reloads via
+// the shared rules table. A listener that fails to bind logs and is skipped so
+// the rest of the daemon keeps running.
+func runConsolePorts(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
+	ports := cfg.ConsolePorts()
+	if len(ports) == 0 {
+		return
+	}
+	host, _, err := net.SplitHostPort(cfg.ProxyListen)
+	if err != nil {
+		host = "" // a bare ":443"-style listen address has no host part
+	}
+	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: src.getCert}
+	for _, port := range ports {
+		go func(port int) {
+			addr := net.JoinHostPort(host, strconv.Itoa(port))
+			ln, err := tls.Listen("tcp", addr, tlsCfg)
+			if err != nil {
+				log.Printf("console listener %s failed to bind: %v — the console on that port won't work", addr, err)
+				return
+			}
+			log.Printf("goddns console proxy listening on %s", addr)
+			for {
+				conn, err := ln.Accept()
+				if err != nil {
+					log.Printf("console listener %s stopped: %v", addr, err)
+					return
+				}
+				go px.ServeConsole(conn, port)
+			}
+		}(port)
 	}
 }
 

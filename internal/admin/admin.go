@@ -750,6 +750,15 @@ type proxyStatView struct {
 	LastSeen         string
 }
 
+// joinInts renders a port list as comma-separated text for the vhost form.
+func joinInts(ns []int) string {
+	parts := make([]string, len(ns))
+	for i, n := range ns {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // humanBytes renders a byte count as B/KB/MB/GB/TB/PB/EB (1024-based, one
 // decimal). int64 maxes out in the exabyte range, so the units string covers
 // every representable value; exp is clamped as belt-and-braces so an oversized
@@ -892,11 +901,20 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule, error) {
 		}
 		return out
 	}
+	var ports []int
+	for _, f := range splitLines(r.FormValue("console_ports")) {
+		if p, err := strconv.Atoi(f); err == nil {
+			ports = append(ports, p)
+		} else {
+			return host, config.ProxyRule{}, fmt.Errorf("console_ports: %q is not a number", f)
+		}
+	}
 	rule := config.ProxyRule{
 		Upstream:       strings.TrimSpace(r.FormValue("upstream")),
 		UpstreamVerify: r.FormValue("verify") == "1",
 		PreserveHost:   r.FormValue("preserve") == "1",
 		BMCCompat:      r.FormValue("bmc") == "1",
+		ConsolePorts:   ports,
 		Allow:          splitLines(r.FormValue("allow")),
 		BasicAuth:      splitLines(r.FormValue("auth")),
 		RateLimit:      rate,
@@ -940,7 +958,7 @@ func (h *Handler) handleProxyEdit(w http.ResponseWriter, r *http.Request, user s
 				"Host": e.Host, "Upstream": e.Rule.Upstream,
 				"Allow": strings.Join(e.Rule.Allow, ", "), "Auth": strings.Join(e.Rule.BasicAuth, "\n"),
 				"Rate": e.Rule.RateLimit, "Verify": e.Rule.UpstreamVerify, "Preserve": e.Rule.PreserveHost,
-				"BMC": e.Rule.BMCCompat,
+				"BMC": e.Rule.BMCCompat, "Console": joinInts(e.Rule.ConsolePorts),
 			})
 			return
 		}
@@ -974,7 +992,7 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 			"Upstream": rule.Upstream, "Allow": strings.Join(rule.Allow, ", "),
 			"Auth": strings.Join(rule.BasicAuth, "\n"), "Rate": rule.RateLimit,
 			"Verify": rule.UpstreamVerify, "Preserve": rule.PreserveHost,
-			"BMC": rule.BMCCompat,
+			"BMC": rule.BMCCompat, "Console": joinInts(rule.ConsolePorts),
 		})
 		return
 	}
