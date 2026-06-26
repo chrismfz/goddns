@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -256,6 +257,13 @@ func renderFragment(host string, pr config.ProxyRule) string {
 	fmt.Fprintf(&b, "preserve_host   = %t\n", pr.PreserveHost)
 	if pr.BMCCompat {
 		fmt.Fprintf(&b, "bmc_compat      = %t\n", pr.BMCCompat)
+	}
+	if len(pr.ConsolePorts) > 0 {
+		parts := make([]string, len(pr.ConsolePorts))
+		for i, p := range pr.ConsolePorts {
+			parts[i] = strconv.Itoa(p)
+		}
+		fmt.Fprintf(&b, "console_ports   = [%s]\n", strings.Join(parts, ", "))
 	}
 	if len(pr.Allow) > 0 {
 		fmt.Fprintf(&b, "allow           = %s\n", tomlStrArray(pr.Allow))

@@ -145,6 +145,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div><label>verify</label><input type="checkbox" name="verify" value="1"></div>
 <div><label>preserve host</label><input type="checkbox" name="preserve" value="1"></div>
 <div><label title="iDRAC/iLO: rewrite Origin/Referer + redirects so the BMC console works">bmc compat</label><input type="checkbox" name="bmc" value="1"></div>
+<div><label title="extra TLS ports to proxy to the same upstream (e.g. 5900 for an iDRAC8 KVM)">console ports</label><input name="console_ports" placeholder="5900" size="8"></div>
 <div><button type="submit">add vhost</button></div>
 </div>
 <div class="row" style="margin-top:.4rem">
@@ -192,6 +193,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div><label>verify upstream TLS</label><input type="checkbox" name="verify" value="1" {{if .Verify}}checked{{end}}></div>
 <div><label>preserve host</label><input type="checkbox" name="preserve" value="1" {{if .Preserve}}checked{{end}}></div>
 <div><label title="iDRAC/iLO: rewrite Origin/Referer + redirects so the BMC console works">bmc compat</label><input type="checkbox" name="bmc" value="1" {{if .BMC}}checked{{end}}></div>
+<div><label title="extra TLS ports to proxy to the same upstream (e.g. 5900 for an iDRAC8 KVM)">console ports</label><input name="console_ports" value="{{.Console}}" placeholder="5900" size="8"></div>
 </div>
 <div style="margin-top:.8rem"><button type="submit">preview</button><a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a></div>
 </form></div></main></body></html>{{end}}
@@ -211,6 +213,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 {{if .Verify}}<input type="hidden" name="verify" value="1">{{end}}
 {{if .Preserve}}<input type="hidden" name="preserve" value="1">{{end}}
 {{if .BMC}}<input type="hidden" name="bmc" value="1">{{end}}
+<input type="hidden" name="console_ports" value="{{.Console}}">
 <input type="hidden" name="confirm" value="1">
 <button type="submit">{{.Action}}</button>
 <a href="/" style="margin-left:1rem;color:#9aa4b2">cancel</a>

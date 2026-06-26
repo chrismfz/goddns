@@ -25,13 +25,37 @@ import (
 )
 
 type rule struct {
-	host      string
-	src       config.ProxyRule // for change detection across reloads
-	allow     []*net.IPNet
-	users     map[string]string // basic auth: user -> bcrypt hash; empty = no auth
-	limit     *limiter          // nil = unlimited
-	transport *http.Transport
-	handler   http.Handler
+	host         string
+	src          config.ProxyRule // for change detection across reloads
+	upstreamHost string           // upstream hostname/IP without port, for console-port dialing
+	allow        []*net.IPNet
+	users        map[string]string // basic auth: user -> bcrypt hash; empty = no auth
+	limit        *limiter          // nil = unlimited
+	transport    *http.Transport
+	handler      http.Handler
+}
+
+// allows reports whether peer passes the rule's CIDR allowlist (empty = all).
+func (rl *rule) allows(peer net.IP) bool {
+	if len(rl.allow) == 0 {
+		return true
+	}
+	for _, n := range rl.allow {
+		if peer != nil && n.Contains(peer) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasConsolePort reports whether port is one this host exposes a console proxy for.
+func (rl *rule) hasConsolePort(port int) bool {
+	for _, p := range rl.src.ConsolePorts {
+		if p == port {
+			return true
+		}
+	}
+	return false
 }
 
 // Proxy routes requests by Host header. Zero value is unusable; use New.
@@ -115,6 +139,11 @@ func ValidateRule(host string, pr config.ProxyRule) error {
 	}
 	if pr.RateLimit < 0 {
 		return fmt.Errorf("rate_limit must be >= 0")
+	}
+	for _, p := range pr.ConsolePorts {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("console_ports value %d out of range (1-65535)", p)
+		}
 	}
 	return nil
 }
@@ -249,7 +278,7 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 		}
 	}
 
-	cr := &rule{host: host, src: pr, transport: transport, handler: rp}
+	cr := &rule{host: host, src: pr, upstreamHost: u.Hostname(), transport: transport, handler: rp}
 	for _, cidr := range pr.Allow {
 		_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
 		if err != nil {
@@ -358,18 +387,9 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer c.active.Add(-1)
 	lw.stat = c
 	r.Body = &countReadCloser{rc: r.Body, n: &c.bytesIn}
-	if len(rl.allow) > 0 {
-		allowed := false
-		for _, n := range rl.allow {
-			if peer != nil && n.Contains(peer) {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			http.Error(lw, "forbidden", http.StatusForbidden)
-			return
-		}
+	if !rl.allows(peer) {
+		http.Error(lw, "forbidden", http.StatusForbidden)
+		return
 	}
 	// Rate limit BEFORE auth so credential brute force eats 429s.
 	if rl.limit != nil && !rl.limit.allow(peer) {

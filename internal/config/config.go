@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -137,6 +138,7 @@ type ProxyRule struct {
 	UpstreamVerify bool     `toml:"upstream_verify"` // verify the upstream's TLS cert (default off: BMCs are self-signed)
 	PreserveHost   bool     `toml:"preserve_host"`   // keep the inbound Host header instead of the upstream's
 	BMCCompat      bool     `toml:"bmc_compat"`      // iDRAC/iLO mode: rewrite outbound Origin/Referer to the upstream and self-referential Location redirects back to this vhost, so a BMC that validates same-origin and emits absolute redirects to its own IP works through the proxy (its virtual console otherwise returns 400). Forces Host=upstream (ignores preserve_host).
+	ConsolePorts   []int    `toml:"console_ports"`   // extra TLS ports to proxy for this host to the SAME upstream host (e.g. [5900] for an iDRAC8 HTML5 KVM; other BMCs use other ports). goddns opens a TLS listener per port, routes by SNI, and splices to upstream:port. Empty = none.
 	Allow          []string `toml:"allow"`           // client CIDRs; empty = allow everyone (set it for BMCs!)
 	RateLimit      int      `toml:"rate_limit"`      // max requests/sec per client IP (burst 2x); 0 = unlimited
 	BasicAuth      []string `toml:"basic_auth"`      // "user:bcrypt-hash" entries (generate: goddns passwd); for clients on CGNAT/mobile where CIDRs can't work
@@ -298,6 +300,15 @@ func Load(path string) (*Config, error) {
 					return nil, fmt.Errorf("proxy %q: basic_auth entries must be \"user:bcrypt-hash\" (generate with: goddns passwd)", h)
 				}
 			}
+			_, plPort, _ := net.SplitHostPort(c.ProxyListen)
+			for _, p := range rule.ConsolePorts {
+				if p < 1 || p > 65535 {
+					return nil, fmt.Errorf("proxy %q: console_ports value %d out of range (1-65535)", h, p)
+				}
+				if fmt.Sprintf("%d", p) == plPort {
+					return nil, fmt.Errorf("proxy %q: console_ports %d collides with proxy_listen", h, p)
+				}
+			}
 			norm[h] = rule
 		}
 		c.Proxy = norm
@@ -340,6 +351,23 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	return &c, nil
+}
+
+// ConsolePorts returns the distinct extra TLS ports any proxied host wants
+// proxied (its BMC console port), sorted. goddns opens one listener per port.
+func (c *Config) ConsolePorts() []int {
+	seen := map[int]struct{}{}
+	for _, r := range c.Proxy {
+		for _, p := range r.ConsolePorts {
+			seen[p] = struct{}{}
+		}
+	}
+	out := make([]int, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ProxyHosts returns the proxied hostnames, sorted (stable for comparisons
@@ -437,6 +465,11 @@ func (c *Config) NeedsRestart(old *Config) []string {
 	if c.ProxyEnabled != old.ProxyEnabled || c.ProxyListen != old.ProxyListen ||
 		c.ProxyRedirectListen != old.ProxyRedirectListen {
 		fields = append(fields, "proxy_enabled/proxy_listen")
+	}
+	// The SET of console-port listeners is fixed at startup; which host maps to
+	// a port hot-reloads, but adding/removing a port number needs a restart.
+	if !slices.Equal(c.ConsolePorts(), old.ConsolePorts()) {
+		fields = append(fields, "console_ports")
 	}
 	// admin.users / allow / basic_auth hot-reload via the live config
 	// accessor; only enabling/disabling or moving the vhost needs a restart.
