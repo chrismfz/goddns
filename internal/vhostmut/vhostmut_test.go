@@ -28,6 +28,25 @@ func rule() config.ProxyRule {
 	return config.ProxyRule{Upstream: "https://10.0.0.5", Allow: []string{"10.0.0.0/8"}, RateLimit: 5}
 }
 
+func TestBMCCompatRoundTrips(t *testing.T) {
+	e := newEditor(t, "tls_mode = \"files\"\ncert_file = \"/x/cert.pem\"\nkey_file = \"/x/key.pem\"\n")
+	r := rule()
+	r.BMCCompat = true
+	res, err := e.Set("idrac.internal.myip.gr", r)
+	if err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+	var f struct {
+		Proxy map[string]config.ProxyRule `toml:"proxy"`
+	}
+	if _, err := toml.DecodeFile(res.File, &f); err != nil {
+		t.Fatalf("rendered fragment doesn't parse: %v", err)
+	}
+	if !f.Proxy["idrac.internal.myip.gr"].BMCCompat {
+		t.Fatalf("bmc_compat did not round-trip through the fragment: %+v", f.Proxy)
+	}
+}
+
 func TestSetCreatesManagedFragment(t *testing.T) {
 	// a base config that passes full validation, so config.Load below exercises
 	// the real merge path rather than tripping on unrelated TLS validation.

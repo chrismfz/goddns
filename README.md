@@ -579,9 +579,30 @@ iDRAC/iLO/IPMI consoles, switches, UPSes.
     proxy_listen  = ":443"
 
     [proxy."orion-idrac.internal.myip.gr"]
-    upstream   = "https://10.23.201.200"     # reachable via LAN/VPN
-    allow      = ["84.54.49.0/24"]           # client CIDRs — ALWAYS set for BMCs
-    rate_limit = 10                          # req/s per client IP (burst 2x)
+    upstream    = "https://10.23.201.200"    # reachable via LAN/VPN
+    allow       = ["84.54.49.0/24"]          # client CIDRs — ALWAYS set for BMCs
+    rate_limit  = 10                         # req/s per client IP (burst 2x)
+    bmc_compat  = true                       # Dell iDRAC / HP iLO — see below
+
+#### `bmc_compat` — when the BMC's web UI loads but the console returns 400
+
+Dell iDRAC (and some iLO firmware) validate that the request's `Origin`/`Referer`
+are **same-origin** with the address they serve at, and emit **absolute redirects
+to their own IP**. Behind a reverse proxy that breaks two ways:
+
+- With the default Host rewrite (Host = the BMC's IP), the login page loads, but
+  the **virtual console returns `Access Error: 400 -- Bad Request`** (your browser's
+  Origin is the public name, not the BMC's IP), and navigation bounces you to the
+  raw `https://10.23.201.200`.
+- With `preserve_host = true` (Host = the public name), iDRAC **rejects the
+  unknown Host with 400** outright.
+
+`bmc_compat = true` threads the needle: it keeps `Host` = the upstream (so the BMC
+accepts it), rewrites the outbound `Origin`/`Referer` to the upstream origin so the
+console's same-origin check passes, and rewrites self-referential `Location`
+redirects back to your vhost so navigation stays on the proxy. Leave it **off** for
+normal apps (Home Assistant, NAS UIs) — they want the real `Origin`. It is mutually
+exclusive with `preserve_host` (it forces `Host` = upstream).
 
 ### Drop-in vhost fragments (`proxy.d/`)
 

@@ -896,6 +896,7 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule, error) {
 		Upstream:       strings.TrimSpace(r.FormValue("upstream")),
 		UpstreamVerify: r.FormValue("verify") == "1",
 		PreserveHost:   r.FormValue("preserve") == "1",
+		BMCCompat:      r.FormValue("bmc") == "1",
 		Allow:          splitLines(r.FormValue("allow")),
 		BasicAuth:      splitLines(r.FormValue("auth")),
 		RateLimit:      rate,
@@ -939,6 +940,7 @@ func (h *Handler) handleProxyEdit(w http.ResponseWriter, r *http.Request, user s
 				"Host": e.Host, "Upstream": e.Rule.Upstream,
 				"Allow": strings.Join(e.Rule.Allow, ", "), "Auth": strings.Join(e.Rule.BasicAuth, "\n"),
 				"Rate": e.Rule.RateLimit, "Verify": e.Rule.UpstreamVerify, "Preserve": e.Rule.PreserveHost,
+				"BMC": e.Rule.BMCCompat,
 			})
 			return
 		}
@@ -972,6 +974,7 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 			"Upstream": rule.Upstream, "Allow": strings.Join(rule.Allow, ", "),
 			"Auth": strings.Join(rule.BasicAuth, "\n"), "Rate": rule.RateLimit,
 			"Verify": rule.UpstreamVerify, "Preserve": rule.PreserveHost,
+			"BMC": rule.BMCCompat,
 		})
 		return
 	}

@@ -254,6 +254,9 @@ func renderFragment(host string, pr config.ProxyRule) string {
 	fmt.Fprintf(&b, "upstream        = %q\n", pr.Upstream)
 	fmt.Fprintf(&b, "upstream_verify = %t\n", pr.UpstreamVerify)
 	fmt.Fprintf(&b, "preserve_host   = %t\n", pr.PreserveHost)
+	if pr.BMCCompat {
+		fmt.Fprintf(&b, "bmc_compat      = %t\n", pr.BMCCompat)
+	}
 	if len(pr.Allow) > 0 {
 		fmt.Fprintf(&b, "allow           = %s\n", tomlStrArray(pr.Allow))
 	}

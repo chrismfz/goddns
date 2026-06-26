@@ -190,11 +190,14 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 		ResponseHeaderTimeout: 60 * time.Second,
 	}
 
+	upOrigin := u.Scheme + "://" + u.Host
 	rp := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(u) // also rewrites the outbound Host to the upstream's
 			r.SetXForwarded()
-			if pr.PreserveHost {
+			// bmc_compat forces Host=upstream (the BMC rejects an unknown Host),
+			// so preserve_host is mutually exclusive with it.
+			if pr.PreserveHost && !pr.BMCCompat {
 				r.Out.Host = r.In.Host
 			}
 			// The stdlib strips X-Forwarded-*/Forwarded, but ad-hoc
@@ -207,6 +210,19 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 			} else {
 				r.Out.Header.Del("X-Real-IP")
 			}
+			// iDRAC/iLO-style backends validate that Origin/Referer are
+			// same-origin with the address they serve at; since Host is the
+			// upstream but the browser's Origin is this vhost, rewrite them to
+			// the upstream origin so the console's check passes (else it 400s).
+			// Only rewrite headers the client actually sent — never add one.
+			if pr.BMCCompat {
+				if r.Out.Header.Get("Origin") != "" {
+					r.Out.Header.Set("Origin", upOrigin)
+				}
+				if ref := r.Out.Header.Get("Referer"); ref != "" {
+					r.Out.Header.Set("Referer", rewriteURLHost(ref, u.Scheme, u.Host))
+				}
+			}
 		},
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -214,6 +230,23 @@ func compile(host string, pr config.ProxyRule) (*rule, error) {
 			http.Error(w, "upstream error", http.StatusBadGateway)
 		},
 		FlushInterval: 100 * time.Millisecond, // console streams
+	}
+	if pr.BMCCompat {
+		// The BMC emits absolute redirects to its own address (Host=upstream);
+		// rewrite self-referential Location/Content-Location back to this vhost
+		// so navigation stays on the proxy instead of bouncing to the upstream IP.
+		upHost := u.Host
+		rp.ModifyResponse = func(resp *http.Response) error {
+			for _, h := range []string{"Location", "Content-Location"} {
+				if v := resp.Header.Get(h); v != "" {
+					if lu, err := url.Parse(v); err == nil && lu.Host == upHost {
+						lu.Scheme, lu.Host = "https", host // the public side is always TLS
+						resp.Header.Set(h, lu.String())
+					}
+				}
+			}
+			return nil
+		}
 	}
 
 	cr := &rule{host: host, src: pr, transport: transport, handler: rp}
@@ -262,6 +295,18 @@ func (rl *rule) checkAuth(r *http.Request) bool {
 // A valid bcrypt hash of nothing in particular, for constant-ish timing on
 // unknown usernames.
 var dummyHash = []byte("$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy")
+
+// rewriteURLHost replaces the scheme+host of an absolute URL (e.g. a Referer)
+// with the given ones, preserving the path/query. A relative or unparseable
+// value is returned unchanged.
+func rewriteURLHost(raw, scheme, host string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	u.Scheme, u.Host = scheme, host
+	return u.String()
+}
 
 // hostKey normalises an inbound Host header the same way config.Load
 // normalises table keys: lowercase, no port, no trailing dot.
