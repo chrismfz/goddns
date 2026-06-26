@@ -11,6 +11,7 @@ const (
 	dashTmpl           = "dash"
 	resultTmpl         = "result"
 	logsTmpl           = "logs"
+	trafficTmpl        = "traffic"
 	confirmTmpl        = "confirm"
 	helpTmpl           = "help"
 	zonesTmpl          = "zones"
@@ -78,6 +79,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <a href="/" {{if eq .Active "dash"}}class="on"{{end}}>dashboard</a>
 <a href="/zones" {{if eq .Active "zones"}}class="on"{{end}}>zones</a>
 <a href="/logs?which=access" {{if eq .Active "logs"}}class="on"{{end}}>logs</a>
+<a href="/traffic" {{if eq .Active "traffic"}}class="on"{{end}}>traffic</a>
 <a href="/passwd" {{if eq .Active "passwd"}}class="on"{{end}}>password</a>
 </nav></div>
 <div><span class="muted">{{.User}}</span><a href="/logout">logout</a></div>
@@ -466,6 +468,20 @@ This page never edits BIND — it only reads.</div>
 <main><h2>{{.Title}} <span class="muted">(newest first, last 300)</span></h2>
 <pre>{{range .Lines}}{{.}}
 {{end}}</pre></main></body></html>{{end}}
+
+{{define "traffic"}}{{template "head" .}}{{template "topbar" .}}
+<main>
+<h2>Proxy traffic — per month <span class="muted" style="font-size:.7rem;font-weight:normal">last 12 months · persisted</span></h2>
+<table><thead><tr><th>month</th><th>host</th><th>requests</th><th>in</th><th>out</th></tr></thead><tbody>
+{{range .Monthly}}<tr><td>{{.Period}}</td><td>{{.Host}}</td><td>{{.Requests}}</td><td>{{.In}}</td><td>{{.Out}}</td></tr>{{else}}<tr><td colspan="5" class="muted">(no traffic recorded yet — it accrues as the proxy is used)</td></tr>{{end}}
+</tbody></table>
+
+<h2 style="margin-top:1.4rem">per day <span class="muted" style="font-size:.7rem;font-weight:normal">last 30 days</span></h2>
+<table><thead><tr><th>day</th><th>host</th><th>requests</th><th>in</th><th>out</th></tr></thead><tbody>
+{{range .Daily}}<tr><td>{{.Period}}</td><td>{{.Host}}</td><td>{{.Requests}}</td><td>{{.In}}</td><td>{{.Out}}</td></tr>{{else}}<tr><td colspan="5" class="muted">(no traffic recorded yet)</td></tr>{{end}}
+</tbody></table>
+<div class="muted" style="font-size:.72rem;margin-top:.6rem">Totals are flushed from the live counters every ~60s and survive restarts; the live "since start" panel is on the dashboard.</div>
+</main></body></html>{{end}}
 
 {{define "passwd"}}{{template "head" .}}{{template "topbar" .}}
 <div class="subnav"><span class="here">password hash</span><span class="sp"></span></div>

@@ -45,6 +45,8 @@ type Store interface {
 	Del(name string) error
 	Rotate(name string) (store.Record, string, error)
 	Get(name string) (store.Record, error)
+	TrafficMonthly(months int) ([]store.TrafficRow, error)
+	TrafficDaily(days int) ([]store.TrafficRow, error)
 	SnapshotList(zone string, limit int) ([]store.Snapshot, error)
 	SnapshotByID(id int64) (store.Snapshot, bool, error)
 	SnapshotPut(zone string, serial uint32, content string, keep int) (int64, error)
@@ -175,6 +177,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleHelp(w, r, user)
 	case "/logs":
 		h.handleLogs(w, r, user)
+	case "/traffic":
+		h.handleTraffic(w, r, user)
 	case "/zones":
 		h.handleZones(w, r, user)
 	case "/zone":
@@ -849,6 +853,43 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 		"HasStats":   len(ps) > 0,
 		"HasAccess":  cfg.AccessLog != "",
 		"HasEvent":   cfg.LogFile != "",
+	})
+}
+
+type trafficView struct {
+	Host, Period string
+	Requests     int64
+	In, Out      string
+}
+
+// handleTraffic renders the persisted proxy-traffic history: per-month totals
+// (last 12) and per-day rows (last 30), summed from the daily store rows.
+func (h *Handler) handleTraffic(w http.ResponseWriter, r *http.Request, user string) {
+	conv := func(rows []store.TrafficRow) []trafficView {
+		out := make([]trafficView, 0, len(rows))
+		for _, t := range rows {
+			out = append(out, trafficView{
+				Host: t.Host, Period: t.Period, Requests: t.Requests,
+				In: humanBytes(t.BytesIn), Out: humanBytes(t.BytesOut),
+			})
+		}
+		return out
+	}
+	monthly, err := h.store.TrafficMonthly(12)
+	if err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		log.Printf("admin: traffic monthly: %v", err)
+		return
+	}
+	daily, err := h.store.TrafficDaily(30)
+	if err != nil {
+		http.Error(w, "store error", http.StatusInternalServerError)
+		log.Printf("admin: traffic daily: %v", err)
+		return
+	}
+	render(w, trafficTmpl, map[string]any{
+		"Version": h.version, "User": user, "Active": "traffic",
+		"Monthly": conv(monthly), "Daily": conv(daily),
 	})
 }
 

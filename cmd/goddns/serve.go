@@ -26,6 +26,7 @@ import (
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/proxy"
 	"github.com/chrismfz/goddns/internal/server"
+	"github.com/chrismfz/goddns/internal/store"
 	"github.com/chrismfz/goddns/internal/tlsmgr"
 )
 
@@ -174,6 +175,7 @@ func cmdServe(args []string) {
 		}
 		go runProxy(cfg, px, src, adminH)
 		runConsolePorts(cfg, px, src)
+		go runTrafficFlusher(px, st)
 	}
 
 	go reloadLoop(*cfgPath, &cur, px, src)
@@ -368,6 +370,54 @@ func runConsolePorts(cfg *config.Config, px *proxy.Proxy, src *tlsSource) {
 				go px.ServeConsole(conn, port)
 			}
 		}(port)
+	}
+}
+
+// runTrafficFlusher periodically persists the proxy's in-memory traffic
+// counters to the store so per-day/per-month history survives restarts. It
+// writes only the DELTA since the last flush into the current UTC day's row, so
+// a process restart (which resets the in-memory counters to 0, and this map
+// with them) simply resumes accumulating — the already-persisted days are
+// untouched. At most one flush-interval of counters is lost on a hard kill.
+func runTrafficFlusher(px *proxy.Proxy, st *store.Store) {
+	type snap struct{ req, in, out int64 }
+	last := map[string]snap{}
+	flush := func() {
+		day := time.Now().UTC().Format("2006-01-02")
+		for _, s := range px.Stats() {
+			prev := last[s.Host]
+			dReq, dIn, dOut := s.Requests-prev.req, s.BytesIn-prev.in, s.BytesOut-prev.out
+			if dReq <= 0 && dIn <= 0 && dOut <= 0 {
+				last[s.Host] = snap{s.Requests, s.BytesIn, s.BytesOut} // advance (also covers a reset to lower)
+				continue
+			}
+			if dReq < 0 {
+				dReq = 0
+			}
+			if dIn < 0 {
+				dIn = 0
+			}
+			if dOut < 0 {
+				dOut = 0
+			}
+			if err := st.AddTraffic(s.Host, day, dReq, dIn, dOut); err != nil {
+				log.Printf("traffic flush %s: %v — will retry", s.Host, err)
+				continue // don't advance last; retry the delta next tick
+			}
+			last[s.Host] = snap{s.Requests, s.BytesIn, s.BytesOut}
+		}
+	}
+	t := time.NewTicker(60 * time.Second)
+	defer t.Stop()
+	ticks := 0
+	for range t.C {
+		flush()
+		if ticks++; ticks >= 60*24 { // ~once a day at a 60s tick
+			if err := st.PruneTraffic(400); err != nil {
+				log.Printf("traffic prune: %v", err)
+			}
+			ticks = 0
+		}
 	}
 }
 

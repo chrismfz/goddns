@@ -279,8 +279,10 @@ It shows the DDNS records (last IP / last seen), the proxy table, a
 in/out and a 2xx/3xx/4xx/5xx breakdown — including blocked/forbidden hits, so
 attack traffic is visible — and bandwidth from long-lived BMC/console sessions
 too), and a tail of the logs, and lets you **add / rotate / delete DDNS
-tokens**. The traffic counters are in-memory and cumulative since start (they
-reset on restart; no disk I/O on the request path). Each record
+tokens**. The dashboard traffic counters are in-memory and cumulative since
+start; the **traffic** page keeps **history that survives restarts** — per-month
+totals (last 12 months) and per-day rows (last 30), flushed from the live
+counters to SQLite every ~60s and pruned after ~400 days. Each record
 has a **help** link with ready copy-paste client snippets (curl, cron,
 MikroTik, router DynDNS2) for that hostname — set `public_host` so they're
 filled in with your server name and port. Tokens are stored hashed and
