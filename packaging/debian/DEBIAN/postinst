@@ -28,7 +28,11 @@ fi
 # only systemd (root) reads via EnvironmentFile.
 mkdir -p /etc/goddns
 chown root:goddns /etc/goddns
-chmod 0750 /etc/goddns
+# 0751 (traverse for "other"): so the `named` user can reach the goddns-owned
+# tsig_keys_file it `include`s (/etc/goddns/tsig.keys, 0640 goddns:named).
+# Files inside stay unreadable (0640/0600, no other-read); the dir can't be
+# listed. Keep it 0751 across upgrades — 0750 makes named fail to start.
+chmod 0751 /etc/goddns
 if [ -f /etc/goddns/goddns.conf ]; then
     chown root:goddns /etc/goddns/goddns.conf
     chmod 0640 /etc/goddns/goddns.conf

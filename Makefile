@@ -162,7 +162,7 @@ deb: build ## Δημιουργεί .deb
 		"$(PKGROOT)/etc/goddns" \
 		"$(PKGROOT)/etc/goddns/proxy.d" \
 		"$(OUTDIR)"
-	@chmod 0750 "$(PKGROOT)/etc/goddns"
+	@chmod 0751 "$(PKGROOT)/etc/goddns"            # 0751: named traverses to an included tsig_keys_file; files inside stay unreadable
 	@chmod 2770 "$(PKGROOT)/etc/goddns/proxy.d"   # setgid + group-write: daemon manages vhosts, fragments inherit group goddns
 
 	# copy DEBIAN metadata/scripts
@@ -194,7 +194,7 @@ stage-pkgroot: build
 	@cp -f $(BINARY) $(PKGROOT)/usr/bin/goddns
 	# configs
 	@mkdir -p $(PKGROOT)/etc/goddns
-	@chmod 0750 $(PKGROOT)/etc/goddns
+	@chmod 0751 $(PKGROOT)/etc/goddns              # 0751: named traverses to an included tsig_keys_file; files inside stay unreadable
 	@[ -f $(PKGROOT)/etc/goddns/goddns.conf ] || install -m0640 $(CONFIG_DIR)/goddns.conf $(PKGROOT)/etc/goddns/goddns.conf
 	@mkdir -p $(PKGROOT)/etc/logrotate.d
 	@install -m0644 $(CONFIG_DIR)/goddns.logrotate $(PKGROOT)/etc/logrotate.d/goddns
