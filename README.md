@@ -163,8 +163,9 @@ Steps on the BIND host (e.g. sdns):
        named-checkconf -z /etc/named.conf && rndc reconfig
 
 6. Install the goddns .deb/.rpm — it creates the `goddns` user,
-   `/etc/goddns` (0750 root:goddns) and `/var/lib/goddns`. Put the TSIG
-   secret in the env file:
+   `/etc/goddns` (0751 root:goddns — traverse-only for `named` to reach an
+   included key file; files inside stay unreadable) and `/var/lib/goddns`.
+   Put the TSIG secret in the env file:
 
        printf 'GODDNS_TSIG_SECRET=%s\n' "<base64 from ddns.key>" \
            | sudo tee /etc/goddns/goddns.env      # already chmod 0600
@@ -892,7 +893,7 @@ VPN when possible.
 
 **Service fails with `permission denied` on the config or cert.** The daemon
 runs unprivileged (`User=goddns`). The package sets `/etc/goddns` to
-root:goddns 0750 and `goddns.conf` to 0640 — but the **TLS cert** must also
+root:goddns 0751 and `goddns.conf` to 0640 — but the **TLS cert** must also
 be readable: `/etc/letsencrypt/live` and `archive` are root-only, so either
 use the shipped certbot deploy hook to mirror the pair where goddns can read
 it (recommended, keeps hot reload working):
