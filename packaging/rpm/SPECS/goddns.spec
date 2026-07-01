@@ -85,7 +85,11 @@ mkdir -p "%{buildroot}/etc/goddns/proxy.d"
 %{_bindir}/goddns
 %{_unitdir}/goddns.service
 %{_unitdir}/goddns-zoned.service
-%attr(0750,root,goddns) %dir /etc/goddns
+# 0751 (not 0750): "other" gets traverse-only so the `named` user can reach the
+# goddns-owned tsig_keys_file it `include`s (/etc/goddns/tsig.keys, 0640
+# goddns:named). goddns.conf/goddns.env stay unreadable (0640/0600, no other
+# read) and the dir can't be listed. Without the +x, named fails to start.
+%attr(0751,root,goddns) %dir /etc/goddns
 %attr(2770,root,goddns) %dir /etc/goddns/proxy.d
 %attr(0640,root,goddns) %config(noreplace) /etc/goddns/goddns.conf
 %config(noreplace) /etc/logrotate.d/goddns
@@ -103,7 +107,10 @@ mkdir -p "%{buildroot}/etc/goddns/proxy.d"
 # in goddns.env, which only systemd (root) reads via EnvironmentFile.
 if [ -d /etc/goddns ]; then
     chown root:goddns /etc/goddns || true
-    chmod 0750 /etc/goddns || true
+    # 0751: "other" (the named user) gets traverse-only, to reach an included
+    # tsig_keys_file — files inside stay unreadable. Don't clobber it back to
+    # 0750 on upgrade or named fails to start.
+    chmod 0751 /etc/goddns || true
 fi
 if [ -f /etc/goddns/goddns.conf ]; then
     chown root:goddns /etc/goddns/goddns.conf || true
