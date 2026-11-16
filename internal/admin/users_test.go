@@ -2,7 +2,9 @@ package admin
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -127,4 +129,58 @@ func TestAccountPasswordChangeKeepsSession(t *testing.T) {
 		t.Fatalf("re-issued session: %d", rr.Code)
 	}
 	loginAs(t, h, "bob", "newpass123")
+}
+
+// The current-password check is throttled per account, and error pages keep
+// the security headers (they must be set before WriteHeader).
+func TestAccountThrottleAndErrorHeaders(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	admin := login(t, h)
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": h.csrfFor("admin"), "op": "add", "name": "bob", "pass": "bobpass123", "role": "user"}, admin)
+	bob := loginAs(t, h, "bob", "bobpass123")
+	csrf := h.csrfFor("bob")
+	var last *httptest.ResponseRecorder
+	for i := 0; i < 20; i++ {
+		last = do(h, "POST", "/account", "127.0.0.1:1", map[string]string{"csrf": csrf, "current": "guess" + strconv.Itoa(i) + "xx", "new": "newpass123", "repeat": "newpass123"}, bob)
+		if last.Code == http.StatusTooManyRequests {
+			break
+		}
+		if last.Code != http.StatusBadRequest {
+			t.Fatalf("wrong current password: %d", last.Code)
+		}
+		if csp := last.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'none'") {
+			t.Fatalf("error page lost its CSP: %q", csp)
+		}
+	}
+	if last.Code != http.StatusTooManyRequests {
+		t.Fatal("guessing the current password was never throttled")
+	}
+	// the right password is refused too while throttled
+	if rr := do(h, "POST", "/account", "127.0.0.1:9", map[string]string{"csrf": csrf, "current": "bobpass123", "new": "newpass123", "repeat": "newpass123"}, bob); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("per-account throttle didn't hold from another IP: %d", rr.Code)
+	}
+	if rr := do(h, "POST", "/login", "192.0.2.50:7", map[string]string{"user": "nobody", "pass": "whatever1"}, nil); rr.Code != http.StatusUnauthorized ||
+		!strings.Contains(rr.Header().Get("Content-Security-Policy"), "default-src 'none'") {
+		t.Fatalf("failed-login page: %d csp=%q", rr.Code, rr.Header().Get("Content-Security-Policy"))
+	}
+}
+
+func TestOwnResetOnUsersPageKeepsSession(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	admin := login(t, h)
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": h.csrfFor("admin"), "op": "add", "name": "carol", "pass": "carolpass1", "role": "admin"}, admin)
+	carol := loginAs(t, h, "carol", "carolpass1")
+	rr := do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": h.csrfFor("carol"), "op": "passwd", "name": "carol", "pass": "carolpass2"}, carol)
+	var fresh *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == cookieName {
+			fresh = c
+		}
+	}
+	if rr.Code != http.StatusSeeOther || fresh == nil {
+		t.Fatalf("own reset: %d cookie=%v", rr.Code, fresh)
+	}
+	if rr := do(h, "GET", "/users", "127.0.0.1:1", nil, fresh); rr.Code != http.StatusOK {
+		t.Fatalf("re-issued session after own reset: %d", rr.Code)
+	}
 }

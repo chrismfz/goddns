@@ -20,14 +20,14 @@ func TestLoginAndLookup(t *testing.T) {
 	if err := s.UserAdd(who, "alice", "alicepass1", RoleUser); err != nil {
 		t.Fatal(err)
 	}
-	if p, ok := s.Login("root", "rootpass1"); !ok || p.Role != RoleAdmin || !p.Config {
+	if p, ok, _ := s.Login("root", "rootpass1"); !ok || p.Role != RoleAdmin || !p.Config {
 		t.Fatalf("config admin login: %+v %v", p, ok)
 	}
-	if p, ok := s.Login("alice", "alicepass1"); !ok || p.Role != RoleUser || p.Config {
+	if p, ok, _ := s.Login("alice", "alicepass1"); !ok || p.Role != RoleUser || p.Config {
 		t.Fatalf("db user login: %+v %v", p, ok)
 	}
 	for _, c := range [][2]string{{"alice", "wrongpass1"}, {"nobody", "whatever1"}, {"root", "alicepass1"}} {
-		if _, ok := s.Login(c[0], c[1]); ok {
+		if _, ok, _ := s.Login(c[0], c[1]); ok {
 			t.Fatalf("login %v accepted", c)
 		}
 	}
@@ -49,7 +49,7 @@ func TestLoginAndLookup(t *testing.T) {
 	if _, _, ok := s.Lookup("alice"); ok {
 		t.Fatal("disabled user still resolves")
 	}
-	if _, ok := s.Login("alice", "newpass123"); ok {
+	if _, ok, _ := s.Login("alice", "newpass123"); ok {
 		t.Fatal("disabled user logged in")
 	}
 }
@@ -177,10 +177,53 @@ func TestChangeOwnPassword(t *testing.T) {
 	if err := s.ChangeOwnPassword(alice, "alicepass1", "newpass123"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := s.Login("alice", "newpass123"); !ok {
+	if _, ok, _ := s.Login("alice", "newpass123"); !ok {
 		t.Fatal("new password does not log in")
 	}
 	if err := s.ChangeOwnPassword(Actor{User: "root", Role: RoleAdmin}, "rootpass1", "newpass123"); !IsInvalid(err) {
 		t.Fatalf("a goddns.conf admin changes it in the file: %v", err)
+	}
+}
+
+func TestShadowedRowAndGuardWording(t *testing.T) {
+	s, _, _, _ := newSvc(t, "")
+	s.UserAdd(who, "chris", "chrispass1", RoleAdmin)
+	s.UserAdd(who, "solo", "solopass12", RoleAdmin)
+	// goddns.conf now defines chris too: the db row is shadowed.
+	s.cfg().Admin.Users = []string{confAdmin(t, "chris", "rootpass1")}
+	if err := s.UserSetRole(who, "chris", RoleUser); !IsInvalid(err) {
+		t.Fatalf("a shadowed row stays read-only except delete: %v", err)
+	}
+	if err := s.UserDel(who, "chris"); err != nil {
+		t.Fatalf("deleting a shadowed row must work: %v", err)
+	}
+	if _, err := s.store.UserGet("chris"); err == nil {
+		t.Fatal("shadowed row not deleted")
+	}
+	// the goddns.conf chris still logs in
+	if _, ok, _ := s.Login("chris", "rootpass1"); !ok {
+		t.Fatal("goddns.conf chris lost")
+	}
+	solo := Actor{User: "solo", Role: RoleAdmin}
+	for verb, err := range map[string]error{
+		"demote":  s.UserSetRole(solo, "solo", RoleUser),
+		"disable": s.UserSetDisabled(solo, "solo", true),
+		"delete":  s.UserDel(solo, "solo"),
+	} {
+		if err == nil || err.Error() != "you can't "+verb+" your own account" {
+			t.Errorf("%s self: %v", verb, err)
+		}
+	}
+}
+
+func TestAuditSanitizesNames(t *testing.T) {
+	s, _, lines, _ := newSvc(t, "")
+	s.Audit(Actor{User: "x peer=1.2.3.4 login-ok\nadmin-audit user=chris", Peer: "?"}, "login-failed")
+	s.Audit(Actor{User: "", Peer: "192.0.2.1"}, "login-failed")
+	if strings.ContainsAny((*lines)[0], "\n") || strings.Count((*lines)[0], "=") != 2 || strings.Count((*lines)[0], " ") != 3 {
+		t.Fatalf("crafted name forged audit fields: %q", (*lines)[0])
+	}
+	if (*lines)[1] != `admin-audit user="" peer=192.0.2.1 login-failed` {
+		t.Fatalf("empty user: %q", (*lines)[1])
 	}
 }

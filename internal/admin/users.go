@@ -1,7 +1,9 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +17,7 @@ import (
 // two-phase like every destructive action.
 func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request, a service.Actor) {
 	if r.Method != http.MethodPost {
-		h.renderUsers(w, a, "")
+		h.renderUsers(w, a, 0, "")
 		return
 	}
 	if !h.csrfOK(a.User, r.FormValue("csrf")) {
@@ -35,6 +37,9 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request, a service.
 		err = h.svc.UserSetDisabled(a, name, false)
 	case "passwd":
 		err = h.svc.UserSetPassword(a, name, r.FormValue("pass"))
+		if err == nil && name == a.User {
+			h.setSession(w, a.User) // own reset rotated the fingerprint: stay signed in
+		}
 	case "del":
 		if r.FormValue("confirm") != "1" {
 			render(w, userDelTmpl, map[string]any{"Version": h.version, "CSRF": h.csrfFor(a.User), "Name": name})
@@ -50,20 +55,19 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request, a service.
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		w.WriteHeader(http.StatusBadRequest)
-		h.renderUsers(w, a, err.Error())
+		h.renderUsers(w, a, http.StatusBadRequest, err.Error())
 		return
 	}
 	http.Redirect(w, r, "/users", http.StatusSeeOther)
 }
 
-func (h *Handler) renderUsers(w http.ResponseWriter, a service.Actor, msg string) {
+func (h *Handler) renderUsers(w http.ResponseWriter, a service.Actor, code int, msg string) {
 	users, err := h.svc.Users(a)
 	if err != nil {
 		h.renderOpErr(w, err)
 		return
 	}
-	render(w, usersTmpl, map[string]any{
+	renderStatus(w, code, usersTmpl, map[string]any{
 		"Version": h.version, "User": a.User, "Active": "users", "CSRF": h.csrfFor(a.User),
 		"Users": users, "Error": msg,
 	})
@@ -79,32 +83,54 @@ func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request, a servic
 		"Version": h.version, "User": a.User, "Active": "account", "CSRF": h.csrfFor(a.User),
 		"Role": a.Role, "Config": p.Config, "Restricted": a.Role != service.RoleAdmin,
 	}
-	if r.Method == http.MethodPost {
-		if !h.csrfOK(a.User, r.FormValue("csrf")) {
-			http.Error(w, "bad request", http.StatusBadRequest)
+	if r.Method != http.MethodPost {
+		render(w, accountTmpl, data)
+		return
+	}
+	if !h.csrfOK(a.User, r.FormValue("csrf")) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// The current-password check is a password oracle like /login, so it is
+	// throttled like one: per account (a stolen session must not get unlimited
+	// guesses) and per source IP.
+	keys := []string{"acct:" + a.User, "ip:" + a.Peer}
+	for _, k := range keys {
+		if until := h.throttle.blockedUntil(k); !until.IsZero() {
+			w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(until).Seconds())+1))
+			data["Error"] = "too many attempts — wait a minute"
+			renderStatus(w, http.StatusTooManyRequests, accountTmpl, data)
 			return
 		}
-		next := r.FormValue("new")
-		switch {
-		case next != r.FormValue("repeat"):
-			data["Error"] = "the new passwords don't match"
-		default:
-			if err := h.svc.ChangeOwnPassword(a, r.FormValue("current"), next); err != nil {
-				data["Error"] = err.Error()
-				break
-			}
-			ttl := time.Duration(h.cfg().Admin.SessionTTL) * time.Hour
-			http.SetCookie(w, &http.Cookie{
-				Name: cookieName, Value: newSession(h.secret, h.credFP(a.User), a.User, ttl), Path: "/",
-				MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
-			})
-			data["Done"] = true
-			data["CSRF"] = h.csrfFor(a.User)
-		}
-		if data["Error"] != nil {
-			w.WriteHeader(http.StatusBadRequest)
-		}
 	}
+	next := r.FormValue("new")
+	if next != r.FormValue("repeat") {
+		data["Error"] = "the new passwords don't match"
+		renderStatus(w, http.StatusBadRequest, accountTmpl, data)
+		return
+	}
+	err := h.svc.ChangeOwnPassword(a, r.FormValue("current"), next)
+	switch {
+	case errors.Is(err, service.ErrBusy):
+		w.Header().Set("Retry-After", "5")
+		data["Error"] = "busy — try again in a few seconds"
+		renderStatus(w, http.StatusServiceUnavailable, accountTmpl, data)
+		return
+	case errors.Is(err, service.ErrWrongPassword):
+		for _, k := range keys {
+			h.throttle.fail(k)
+		}
+		h.audit(a.User, a.Peer, "account-passwd-failed")
+		fallthrough
+	case err != nil:
+		data["Error"] = err.Error()
+		renderStatus(w, http.StatusBadRequest, accountTmpl, data)
+		return
+	}
+	h.throttle.ok("acct:" + a.User)
+	h.setSession(w, a.User)
+	data["Done"] = true
+	data["CSRF"] = h.csrfFor(a.User)
 	render(w, accountTmpl, data)
 }
 
@@ -128,7 +154,8 @@ const userPages = `
 <td>{{if .Disabled}}<span class="warn">disabled</span>{{else}}enabled{{end}}</td>
 <td>{{if .Config}}<span class="muted" title="[admin] users in goddns.conf">goddns.conf</span>{{else if .Shadowed}}<span class="warn" title="a goddns.conf user of the same name wins">db (shadowed)</span>{{else}}db{{end}}</td>
 <td class="muted">{{.Created}}</td>
-<td>{{if not .Config}}
+<td>{{if .Shadowed}}<form method="post" action="/users" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="op" value="del"><button class="danger" type="submit" title="this row can't log in; delete it so it can't come back if the goddns.conf line is removed">delete</button></form>
+{{else if not .Config}}
 <form method="post" action="/users" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="op" value="role">
 <select name="role"><option value="admin" {{if eq .Role "admin"}}selected{{end}}>admin</option><option value="user" {{if eq .Role "user"}}selected{{end}}>user</option></select><button type="submit">set role</button></form>
 <form method="post" action="/users" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}">

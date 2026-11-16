@@ -21,6 +21,14 @@ const (
 // ErrForbidden is returned when the actor's role does not allow the call.
 var ErrForbidden = errors.New("forbidden: this needs the admin role")
 
+// ErrWrongPassword is ChangeOwnPassword's "current password is wrong" (an
+// InvalidError); front-ends throttle on it like a failed login.
+var ErrWrongPassword error = &InvalidError{Msg: "current password is wrong"}
+
+// ErrBusy means the password check couldn't run (every hash slot taken):
+// answer "try again", don't count it as a wrong password.
+var ErrBusy = auth.ErrBusy
+
 // IsForbidden reports whether err is (or wraps) ErrForbidden.
 func IsForbidden(err error) bool { return errors.Is(err, ErrForbidden) }
 
@@ -75,22 +83,31 @@ func (s *Service) Lookup(name string) (p Principal, fingerprint string, ok bool)
 // still costs one argon2id verify, the same as a database user with a wrong
 // password. (goddns.conf users are bcrypt, so their timing differs; the
 // admin vhost's CIDR allowlist, Basic gate and IP throttle sit in front.)
-func (s *Service) Login(name, pass string) (Principal, bool) {
+//
+// It returns (principal, true, nil) on success, (_, false, nil) on bad
+// credentials, and ErrBusy when the check couldn't run at all.
+func (s *Service) Login(name, pass string) (Principal, bool, error) {
 	if hash, ok := s.configHash(name); ok {
-		if auth.Verify(hash, pass) != nil {
-			return Principal{}, false
+		if err := auth.Verify(hash, pass); err != nil {
+			return Principal{}, false, busyOnly(err)
 		}
-		return Principal{Name: name, Role: RoleAdmin, Config: true}, true
+		return Principal{Name: name, Role: RoleAdmin, Config: true}, true, nil
 	}
 	u, err := s.store.UserGet(name)
 	if err != nil || u.Disabled || !validRole(u.Role) {
-		auth.Burn(pass)
-		return Principal{}, false
+		return Principal{}, false, auth.Burn(pass)
 	}
-	if auth.Verify(u.PassHash, pass) != nil {
-		return Principal{}, false
+	if err := auth.Verify(u.PassHash, pass); err != nil {
+		return Principal{}, false, busyOnly(err)
 	}
-	return Principal{Name: u.Name, Role: u.Role}, true
+	return Principal{Name: u.Name, Role: u.Role}, true, nil
+}
+
+func busyOnly(err error) error {
+	if errors.Is(err, ErrBusy) {
+		return err
+	}
+	return nil
 }
 
 // UserInfo is a login as the users page lists it (never the hash).
@@ -156,8 +173,14 @@ func (s *Service) enabledAdmins() (int, error) {
 
 // dbUser loads a database user that this layer may change: not a goddns.conf
 // user (those belong to the operator's file), and existing.
-func (s *Service) dbUser(name string) (store.User, error) {
-	if _, ok := s.configHash(name); ok {
+func (s *Service) dbUser(name string) (store.User, error) { return s.dbUserShadow(name, false) }
+
+// dbUserShadow is dbUser that, with allowShadowed, also returns a database
+// row hidden by a goddns.conf user of the same name — so that dead row can
+// still be deleted (it can't log in, and would otherwise come back to life,
+// with its old password, the day the goddns.conf line is removed).
+func (s *Service) dbUserShadow(name string, allowShadowed bool) (store.User, error) {
+	if _, ok := s.configHash(name); ok && !allowShadowed {
 		return store.User{}, invalid("%q is defined in goddns.conf [admin] users — change it there", name)
 	}
 	u, err := s.store.UserGet(name)
@@ -169,13 +192,17 @@ func (s *Service) dbUser(name string) (store.User, error) {
 
 // guardAdminLoss refuses a change that takes admin power away from u when
 // that would leave no admin able to log in, and refuses it on yourself.
-func (s *Service) guardAdminLoss(a Actor, u store.User, what string) error {
+func (s *Service) guardAdminLoss(a Actor, u store.User, verb string) error {
 	if u.Role != RoleAdmin || u.Disabled {
 		return nil
 	}
-	if a.User == u.Name {
-		return invalid("you can't %s your own account", what)
+	if _, shadowed := s.configHash(u.Name); shadowed {
+		return nil // can't log in as this row; the goddns.conf admin stays
 	}
+	if a.User == u.Name {
+		return invalid("you can't %s your own account", verb)
+	}
+	what := map[string]string{"demote": "demoting", "disable": "disabling", "delete": "deleting"}[verb]
 	n, err := s.enabledAdmins()
 	if err != nil {
 		return err
@@ -241,7 +268,7 @@ func (s *Service) UserSetRole(a Actor, name, role string) error {
 		return nil
 	}
 	if role != RoleAdmin {
-		if err := s.guardAdminLoss(a, u, "demoting"); err != nil {
+		if err := s.guardAdminLoss(a, u, "demote"); err != nil {
 			return err
 		}
 	}
@@ -268,7 +295,7 @@ func (s *Service) UserSetDisabled(a Actor, name string, disabled bool) error {
 		return nil
 	}
 	if disabled {
-		if err := s.guardAdminLoss(a, u, "disabling"); err != nil {
+		if err := s.guardAdminLoss(a, u, "disable"); err != nil {
 			return err
 		}
 	}
@@ -320,14 +347,11 @@ func (s *Service) UserDel(a Actor, name string) error {
 	}
 	userMu.Lock()
 	defer userMu.Unlock()
-	u, err := s.dbUser(name)
+	u, err := s.dbUserShadow(name, true)
 	if err != nil {
 		return err
 	}
-	if a.User == u.Name {
-		return invalid("you can't delete your own account")
-	}
-	if err := s.guardAdminLoss(a, u, "deleting"); err != nil {
+	if err := s.guardAdminLoss(a, u, "delete"); err != nil {
 		return err
 	}
 	if err := s.store.UserDel(u.Name); err != nil {
@@ -353,8 +377,11 @@ func (s *Service) ChangeOwnPassword(a Actor, current, next string) error {
 	if err != nil || u.Disabled {
 		return ErrForbidden
 	}
-	if auth.Verify(u.PassHash, current) != nil {
-		return invalid("current password is wrong")
+	if err := auth.Verify(u.PassHash, current); err != nil {
+		if errors.Is(err, ErrBusy) {
+			return err
+		}
+		return ErrWrongPassword
 	}
 	return s.setPassword(a, a.User, next, "account-passwd")
 }

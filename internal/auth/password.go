@@ -16,6 +16,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
@@ -47,10 +49,24 @@ const maxConcurrentHashes = 4
 
 var hashSem = make(chan struct{}, maxConcurrentHashes)
 
-func idKey(pass, salt []byte, t, m uint32, p uint8, n uint32) []byte {
-	hashSem <- struct{}{}
+// hashWait is how long a caller waits for a hash slot before giving up with
+// ErrBusy, so a flood sheds load instead of queueing every request forever.
+var hashWait = 3 * time.Second
+
+// ErrBusy means every hash slot stayed taken for hashWait: the caller should
+// answer "try again" (503), not count it as a failed password.
+var ErrBusy = errors.New("auth: too many password checks in progress, try again")
+
+func idKey(pass, salt []byte, t, m uint32, p uint8, n uint32) ([]byte, error) {
+	timer := time.NewTimer(hashWait)
+	defer timer.Stop()
+	select {
+	case hashSem <- struct{}{}:
+	case <-timer.C:
+		return nil, ErrBusy
+	}
 	defer func() { <-hashSem }()
-	return argon2.IDKey(pass, salt, t, m, p, n)
+	return argon2.IDKey(pass, salt, t, m, p, n), nil
 }
 
 // ErrMismatch is returned when a password does not match its hash.
@@ -76,7 +92,10 @@ func Hash(pass string) (string, error) {
 	if _, err := rand.Read(salt); err != nil {
 		return "", err
 	}
-	key := idKey([]byte(pass), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	key, err := idKey([]byte(pass), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	if err != nil {
+		return "", err
+	}
 	b64 := base64.RawStdEncoding
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, argonMemory, argonTime, argonThreads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
@@ -118,7 +137,10 @@ func verifyArgon2id(hash, pass string) error {
 	if ver != argon2.Version {
 		return fmt.Errorf("auth: argon2 version %d not supported", ver)
 	}
-	got := idKey([]byte(pass), salt, p.time, p.memory, p.threads, uint32(len(want)))
+	got, err := idKey([]byte(pass), salt, p.time, p.memory, p.threads, uint32(len(want)))
+	if err != nil {
+		return err
+	}
 	if subtle.ConstantTimeCompare(got, want) != 1 {
 		return ErrMismatch
 	}
@@ -147,6 +169,11 @@ func parseArgon2id(s string) (argonParams, []byte, []byte, int, error) {
 	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.memory, &p.time, &threads); err != nil {
 		return p, nil, nil, 0, errors.New("auth: malformed argon2id parameters")
 	}
+	// Exact form only: Sscanf ignores trailing text, so a PHC string with extra
+	// parameters (keyid=, data=) would parse and then never verify.
+	if parts[3] != fmt.Sprintf("m=%d,t=%d,p=%d", p.memory, p.time, threads) || parts[2] != fmt.Sprintf("v=%d", ver) {
+		return p, nil, nil, 0, errors.New("auth: unsupported argon2id parameter form")
+	}
 	if p.memory == 0 || p.memory > 1024*1024 || p.time == 0 || p.time > 16 || threads == 0 || threads > 64 {
 		return p, nil, nil, 0, errors.New("auth: argon2id parameters out of range")
 	}
@@ -165,13 +192,27 @@ func parseArgon2id(s string) (argonParams, []byte, []byte, int, error) {
 
 // dummyHash is verified against when the user doesn't exist, so an unknown
 // name costs the same argon2id work as a real one (no enumeration by timing).
-var dummyHash = func() string {
-	h, err := Hash("goddns-dummy-password")
-	if err != nil {
-		panic(err)
-	}
-	return h
-}()
+// Built on first use, not at init: every process linking this package (the
+// CLI, zoned, tests) would otherwise pay a 64 MiB hash before main().
+var (
+	dummyOnce sync.Once
+	dummyHash string
+)
 
-// Burn performs one argon2id verify against a throwaway hash.
-func Burn(pass string) { _ = Verify(dummyHash, pass) }
+// Burn performs one argon2id verify against a throwaway hash. It returns
+// ErrBusy when no hash slot frees up in time.
+func Burn(pass string) error {
+	dummyOnce.Do(func() {
+		h, err := Hash("goddns-dummy-password")
+		if err != nil {
+			// ErrBusy on the very first use: fall back to a fixed valid
+			// hash rather than leave the timing path empty.
+			h = "$argon2id$v=19$m=65536,t=1,p=2$MDEyMzQ1Njc4OWFiY2RlZg$MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY"
+		}
+		dummyHash = h
+	})
+	if err := Verify(dummyHash, pass); errors.Is(err, ErrBusy) {
+		return err
+	}
+	return nil
+}

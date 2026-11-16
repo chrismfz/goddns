@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"unicode"
 
 	"github.com/miekg/dns"
 
@@ -116,7 +117,22 @@ func (s *Service) Audit(a Actor, format string, args ...any) {
 	if logf == nil {
 		logf = log.Printf
 	}
-	logf("admin-audit user=%s peer=%s "+format, append([]any{a.User, a.Peer}, args...)...)
+	logf("admin-audit user=%s peer=%s "+format, append([]any{auditSafe(a.User), auditSafe(a.Peer)}, args...)...)
+}
+
+// auditSafe makes a caller-supplied value (a typed login name) safe for one
+// space-separated audit line: whitespace, control characters, '=' and '"'
+// become '?', so a crafted name can't split the line or forge fields.
+func auditSafe(s string) string {
+	if s == "" {
+		return `""`
+	}
+	return strings.Map(func(r rune) rune {
+		if r <= ' ' || r == 0x7f || r == '=' || r == '"' || unicode.IsSpace(r) || !unicode.IsPrint(r) {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // EditorKeys returns goddns's keyring (from tsig_keys_file) or the single key.

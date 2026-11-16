@@ -3,6 +3,7 @@ package auth
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -66,5 +67,39 @@ func TestPolicyAndMalformed(t *testing.T) {
 		if IsHash(bad) {
 			t.Fatalf("IsHash(%q) = true", bad)
 		}
+	}
+}
+
+// Extra PHC parameters must be refused, not parsed and silently ignored.
+func TestParseIsExact(t *testing.T) {
+	h, _ := Hash("correct horse")
+	parts := strings.Split(h, "$")
+	parts[3] += ",keyid=abc"
+	if IsHash(strings.Join(parts, "$")) {
+		t.Fatal("trailing PHC parameter accepted")
+	}
+}
+
+func TestBusyWhenSlotsTaken(t *testing.T) {
+	for i := 0; i < maxConcurrentHashes; i++ {
+		hashSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < maxConcurrentHashes; i++ {
+			<-hashSem
+		}
+	}()
+	old := hashWait
+	hashWait = 20 * time.Millisecond
+	defer func() { hashWait = old }()
+	if _, err := Hash("correct horse"); err != ErrBusy {
+		t.Fatalf("Hash: want ErrBusy, got %v", err)
+	}
+	b, _ := bcrypt.GenerateFromPassword([]byte("s3cretpass"), bcrypt.MinCost)
+	if err := Verify(string(b), "s3cretpass"); err != nil {
+		t.Fatalf("bcrypt doesn't use the argon2 slots: %v", err)
+	}
+	if err := Burn("x"); err != ErrBusy {
+		t.Fatalf("Burn: want ErrBusy, got %v", err)
 	}
 }

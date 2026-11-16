@@ -497,8 +497,18 @@ func (h *Handler) session(r *http.Request) (service.Principal, bool) {
 	return p, true
 }
 
+// setSession issues a session cookie bound to user's current credential
+// fingerprint (after a login, or to keep a user signed in across their own
+// password change, which rotates the fingerprint).
+func (h *Handler) setSession(w http.ResponseWriter, user string) {
+	ttl := time.Duration(h.cfg().Admin.SessionTTL) * time.Hour
+	http.SetCookie(w, &http.Cookie{
+		Name: cookieName, Value: newSession(h.secret, h.credFP(user), user, ttl), Path: "/",
+		MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
+	})
+}
+
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, peer string) {
-	ad := &h.cfg().Admin
 	if r.Method == http.MethodGet {
 		if _, ok := h.session(r); ok {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -517,25 +527,25 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, peer strin
 	ipKey := "ip:" + peer
 	if until := h.throttle.blockedUntil(ipKey); !until.IsZero() {
 		w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(until).Seconds())+1))
-		w.WriteHeader(http.StatusTooManyRequests)
-		render(w, loginTmpl, map[string]any{"Version": h.version, "Error": "too many attempts — wait a minute"})
+		renderStatus(w, http.StatusTooManyRequests, loginTmpl, map[string]any{"Version": h.version, "Error": "too many attempts — wait a minute"})
 		h.audit(user, peer, "login-throttled")
 		return
 	}
-	p, ok := h.svc.Login(user, pass)
+	p, ok, err := h.svc.Login(user, pass)
+	if err != nil { // the check couldn't run (hash slots full): not a wrong password
+		w.Header().Set("Retry-After", "5")
+		renderStatus(w, http.StatusServiceUnavailable, loginTmpl, map[string]any{"Version": h.version, "Error": "busy — try again in a few seconds"})
+		h.audit(user, peer, "login-busy")
+		return
+	}
 	if !ok {
 		h.throttle.fail(ipKey)
 		h.audit(user, peer, "login-failed")
-		w.WriteHeader(http.StatusUnauthorized)
-		render(w, loginTmpl, map[string]any{"Version": h.version, "Error": "invalid credentials"})
+		renderStatus(w, http.StatusUnauthorized, loginTmpl, map[string]any{"Version": h.version, "Error": "invalid credentials"})
 		return
 	}
 	h.throttle.ok(ipKey)
-	ttl := time.Duration(ad.SessionTTL) * time.Hour
-	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: newSession(h.secret, h.credFP(p.Name), p.Name, ttl), Path: "/",
-		MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
-	})
+	h.setSession(w, p.Name)
 	h.audit(p.Name, peer, "login-ok role=%s", p.Role)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

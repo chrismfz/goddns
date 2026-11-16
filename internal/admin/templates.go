@@ -30,7 +30,12 @@ const (
 
 var tmpls = template.Must(template.Must(template.New("").Parse(pages)).Parse(userPages))
 
-func render(w http.ResponseWriter, name string, data any) {
+func render(w http.ResponseWriter, name string, data any) { renderStatus(w, 0, name, data) }
+
+// renderStatus renders with a non-200 status. The security headers must be set
+// BEFORE WriteHeader — headers added after it are silently dropped — so an
+// error page goes through here, never WriteHeader-then-render.
+func renderStatus(w http.ResponseWriter, code int, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -39,6 +44,9 @@ func render(w http.ResponseWriter, name string, data any) {
 	// self. Defence in depth behind html/template auto-escaping.
 	w.Header().Set("Content-Security-Policy",
 		"default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
+	if code != 0 {
+		w.WriteHeader(code)
+	}
 	if err := tmpls.ExecuteTemplate(w, name, data); err != nil {
 		log.Printf("admin: template %s: %v", name, err)
 	}
