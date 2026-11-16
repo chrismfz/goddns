@@ -16,7 +16,10 @@ var errVhostOff = invalid("vhost editing is not enabled")
 
 // VhostList returns every configured vhost with its provenance (managed
 // proxy.d/ fragment vs base config).
-func (s *Service) VhostList() ([]vhostmut.Entry, error) {
+func (s *Service) VhostList(a Actor) ([]vhostmut.Entry, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	if !s.VhostEditing() {
 		return nil, errVhostOff
 	}
@@ -26,9 +29,9 @@ func (s *Service) VhostList() ([]vhostmut.Entry, error) {
 // VhostManaged returns the set of hosts (normalized) whose proxy.d/ fragment
 // goddns owns. Best-effort: on any error (or editing off) the set is empty, so
 // a caller shows everything read-only.
-func (s *Service) VhostManaged() map[string]bool {
+func (s *Service) VhostManaged(a Actor) map[string]bool {
 	managed := map[string]bool{}
-	if !s.VhostEditing() {
+	if !s.VhostEditing() || s.requireAdmin(a) != nil {
 		return managed
 	}
 	if entries, err := s.vhostEditor().List(); err == nil {
@@ -45,9 +48,9 @@ func (s *Service) VhostManaged() map[string]bool {
 func normHost(h string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".") }
 
 // VhostGet returns the goddns-managed vhost for host.
-func (s *Service) VhostGet(host string) (vhostmut.Entry, error) {
+func (s *Service) VhostGet(a Actor, host string) (vhostmut.Entry, error) {
 	host = normHost(host)
-	entries, err := s.VhostList()
+	entries, err := s.VhostList(a)
 	if err != nil {
 		return vhostmut.Entry{}, err
 	}
@@ -62,6 +65,9 @@ func (s *Service) VhostGet(host string) (vhostmut.Entry, error) {
 // VhostSet creates or replaces a managed vhost. apply=false previews the
 // rendered fragment; apply=true writes it, audits and triggers a reload.
 func (s *Service) VhostSet(a Actor, host string, rule config.ProxyRule, apply bool) (*vhostmut.Result, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	if !s.VhostEditing() {
 		return nil, errVhostOff
 	}
@@ -91,6 +97,9 @@ func (s *Service) VhostSet(a Actor, host string, rule config.ProxyRule, apply bo
 // VhostRemove deletes a managed vhost. apply=false previews; apply=true
 // removes the fragment, audits and triggers a reload.
 func (s *Service) VhostRemove(a Actor, host string, apply bool) (*vhostmut.Result, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	if !s.VhostEditing() {
 		return nil, errVhostOff
 	}

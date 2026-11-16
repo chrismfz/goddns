@@ -34,7 +34,8 @@ Usage:
   goddns token list [-config ...]
   goddns token rotate -fqdn home.myip.gr [-config ...]  # new token, old stops
   goddns token del  -fqdn home.myip.gr [-config ...]
-  goddns passwd -user chris        # bcrypt entry for proxy basic_auth
+  goddns passwd -user chris        # bcrypt entry for proxy basic_auth / [admin] users
+  goddns user list|add|del|passwd|role|disable|enable ...  # admin UI logins (admin / user roles)
   goddns rotate-key [name]         # rotate a TSIG key in tsig_keys_file + rndc reconfig
   goddns record add|del|delset ... # edit records (dynamic: RFC2136; static: in-place file edit if enabled)
   goddns zone enable <zone>        # check a static zone is safe to add to editable_zones
@@ -48,6 +49,39 @@ Usage:
 `, Version, defaultConf)
 }
 
+// readPassword reads one password from the terminal (no echo) or, when
+// stdin is piped (scripting), one password per line.
+func readPassword(prompt string) []byte {
+	fmt.Fprint(os.Stderr, prompt)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		p, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			fatal("reading password: %v", err)
+		}
+		return p
+	}
+	var s string
+	if _, err := fmt.Fscanln(os.Stdin, &s); err != nil {
+		fatal("reading password: %v", err)
+	}
+	return []byte(s)
+}
+
+// readNewPassword reads a new password, asking twice on a terminal.
+func readNewPassword() []byte {
+	pass := readPassword("Password: ")
+	if len(pass) < 8 {
+		fatal("password too short (min 8 characters)")
+	}
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		if again := readPassword("Repeat:   "); string(pass) != string(again) {
+			fatal("passwords do not match")
+		}
+	}
+	return pass
+}
+
 func cmdPasswd(args []string) {
 	fs := flag.NewFlagSet("passwd", flag.ExitOnError)
 	user := fs.String("user", "", "username for the basic_auth entry")
@@ -56,34 +90,7 @@ func cmdPasswd(args []string) {
 		fatal("passwd requires -user (without ':')")
 	}
 
-	readPass := func(prompt string) []byte {
-		fmt.Fprint(os.Stderr, prompt)
-		if term.IsTerminal(int(os.Stdin.Fd())) {
-			p, err := term.ReadPassword(int(os.Stdin.Fd()))
-			fmt.Fprintln(os.Stderr)
-			if err != nil {
-				fatal("reading password: %v", err)
-			}
-			return p
-		}
-		// piped input (scripting): one password per line
-		var s string
-		if _, err := fmt.Fscanln(os.Stdin, &s); err != nil {
-			fatal("reading password: %v", err)
-		}
-		return []byte(s)
-	}
-
-	pass := readPass("Password: ")
-	if len(pass) < 8 {
-		fatal("password too short (min 8 characters)")
-	}
-	if term.IsTerminal(int(os.Stdin.Fd())) {
-		again := readPass("Repeat:   ")
-		if string(pass) != string(again) {
-			fatal("passwords do not match")
-		}
-	}
+	pass := readNewPassword()
 	hash, err := bcrypt.GenerateFromPassword(pass, bcrypt.DefaultCost)
 	if err != nil {
 		fatal("bcrypt: %v", err)
@@ -104,6 +111,8 @@ func main() {
 		cmdToken(os.Args[2:])
 	case "passwd":
 		cmdPasswd(os.Args[2:])
+	case "user":
+		cmdUser(os.Args[2:])
 	case "rotate-key":
 		cmdRotateKey(os.Args[2:])
 	case "record":

@@ -38,7 +38,7 @@ func newSvc(t *testing.T, extra string) (*Service, *store.Store, *[]string, stri
 	return s, st, &lines, conf
 }
 
-var who = Actor{User: "chris", Peer: "192.0.2.1"}
+var who = Actor{User: "chris", Peer: "192.0.2.1", Role: RoleAdmin}
 
 func TestDDNSLifecycleAudits(t *testing.T) {
 	s, st, lines, _ := newSvc(t, "")
@@ -156,8 +156,8 @@ func TestVhostSet(t *testing.T) {
 	if _, err := s.VhostSet(who, "nas.example", rule, true); err != nil {
 		t.Fatal(err)
 	}
-	if reloads != 1 || !s.VhostManaged()["nas.example"] {
-		t.Fatalf("apply: reloads=%d managed=%v", reloads, s.VhostManaged())
+	if reloads != 1 || !s.VhostManaged(who)["nas.example"] {
+		t.Fatalf("apply: reloads=%d managed=%v", reloads, s.VhostManaged(who))
 	}
 	if _, err := s.VhostRemove(who, "nas.example", true); err != nil {
 		t.Fatal(err)
@@ -200,7 +200,7 @@ func TestErrorClassification(t *testing.T) {
 	if _, err := s.VhostSet(who, "a.example", config.ProxyRule{Upstream: "http://x", ConsolePorts: []int{8443}}, false); !IsInvalid(err) {
 		t.Fatalf("collision must be InvalidError, got %v", err)
 	}
-	if _, err := s.VhostGet("nope.example"); !IsInvalid(err) {
+	if _, err := s.VhostGet(who, "nope.example"); !IsInvalid(err) {
 		t.Fatalf("unknown vhost must be InvalidError, got %v", err)
 	}
 }
@@ -212,7 +212,7 @@ func TestVhostHostNormalized(t *testing.T) {
 	if _, err := s.VhostSet(who, " NAS.Example. ", config.ProxyRule{Upstream: "http://10.0.0.5:80"}, true); err != nil {
 		t.Fatal(err)
 	}
-	if e, err := s.VhostGet("nas.example"); err != nil || e.Host != "nas.example" {
+	if e, err := s.VhostGet(who, "nas.example"); err != nil || e.Host != "nas.example" {
 		t.Fatalf("get: %+v %v", e, err)
 	}
 	if _, err := s.VhostRemove(who, "Nas.EXAMPLE.", true); err != nil {

@@ -273,7 +273,7 @@ the same TLS and port — no extra listener, no port games):
     enabled = true
     host    = "admin.myip.gr"
     allow   = ["84.54.49.0/24", "94.67.0.0/16"]
-    users   = ["chris:$2a$10$..."]      # goddns passwd -user chris
+    users   = ["chris:$2a$10$..."]      # optional bootstrap admin: goddns passwd -user chris
 
 It shows the DDNS records (last IP / last seen), the proxy table, a
 **per-host traffic panel** (live active connections, request count, bytes
@@ -299,8 +299,39 @@ goddns bcrypts it for you — no console trip. The same hashing is on a dedicate
 **password** page (the in-UI `goddns passwd`): type a user + password, get a
 `user:bcrypt` line to paste into `[admin] users` (goddns never rewrites your
 `goddns.conf`, so admin logins are placed by you — the page just mints the
-hash). A persistent top nav (dashboard · zones · logs · password) is on every
-page, with a per-page sub-bar for context.
+hash). A persistent top nav (dashboard · zones · logs · traffic · users · hash ·
+account) is on every page, with a per-page sub-bar for context.
+
+### Users and roles
+
+Logins live in two places:
+
+- **`[admin] users` in goddns.conf** — bootstrap admins (bcrypt). Always the
+  `admin` role, shown read-only in the UI, edited only in the file. Optional:
+  you can run with none once a database admin exists.
+- **The SQLite store** — managed from the **users** page or the CLI, hashed
+  with **argon2id** (the PHC format ngm also uses):
+
+      goddns user add chris -role admin       # password prompted (or one line on stdin)
+      goddns user add alice                   # -role user is the default
+      goddns user list
+      goddns user role alice admin
+      goddns user passwd alice
+      goddns user disable alice   /   goddns user enable alice
+      goddns user del alice
+
+Two roles: an **admin** can do everything; a **user** can sign in and change
+their own password on the **account** page, and nothing else yet — zones are
+granted to users in a later release, and until then the role is fail-closed
+(every other page and action answers 403). The role is enforced in the
+service layer, so the UI, the CLI and the coming API can't diverge.
+
+Changing a user's role or password, or disabling or deleting them, ends their
+sessions at once. goddns refuses to demote, disable or delete the **last
+admin** that can log in (and you can't do it to yourself), so the UI can't
+lock everyone out. If a goddns.conf user and a database user share a name,
+the goddns.conf one wins (the database row is shown as *shadowed*). At
+startup goddns warns when no admin can log in at all.
 
 **It can rewrite DNS, so it is gated in depth** — a custom port would be
 security theatre; layered auth is the real control:
@@ -308,16 +339,17 @@ security theatre; layered auth is the real control:
 1. **`allow`** — client CIDRs. A genuine packet filter, not obscurity.
 2. **`basic_auth`** (optional) — an outer HTTP Basic gate so scanners never
    reach the login form. bcrypt only.
-3. **login session** — `users` are the login credentials; a signed,
-   `SameSite=Strict`, HttpOnly cookie. CSRF tokens on every mutating form.
+3. **login session** — a goddns.conf or database login (see Users and
+   roles); a signed, `SameSite=Strict`, HttpOnly cookie. CSRF tokens on every
+   mutating form.
 
 So a single auth bug isn't game over, and every mutation is written to the
 event log as an `admin-audit` line. The login form is **rate-limited per
 client IP** (fail2ban-style: an attacking source locks itself out with
 exponential backoff; legit accounts can't be locked out by others), on top
-of bcrypt. Sessions are bound to the user's current credential, so changing
-a password — or removing the user — invalidates their outstanding sessions
-immediately. The session key is auto-created at `/var/lib/goddns/admin.secret`
+of the password hash. Sessions are bound to the user's current credential and
+role, so changing a password or role — or disabling or removing the user —
+invalidates their outstanding sessions immediately. The session key is auto-created at `/var/lib/goddns/admin.secret`
 (or set `GODDNS_ADMIN_SECRET`, min 16 bytes) and persists across restarts.
 `users`/`allow`/`basic_auth` hot-reload; enabling or moving the vhost needs
 a restart.

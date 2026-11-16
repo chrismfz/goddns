@@ -115,7 +115,12 @@ approval workflow on top of the audit/history substrate:
   whmapi1/UAPI, DirectAdmin, Virtualmin — so panel-managed zones get CRUD
   through the panel's own API (honouring the invariant), letting goddns run as a
   standalone DNS + history layer *alongside* a panel.
-- **Multi-tenant authz / RBAC**: who may read/edit which zones and which record
+- **Users + roles** — DONE. Database logins (argon2id) next to the
+  goddns.conf bootstrap admins; `admin` / `user` roles checked in the service
+  layer; users page, account page, `goddns user …` CLI; last-admin guard.
+  The `user` role is fail-closed until zone grants land.
+- **Multi-tenant authz / RBAC** (next: per-zone grants for the `user` role):
+  who may read/edit which zones and which record
   types. goauth (or any SSO/2FA) gates the door; this is the app-level model
   behind it, with per-tenant audit + history.
 - **External API / connectors**: a machine API (bearer / mTLS, rate-limited,

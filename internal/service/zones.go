@@ -27,7 +27,12 @@ type ZoneList struct {
 
 // Inventory reads named.conf through `named-checkconf -p` (every include
 // inlined by BIND's own parser).
-func (s *Service) Inventory() (*named.Inventory, error) { return inventory(s.cfg()) }
+func (s *Service) Inventory(a Actor) (*named.Inventory, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
+	return inventory(s.cfg())
+}
 
 // inventory reads named.conf as cfg names it. Calls that use the config for
 // more than this take ONE snapshot and pass it down, so a hot-reload mid-call
@@ -53,7 +58,10 @@ func server(cfg *config.Config) string {
 }
 
 // Zones lists the zones BIND serves plus the TSIG health findings.
-func (s *Service) Zones() (*ZoneList, error) {
+func (s *Service) Zones(a Actor) (*ZoneList, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	cfg := s.cfg()
 	inv, err := inventory(cfg)
 	if err != nil {
@@ -82,7 +90,10 @@ type NSVerdict struct {
 // query + a few SOA probes each, no AXFR), with a small concurrency cap so a
 // host with many zones can't be made to open a flood of sockets from one call.
 // The result is index-aligned with zones.
-func (s *Service) NSVerdicts(zones []named.Zone) []NSVerdict {
+func (s *Service) NSVerdicts(a Actor, zones []named.Zone) ([]NSVerdict, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	srv := server(s.cfg())
 	out := make([]NSVerdict, len(zones))
 	sem := make(chan struct{}, nsCheckConcurrency)
@@ -97,7 +108,7 @@ func (s *Service) NSVerdicts(zones []named.Zone) []NSVerdict {
 		}(i)
 	}
 	wg.Wait()
-	return out
+	return out, nil
 }
 
 // NS verdict statuses.
@@ -147,7 +158,10 @@ type ZoneView struct {
 // Zone pulls the LIVE records from BIND via AXFR so the caller sees exactly
 // what the server answers, including anything written dynamically. Read-only.
 // liveNS adds the per-nameserver SOA probe.
-func (s *Service) Zone(name string, liveNS bool) (*ZoneView, error) {
+func (s *Service) Zone(a Actor, name string, liveNS bool) (*ZoneView, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	cfg := s.cfg()
 	srv := server(cfg)
 
@@ -182,10 +196,8 @@ func (s *Service) Zone(name string, liveNS bool) (*ZoneView, error) {
 	return v, nil
 }
 
-// CanEditDynamic reports whether goddns may write the named zone over RFC2136
+// canEditDynamic reports whether goddns may write the named zone over RFC2136
 // (dynamic + a held key). Best-effort: unreadable named.conf ⇒ false.
-func (s *Service) CanEditDynamic(name string) bool { return s.canEditDynamic(s.cfg(), name) }
-
 func (s *Service) canEditDynamic(cfg *config.Config, name string) bool {
 	inv, err := inventory(cfg)
 	if err != nil {
@@ -215,7 +227,10 @@ type ZoneHistory struct {
 
 // History returns the snapshot list (up to 200) and the diff of the most
 // recent change. Snapshots are captured by the serve poller.
-func (s *Service) History(name string) (*ZoneHistory, error) {
+func (s *Service) History(a Actor, name string) (*ZoneHistory, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	snaps, err := s.store.SnapshotList(name, 200)
 	if err != nil {
 		return nil, err

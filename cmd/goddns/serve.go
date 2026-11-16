@@ -26,6 +26,7 @@ import (
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/proxy"
 	"github.com/chrismfz/goddns/internal/server"
+	"github.com/chrismfz/goddns/internal/service"
 	"github.com/chrismfz/goddns/internal/store"
 	"github.com/chrismfz/goddns/internal/tlsmgr"
 )
@@ -168,6 +169,10 @@ func cmdServe(args []string) {
 			})
 			adminH = ah
 			log.Printf("admin UI enabled at https://%s%s", cfg.Admin.Host, cfg.ProxyListen)
+			if ok, err := service.New(func() *config.Config { return cfg }, st).HasAdminLogin(); err == nil && !ok {
+				log.Printf("WARNING: admin UI has no admin login — no [admin] users in goddns.conf and no " +
+					"enabled admin in the database. Create one: goddns user add <name> -role admin")
+			}
 			if len(cfg.Admin.Allow) == 0 && len(cfg.Admin.BasicAuth) == 0 {
 				log.Printf("WARNING: admin has no 'allow' CIDR list and no 'basic_auth' — the login " +
 					"form is reachable from anywhere (login throttling is on, but set allow and/or " +
