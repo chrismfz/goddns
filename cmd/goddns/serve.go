@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/chrismfz/goddns/internal/admin"
+	"github.com/chrismfz/goddns/internal/api"
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filewatch"
@@ -145,6 +146,14 @@ func cmdServe(args []string) {
 		Store:   st,
 		GetCert: src.getCert,
 	}
+	// Machine API (/api/v1/) on the same listener, over the same service
+	// layer as the admin UI: same role/grant rules, same audit lines.
+	apiSvc := service.New(func() *config.Config { return cur.Load().cfg }, st)
+	if cfg.ProxyEnabled { // vhost endpoints only where the proxy (and so proxy.d/) is in use
+		apiSvc.ConfPath = *cfgPath
+		apiSvc.Reload = func() { _ = syscall.Kill(os.Getpid(), syscall.SIGHUP) }
+	}
+	srv.API = api.New(apiSvc, srv.ClientIP).Mux()
 
 	var px *proxy.Proxy
 	var cm *consoleManager

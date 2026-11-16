@@ -42,6 +42,7 @@ certificate, or access control on their own.
 | Expose a home service on a dynamic IP | [DDNS + proxy together](#ddns--proxy-together-a-home-service-on-a-dynamic-ip) |
 | Expose a whole LAN with zero open ports | [SSH reverse tunnels](#zero-open-ports-ssh-reverse-tunnels-the-whole-lan-not-just-one-box) |
 | Manage records from a web dashboard | [Admin web UI](#admin-web-ui-optional) |
+| Automate it (scripts, CI, a provisioning system) | [Machine API](#machine-api-apiv1) |
 | Build .deb/.rpm packages | [Build & packaging](#build--packaging-cfm-style-workflow) |
 | Something broke | [Troubleshooting](#troubleshooting) |
 
@@ -414,6 +415,65 @@ traffic away from it entirely.
 DNS for the admin name is just a static record at your goddns host — e.g.
 `admin.internal.myip.gr` already covered by the `*.internal` wildcard, or a
 plain `admin IN A <goddns-ip>`. Keep it on your LAN/VPN where you can.
+
+## Machine API (`/api/v1`)
+
+A JSON API on the DDNS listener (`:8245`, or behind your proxy with
+`tls_mode = "none"`), over the same service layer as the admin UI: the same
+role and zone-grant rules, the same `admin-audit` lines (with `via=api:<token>`).
+
+**Tokens** belong to a login and act as it — never with more than its role
+and zones — narrowed by **scopes**:
+
+| scope | allows | roles |
+|---|---|---|
+| `zones:read` | list zones, records, history | user, admin |
+| `records:write` | add / delete records, restore a snapshot | user, admin |
+| `ddns:read` / `ddns:write` | list / add, rotate, delete DDNS records | user, admin |
+| `proxy:read` / `proxy:write` | list / set, remove proxy vhosts | admin |
+| `users:admin` | list users, grant / revoke zones | admin |
+
+Create one on the **account** page (your own) or on the console:
+
+    goddns apitoken add ci -user alice -scopes zones:read,records:write -allow 203.0.113.0/24 -expires 90
+    goddns apitoken list
+    goddns apitoken revoke <id>
+
+Send it as a header, never in a URL: `Authorization: Bearer gdapi_…`. Only
+its hash is stored; it can carry source CIDRs and an expiry; it stops at
+once when it is revoked, expires, or its login is disabled, deleted or loses
+the zone. An API token can't mint further tokens. Failed authentications lock
+a source (an IPv4 address or an IPv6 /64) out for 5 minutes after 10, and
+each token is limited to 10 requests/s (burst 20) — and to 1/s (burst 3) on
+the endpoints that transfer or write a zone (`GET /zones/{zone}`, records,
+restore). A login holds at most 25 tokens.
+
+| method & path | body | scope |
+|---|---|---|
+| `GET /api/v1/me` | | any |
+| `GET /api/v1/zones` | | `zones:read` |
+| `GET /api/v1/zones/{zone}` | | `zones:read` |
+| `GET /api/v1/zones/{zone}/history` | | `zones:read` |
+| `POST /api/v1/zones/{zone}/records` | `{"action":"add\|del","rr":"www 300 IN A 192.0.2.1","dry_run":true}` | `records:write` |
+| `POST /api/v1/zones/{zone}/restore` | `{"id":42,"dry_run":true}` | `records:write` |
+| `GET /api/v1/ddns` | | `ddns:read` |
+| `POST /api/v1/ddns` | `{"fqdn":"home","zone":"ddns.example.com","ttl":60}` → the update token, once | `ddns:write` |
+| `POST /api/v1/ddns/{fqdn}/rotate` | | `ddns:write` |
+| `DELETE /api/v1/ddns/{fqdn}` | | `ddns:write` |
+| `GET /api/v1/vhosts` | | `proxy:read` |
+| `PUT /api/v1/vhosts/{host}[?dry_run=1]` | the vhost rule (`upstream`, `allow`, …) | `proxy:write` |
+| `DELETE /api/v1/vhosts/{host}[?dry_run=1]` | | `proxy:write` |
+| `GET /api/v1/users` | | `users:admin` |
+| `PUT` / `DELETE /api/v1/users/{user}/zones/{zone}` | | `users:admin` |
+
+`dry_run` returns the diff without changing anything. Errors are
+`{"error":"…"}` with 400 (bad request), 401 (token), 403 (scope, role or
+zone), 429 (lockout / rate) or 500 (the operation itself failed — the detail
+is in the server log, and in the response for an admin token).
+
+    curl -H "Authorization: Bearer $TOKEN" https://sdns.example.com:8245/api/v1/zones
+    curl -H "Authorization: Bearer $TOKEN" -d '{"action":"add","rr":"www 300 IN A 192.0.2.1","dry_run":true}' \
+         https://sdns.example.com:8245/api/v1/zones/example.com/records
 
 ## Zones (read-only BIND introspection)
 

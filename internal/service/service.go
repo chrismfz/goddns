@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/miekg/dns"
@@ -52,6 +53,13 @@ type Store interface {
 	UserSetDisabled(name string, disabled bool) error
 	UserDel(name string) error
 
+	APITokenAdd(user, name string, scopes, allowNets []string, expires time.Time) (store.APIToken, string, error)
+	APITokenLookup(tok string) (store.APIToken, error)
+	APITokenGet(id int64) (store.APIToken, error)
+	APITokenList(user string) ([]store.APIToken, error)
+	APITokenDel(id int64) error
+	APITokenTouch(id int64, now time.Time) error
+
 	GrantAdd(user, zone string) error
 	GrantDel(user, zone string) error
 	GrantsFor(user string) ([]string, error)
@@ -65,6 +73,7 @@ type Actor struct {
 	User string
 	Peer string // client address, "?" when unknown
 	Role string // RoleAdmin | RoleUser
+	Via  string // how it came in when not a session or the CLI, e.g. "api:ci" (audited)
 }
 
 // Service is the operation layer. Construct with New; the zero value of the
@@ -126,6 +135,10 @@ func (s *Service) Audit(a Actor, format string, args ...any) {
 	logf := s.Logf
 	if logf == nil {
 		logf = log.Printf
+	}
+	if a.Via != "" {
+		logf("admin-audit user=%s via=%s peer=%s "+format, append([]any{auditSafe(a.User), auditSafe(a.Via), auditSafe(a.Peer)}, args...)...)
+		return
 	}
 	logf("admin-audit user=%s peer=%s "+format, append([]any{auditSafe(a.User), auditSafe(a.Peer)}, args...)...)
 }

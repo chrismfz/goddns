@@ -119,7 +119,8 @@ func (s *Store) UserSetDisabled(name string, disabled bool) error {
 	return s.userUpdate(name, "disabled", v)
 }
 
-// UserDel removes a user, their zone grants and the DDNS records they own, in
+// UserDel removes a user, their zone grants, the DDNS records and the API
+// tokens they own, in
 // one transaction (a grant or token left behind would silently come back to
 // life for a later user of the same name).
 func (s *Store) UserDel(name string) error {
@@ -139,6 +140,9 @@ func (s *Store) UserDel(name string) error {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM records WHERE owner = ?`, name); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM api_tokens WHERE user = ?`, name); err != nil {
 		return err
 	}
 	return tx.Commit()
