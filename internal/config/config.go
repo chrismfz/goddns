@@ -108,6 +108,7 @@ type Config struct {
 	ManagedInclude string   `toml:"managed_include"`  // default /etc/named/goddns-zones.conf
 	ManagedZoneDir string   `toml:"managed_zone_dir"` // default /var/named (files are <zone>.hosts)
 	ZoneNS         []string `toml:"zone_ns"`          // default apex NS for a new zone (overridable per zone)
+	ZoneHostmaster string   `toml:"zone_hostmaster"`  // SOA contact for a new zone, e.g. "admin.example.com" (default hostmaster.<zone>)
 
 	// Reverse proxy mode: a second TLS listener that routes by SNI/Host to
 	// internal upstreams (iDRAC, switches, anything without proper TLS).

@@ -4,8 +4,10 @@ set -e
 # stop/disable on remove
 if [ "$1" = "remove" ] || [ "$1" = "deconfigure" ]; then
     if command -v systemctl >/dev/null 2>&1; then
-        systemctl stop goddns.service || true
-        systemctl disable goddns.service || true
+        for u in goddns.service goddns-zoned.service; do
+            systemctl stop "$u" || true
+            systemctl disable "$u" || true
+        done
     fi
 fi
 

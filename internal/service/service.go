@@ -75,7 +75,7 @@ type Actor struct {
 	User string
 	Peer string // client address, "?" when unknown
 	Role string // RoleAdmin | RoleUser
-	Via  string // how it came in when not a session or the CLI, e.g. "api:ci" (audited)
+	Via  string // how it came in when not a session or the CLI, e.g. "api:ci" (audited as auth=; not via=, which a static edit's line already uses for the writer)
 }
 
 // Service is the operation layer. Construct with New; the zero value of the
@@ -142,7 +142,7 @@ func (s *Service) Audit(a Actor, format string, args ...any) {
 		logf = log.Printf
 	}
 	if a.Via != "" {
-		logf("admin-audit user=%s via=%s peer=%s "+format, append([]any{auditSafe(a.User), auditSafe(a.Via), auditSafe(a.Peer)}, args...)...)
+		logf("admin-audit user=%s auth=%s peer=%s "+format, append([]any{auditSafe(a.User), auditSafe(a.Via), auditSafe(a.Peer)}, args...)...)
 		return
 	}
 	logf("admin-audit user=%s peer=%s "+format, append([]any{auditSafe(a.User), auditSafe(a.Peer)}, args...)...)

@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/ddns"
+	"github.com/miekg/dns"
 )
 
 func TestFlagsFirst(t *testing.T) {
@@ -49,5 +51,14 @@ func TestCLIAuditGoesToLogFile(t *testing.T) {
 	b, _ := os.ReadFile(lf)
 	if !strings.HasPrefix(string(b), "daemon line\n") || !strings.Contains(string(b), "user-del name=x") {
 		t.Fatalf("log file: %q", b)
+	}
+}
+
+func TestOpsTextForAudit(t *testing.T) {
+	a, _ := dns.NewRR("www.example.com. 60 IN A 192.0.2.1")
+	ops := []ddns.Op{{Action: ddns.AddRR, RR: a}, {Action: ddns.DelRRset, RR: &dns.RFC3597{Hdr: dns.RR_Header{Name: "old.example.com.", Rrtype: dns.TypeTXT}}}}
+	got := opsText(ops)
+	if !strings.Contains(got, "+www.example.com.") || !strings.Contains(got, "-*old.example.com. TXT") {
+		t.Fatalf("opsText: %q", got)
 	}
 }

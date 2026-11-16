@@ -276,6 +276,9 @@ func cmdZone(args []string) {
 		case "create", "delete":
 			cmdZoneManage(args[0], args[1:])
 			return
+		case "init":
+			cmdZoneInit(args[1:])
+			return
 		}
 	}
 

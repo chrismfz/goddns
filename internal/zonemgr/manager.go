@@ -41,13 +41,14 @@ type Manager struct {
 	ZoneDir   string // where new zone files go
 	LockDir   string // advisory lock lives here (default /var/lib/goddns/zonelocks)
 
-	Inv       func() (*named.Inventory, error)        // default: named-checkconf -p + Parse
-	CheckZone func(zone string, content []byte) error // default: named-checkzone
-	CheckConf func() error                            // default: named-checkconf <NamedConf>
-	Reconfig  func() error                            // default: rndc reconfig
-	Verify    func(zone string) error                 // default: SOA query to DNSServer
-	DNSServer string                                  // for the default Verify (default 127.0.0.1:53)
-	Now       func() time.Time
+	Inv        func() (*named.Inventory, error)        // default: named-checkconf -p + Parse
+	CheckZone  func(zone string, content []byte) error // default: named-checkzone
+	CheckConf  func() error                            // default: named-checkconf <NamedConf>
+	Reconfig   func() error                            // default: rndc reconfig
+	Verify     func(zone string) error                 // default: SOA query to DNSServer
+	DNSServer  string                                  // for the default Verify (default 127.0.0.1:53)
+	Hostmaster string                                  // default SOA contact when a request gives none (zone_hostmaster)
+	Now        func() time.Time
 }
 
 // CreateRequest is a new zone. NS are the apex nameservers (at least one);
@@ -160,7 +161,7 @@ func (m *Manager) ready() error {
 		return fmt.Errorf("read %s: %w", m.NamedConf, err)
 	}
 	if !ok {
-		return refused("%s doesn't include the managed include yet — add this line once, then retry:\n    include %q;", m.NamedConf, m.Include)
+		return refused("%s doesn't include the managed include yet — run `goddns zone init`, then add this line once:\n    include %q;", m.NamedConf, m.Include)
 	}
 	return nil
 }
@@ -257,6 +258,9 @@ func (m *Manager) PlanCreate(req CreateRequest) (*Plan, error) {
 	// layout "01" would be the month again)
 	day := m.now().UTC()
 	serial := uint32(day.Year()*1000000+int(day.Month())*10000+day.Day()*100) + 1
+	if strings.TrimSpace(req.Hostmaster) == "" {
+		req.Hostmaster = m.Hostmaster
+	}
 	content, err := render(req, z, serial, day)
 	if err != nil {
 		return nil, err
@@ -301,8 +305,7 @@ func (m *Manager) Create(req CreateRequest) (*Plan, error) {
 	}
 	next := old
 	if !existed {
-		next = "// goddns-managed zones — a plain named.conf fragment. goddns adds and removes\n" +
-			"// stanzas here; you may edit it by hand too (named-checkconf before reloading).\n"
+		next = includeHeader
 	}
 	if next != "" && !strings.HasSuffix(next, "\n") {
 		next += "\n"
@@ -533,9 +536,32 @@ func matchGroup(path, dir string) {
 	}
 }
 
+const includeHeader = "// goddns-managed zones — a plain named.conf fragment. goddns adds and removes\n" +
+	"// stanzas here; you may edit it by hand too (named-checkconf before reloading).\n"
+
+// Init creates the managed include, empty, if it doesn't exist yet: BIND
+// refuses an `include` of a missing file (named-checkconf, a reload or a
+// restart all fail), so it must exist BEFORE named.conf references it.
+// Returns whether it created the file.
+func (m *Manager) Init() (bool, error) {
+	if m.Include == "" {
+		return false, refused("managed_include is not set")
+	}
+	if _, err := os.Lstat(m.Include); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	if err := os.MkdirAll(filepath.Dir(m.Include), 0o750); err != nil {
+		return false, err
+	}
+	return true, atomicWrite(m.Include, includeHeader)
+}
+
 // ForConfig builds the production Manager from goddns's config.
 func ForConfig(cfg *config.Config) *Manager {
-	return &Manager{NamedConf: cfg.NamedConf, Include: cfg.ManagedInclude, ZoneDir: cfg.ManagedZoneDir, DNSServer: cfg.DNSServer}
+	return &Manager{NamedConf: cfg.NamedConf, Include: cfg.ManagedInclude, ZoneDir: cfg.ManagedZoneDir,
+		DNSServer: cfg.DNSServer, Hostmaster: cfg.ZoneHostmaster}
 }
 
 // EditableZones is the static-zone edit allowlist: the operator's

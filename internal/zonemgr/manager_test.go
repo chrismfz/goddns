@@ -186,3 +186,30 @@ func TestCreateRefusesViews(t *testing.T) {
 		t.Fatalf("views: %v", err)
 	}
 }
+
+func TestInitCreatesEmptyIncludeOnce(t *testing.T) {
+	r := newRig(t)
+	created, err := r.m.Init()
+	if err != nil || !created {
+		t.Fatalf("init: %v %v", created, err)
+	}
+	if z, err := ManagedZones(r.m.Include); err != nil || len(z) != 0 {
+		t.Fatalf("a fresh include must parse as empty: %v %v", z, err)
+	}
+	os.WriteFile(r.m.Include, []byte("zone \"keep.example\" { type master; file \"x\"; };\n"), 0o640)
+	if created, _ := r.m.Init(); created {
+		t.Fatal("init overwrote an existing include")
+	}
+	if z, _ := ManagedZones(r.m.Include); len(z) != 1 {
+		t.Fatal("existing include changed")
+	}
+}
+
+func TestCreateUsesDefaultHostmaster(t *testing.T) {
+	r := newRig(t)
+	r.m.Hostmaster = "admin@example.com"
+	p, err := r.m.PlanCreate(CreateRequest{Zone: "h.example.org", NS: []string{"ns1.example.com"}})
+	if err != nil || !strings.Contains(p.Content, " admin.example.com. ") {
+		t.Fatalf("hostmaster: %v\n%s", err, p.Content)
+	}
+}

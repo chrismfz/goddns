@@ -88,8 +88,16 @@ if command -v systemctl >/dev/null 2>&1; then
         if [ -z "${2:-}" ]; then
         echo "goddns installed but NOT enabled: configure /etc/goddns/goddns.conf"
         echo "(and goddns.env), then: systemctl enable --now goddns"
-        elif systemctl is-active --quiet goddns.service; then
-            systemctl restart goddns.service || true
+        else
+            # Both units run the SAME binary. The zoned root helper re-reads
+            # goddns.conf on every request, so an old helper left running
+            # next to a new daemon rejects any new config key — and with it
+            # every web/API static edit — and doesn't know new helper actions.
+            for u in goddns-zoned.service goddns.service; do
+                if systemctl is-active --quiet "$u"; then
+                    systemctl restart "$u" || true
+                fi
+            done
         fi
         ;;
     esac
