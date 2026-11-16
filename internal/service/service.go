@@ -8,8 +8,8 @@
 //
 // It is transport-agnostic: no HTTP, no templates, no sessions. Callers own
 // authentication and presentation; every mutating call takes the Actor it
-// audits as. Authorization (who may touch which zone) is the next layer and
-// will be enforced here too, so no front-end can forget it.
+// audits as, and the Actor's role is checked HERE, so no front-end can forget
+// it (per-zone grants come next and are enforced the same way).
 package service
 
 import (
@@ -40,12 +40,23 @@ type Store interface {
 	SnapshotList(zone string, limit int) ([]store.Snapshot, error)
 	SnapshotByID(id int64) (store.Snapshot, bool, error)
 	SnapshotPut(zone string, serial uint32, content string, keep int) (int64, error)
+
+	UserAdd(name, passHash, role string) (store.User, error)
+	UserGet(name string) (store.User, error)
+	UserList() ([]store.User, error)
+	UserSetPassword(name, passHash string) error
+	UserSetRole(name, role string) error
+	UserSetDisabled(name string, disabled bool) error
+	UserDel(name string) error
 }
 
-// Actor is who performs a mutating call, for the audit line.
+// Actor is who performs a call: the audit line names them and their Role
+// decides what they may do (see requireAdmin). Front-ends build it from an
+// authenticated session (UI), a token (API) or the local root shell (CLI).
 type Actor struct {
 	User string
 	Peer string // client address, "?" when unknown
+	Role string // RoleAdmin | RoleUser
 }
 
 // Service is the operation layer. Construct with New; the zero value of the

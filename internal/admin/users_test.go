@@ -1,0 +1,130 @@
+package admin
+
+import (
+	"net/http"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+func loginAs(t *testing.T, h *Handler, user, pass string) *http.Cookie {
+	t.Helper()
+	rr := do(h, "POST", "/login", "127.0.0.1:1", map[string]string{"user": user, "pass": url.QueryEscape(pass)}, nil)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("login %s: %d", user, rr.Code)
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == cookieName {
+			return c
+		}
+	}
+	t.Fatal("no session cookie")
+	return nil
+}
+
+func TestUsersPageAndUserRole(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	admin := login(t, h)
+	csrf := h.csrfFor("admin")
+
+	// add a user-role login through the page
+	rr := do(h, "POST", "/users", "127.0.0.1:1", map[string]string{
+		"csrf": csrf, "op": "add", "name": "alice", "pass": "alicepass1", "role": "user"}, admin)
+	if rr.Code != http.StatusSeeOther {
+		t.Fatalf("add user: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := do(h, "GET", "/users", "127.0.0.1:1", nil, admin); !strings.Contains(rr.Body.String(), "alice") {
+		t.Fatal("users page does not list alice")
+	}
+	// no CSRF -> 400
+	if rr := do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"op": "del", "name": "alice", "confirm": "1"}, admin); rr.Code != http.StatusBadRequest {
+		t.Fatalf("users POST without csrf: %d", rr.Code)
+	}
+
+	alice := loginAs(t, h, "alice", "alicepass1")
+	if rr := do(h, "GET", "/", "127.0.0.1:1", nil, alice); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "No zones are assigned") {
+		t.Fatalf("user home: %d", rr.Code)
+	}
+	// every admin page is 403 for the user role, GET and POST alike
+	for _, p := range []string{"/zones", "/zone?name=x", "/logs?which=access", "/traffic", "/users", "/passwd",
+		"/ddns/help?fqdn=x", "/proxy/edit?host=x"} {
+		if rr := do(h, "GET", p, "127.0.0.1:1", nil, alice); rr.Code != http.StatusForbidden {
+			t.Errorf("GET %s as user: %d", p, rr.Code)
+		}
+	}
+	aliceCSRF := h.csrfFor("alice")
+	for _, p := range []string{"/ddns/add", "/ddns/del", "/zone/record", "/zone/restore", "/proxy/set", "/proxy/del", "/users"} {
+		if rr := do(h, "POST", p, "127.0.0.1:1", map[string]string{"csrf": aliceCSRF, "op": "add", "name": "eve",
+			"pass": "evepass123", "role": "admin", "fqdn": "a.b", "zone": "b", "confirm": "1"}, alice); rr.Code != http.StatusForbidden {
+			t.Errorf("POST %s as user: %d", p, rr.Code)
+		}
+	}
+	if _, _, ok := h.svc.Lookup("eve"); ok {
+		t.Fatal("a user-role login created an account")
+	}
+
+	// changing alice's role ends her session
+	if rr := do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "role", "name": "alice", "role": "admin"}, admin); rr.Code != http.StatusSeeOther {
+		t.Fatalf("set role: %d", rr.Code)
+	}
+	if rr := do(h, "GET", "/", "127.0.0.1:1", nil, alice); rr.Code != http.StatusSeeOther {
+		t.Fatalf("old session survived a role change: %d", rr.Code)
+	}
+	// disabling ends it and blocks login
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "disable", "name": "alice"}, admin)
+	if rr := do(h, "POST", "/login", "127.0.0.1:2", map[string]string{"user": "alice", "pass": "alicepass1"}, nil); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("disabled login: %d", rr.Code)
+	}
+	// a goddns.conf admin can't be edited from the page
+	rr = do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "role", "name": "admin", "role": "user"}, admin)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "goddns.conf") {
+		t.Fatalf("editing a conf admin: %d", rr.Code)
+	}
+	// delete is two-phase
+	rr = do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "del", "name": "alice"}, admin)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "yes, delete") {
+		t.Fatalf("delete preview: %d", rr.Code)
+	}
+	if _, _, ok := h.svc.Lookup("alice"); !ok {
+		// disabled users don't resolve; check the list instead
+		if rr := do(h, "GET", "/users", "127.0.0.1:1", nil, admin); !strings.Contains(rr.Body.String(), "alice") {
+			t.Fatal("preview deleted the user")
+		}
+	}
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "del", "name": "alice", "confirm": "1"}, admin)
+	if rr := do(h, "GET", "/users", "127.0.0.1:1", nil, admin); strings.Contains(rr.Body.String(), "<b>alice</b>") {
+		t.Fatal("alice still listed after delete")
+	}
+}
+
+func TestAccountPasswordChangeKeepsSession(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	admin := login(t, h)
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": h.csrfFor("admin"), "op": "add", "name": "bob", "pass": "bobpass123", "role": "user"}, admin)
+	bob := loginAs(t, h, "bob", "bobpass123")
+	csrf := h.csrfFor("bob")
+	rr := do(h, "POST", "/account", "127.0.0.1:1", map[string]string{"csrf": csrf, "current": "bobpass123", "new": "newpass123", "repeat": "nope"}, bob)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched repeat: %d", rr.Code)
+	}
+	rr = do(h, "POST", "/account", "127.0.0.1:1", map[string]string{"csrf": csrf, "current": "bobpass123", "new": "newpass123", "repeat": "newpass123"}, bob)
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "Password changed") {
+		t.Fatalf("change: %d %s", rr.Code, rr.Body.String())
+	}
+	var fresh *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == cookieName {
+			fresh = c
+		}
+	}
+	if fresh == nil {
+		t.Fatal("no re-issued session cookie")
+	}
+	if rr := do(h, "GET", "/", "127.0.0.1:1", nil, bob); rr.Code != http.StatusSeeOther {
+		t.Fatal("the pre-change session still works")
+	}
+	if rr := do(h, "GET", "/", "127.0.0.1:1", nil, fresh); rr.Code != http.StatusOK {
+		t.Fatalf("re-issued session: %d", rr.Code)
+	}
+	loginAs(t, h, "bob", "newpass123")
+}

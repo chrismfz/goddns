@@ -108,7 +108,7 @@ type AdminConfig struct {
 	Host       string   `toml:"host"`        // vhost served on the proxy listener, e.g. admin.myip.gr
 	Allow      []string `toml:"allow"`       // client CIDRs (a real filter, not obscurity); empty = anywhere
 	BasicAuth  []string `toml:"basic_auth"`  // optional outer HTTP Basic gate ("user:bcrypt"); keeps scanners off the login form
-	Users      []string `toml:"users"`       // "user:bcrypt" for the login session (generate: goddns passwd)
+	Users      []string `toml:"users"`       // bootstrap admins, "user:bcrypt" (goddns passwd); more logins: goddns user add
 	SessionTTL int      `toml:"session_ttl"` // session lifetime in hours (default 8)
 
 	allowNets []*net.IPNet
@@ -324,9 +324,8 @@ func Load(path string) (*Config, error) {
 		if _, dup := c.Proxy[c.Admin.Host]; dup {
 			return nil, fmt.Errorf("admin: host %q also has a [proxy] rule — pick a distinct name", c.Admin.Host)
 		}
-		if len(c.Admin.Users) == 0 {
-			return nil, fmt.Errorf("admin: at least one users entry is required (generate: goddns passwd)")
-		}
+		// [admin] users is optional: logins can live in the SQLite store
+		// (goddns user add). serve warns when no admin can log in at all.
 		for _, cred := range append(append([]string{}, c.Admin.Users...), c.Admin.BasicAuth...) {
 			user, hash, ok := strings.Cut(cred, ":")
 			if !ok || user == "" || !strings.HasPrefix(hash, "$2") {

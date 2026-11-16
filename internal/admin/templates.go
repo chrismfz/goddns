@@ -22,9 +22,13 @@ const (
 	proxyFormTmpl      = "proxyform"
 	proxyConfirmTmpl   = "proxyconfirm"
 	passwdTmpl         = "passwd"
+	usersTmpl          = "users"
+	userDelTmpl        = "userdel"
+	accountTmpl        = "account"
+	userHomeTmpl       = "userhome"
 )
 
-var tmpls = template.Must(template.New("").Parse(pages))
+var tmpls = template.Must(template.Must(template.New("").Parse(pages)).Parse(userPages))
 
 func render(w http.ResponseWriter, name string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -73,14 +77,18 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 </style></head><body>{{end}}
 
 {{/* topbar: the persistent main nav, identical on every signed-in page so the
-   menu never disappears. .Active selects which link is highlighted. */}}
+   menu never disappears. .Active selects which link is highlighted;
+   .Restricted (a non-admin login) shows only the pages that role reaches. */}}
 {{define "topbar"}}<header>
 <div><a href="/" class="b">goddns admin</a><nav>
-<a href="/" {{if eq .Active "dash"}}class="on"{{end}}>dashboard</a>
+{{if .Restricted}}<a href="/" {{if eq .Active "home"}}class="on"{{end}}>home</a>
+{{else}}<a href="/" {{if eq .Active "dash"}}class="on"{{end}}>dashboard</a>
 <a href="/zones" {{if eq .Active "zones"}}class="on"{{end}}>zones</a>
 <a href="/logs?which=access" {{if eq .Active "logs"}}class="on"{{end}}>logs</a>
 <a href="/traffic" {{if eq .Active "traffic"}}class="on"{{end}}>traffic</a>
-<a href="/passwd" {{if eq .Active "passwd"}}class="on"{{end}}>password</a>
+<a href="/users" {{if eq .Active "users"}}class="on"{{end}}>users</a>
+<a href="/passwd" {{if eq .Active "passwd"}}class="on"{{end}}>hash</a>{{end}}
+<a href="/account" {{if eq .Active "account"}}class="on"{{end}}>account</a>
 </nav></div>
 <div><span class="muted">{{.User}}</span><a href="/logout">logout</a></div>
 </header>{{end}}

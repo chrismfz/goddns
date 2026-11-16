@@ -64,26 +64,20 @@ func (h *Handler) EnableVhostEditing(confPath string, reload func()) {
 	h.svc.Reload = reload
 }
 
-// adminCred returns the bcrypt hash configured for user (the credential
-// fingerprint that sessions/CSRF are bound to), and whether it exists.
-func adminCred(ad *config.AdminConfig, user string) (string, bool) {
-	for _, c := range ad.Users {
-		u, hash, ok := strings.Cut(c, ":")
-		if ok && u == user {
-			return hash, true
-		}
-	}
-	return "", false
+// credFP is the credential fingerprint sessions and CSRF tokens are bound to
+// (the service changes it on a password or role change).
+func (h *Handler) credFP(user string) string {
+	_, fp, _ := h.svc.Lookup(user)
+	return fp
 }
 
 func (h *Handler) csrfFor(user string) string {
-	fp, _ := adminCred(&h.cfg().Admin, user)
-	return csrfToken(h.secret, fp, user)
+	return csrfToken(h.secret, h.credFP(user), user)
 }
 
 func (h *Handler) csrfOK(user, got string) bool {
-	fp, _ := adminCred(&h.cfg().Admin, user)
-	return csrfValid(h.secret, fp, user, got)
+	_, fp, ok := h.svc.Lookup(user)
+	return ok && csrfValid(h.secret, fp, user, got)
 }
 
 func clientIP(r *http.Request) net.IP {
@@ -96,21 +90,28 @@ func clientIP(r *http.Request) net.IP {
 
 // audit logs a session event (login) through the service's audit funnel, so
 // the admin-audit format is defined in one place.
-func (h *Handler) audit(user, peer, format string, a ...any) {
-	h.svc.Audit(actor(user, peer), format, a...)
+func (h *Handler) audit(user, peer, format string, args ...any) {
+	h.svc.Audit(service.Actor{User: user, Peer: peer}, format, args...)
 }
-
-func actor(user, peer string) service.Actor { return service.Actor{User: user, Peer: peer} }
 
 // renderOpErr renders a service error: a missing required field is a plain
-// 400 (what the handlers always answered), anything else the result page.
+// 400 (what the handlers always answered), a role refusal a plain 403,
+// anything else the result page.
 func (h *Handler) renderOpErr(w http.ResponseWriter, err error) {
-	if service.IsMissing(err) {
+	switch {
+	case service.IsForbidden(err):
+		http.Error(w, "forbidden", http.StatusForbidden)
+	case service.IsMissing(err):
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	default:
+		renderRecordErr(w, h.version, "%v", err)
 	}
-	renderRecordErr(w, h.version, "%v", err)
 }
+
+// userPaths are the only pages a non-admin login reaches. Everything else is
+// refused here AND by the service's role check (two layers: some admin pages
+// — logs, the hash helper, proxy stats — read files without the service).
+var userPaths = map[string]bool{"/": true, "/account": true}
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ad := &h.cfg().Admin
@@ -136,7 +137,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Layer 3: login session.
 	switch r.URL.Path {
 	case "/login":
-		h.handleLogin(w, r, ad, peerStr)
+		h.handleLogin(w, r, peerStr)
 		return
 	case "/logout":
 		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1,
@@ -145,43 +146,63 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, ok := h.session(r)
+	p, ok := h.session(r)
 	if !ok {
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
+		return
+	}
+	a := service.Actor{User: p.Name, Peer: peerStr, Role: p.Role}
+
+	// Layer 4: role. A non-admin reaches only its own home and account pages.
+	if p.Role != service.RoleAdmin {
+		if !userPaths[r.URL.Path] {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/":
+			h.handleUserHome(w, r, a)
+		case "/account":
+			h.handleAccount(w, r, a)
+		}
 		return
 	}
 
 	switch r.URL.Path {
 	case "/":
-		h.handleDashboard(w, r, user)
+		h.handleDashboard(w, r, a)
 	case "/ddns/add":
-		h.handleAdd(w, r, user, peerStr)
+		h.handleAdd(w, r, a)
 	case "/ddns/del":
-		h.handleDel(w, r, user, peerStr)
+		h.handleDel(w, r, a)
 	case "/ddns/rotate":
-		h.handleRotate(w, r, user, peerStr)
+		h.handleRotate(w, r, a)
 	case "/ddns/help":
-		h.handleHelp(w, r, user)
+		h.handleHelp(w, r, a)
 	case "/logs":
-		h.handleLogs(w, r, user)
+		h.handleLogs(w, r, a)
 	case "/traffic":
-		h.handleTraffic(w, r, user)
+		h.handleTraffic(w, r, a)
 	case "/zones":
-		h.handleZones(w, r, user)
+		h.handleZones(w, r, a)
 	case "/zone":
-		h.handleZone(w, r, user)
+		h.handleZone(w, r, a)
 	case "/zone/record":
-		h.handleRecord(w, r, user, peerStr)
+		h.handleRecord(w, r, a)
 	case "/zone/restore":
-		h.handleRestore(w, r, user, peerStr)
+		h.handleRestore(w, r, a)
 	case "/passwd":
-		h.handlePasswd(w, r, user)
+		h.handlePasswd(w, r, a)
 	case "/proxy/edit":
-		h.handleProxyEdit(w, r, user)
+		h.handleProxyEdit(w, r, a)
 	case "/proxy/set":
-		h.handleProxySet(w, r, user, peerStr)
+		h.handleProxySet(w, r, a)
 	case "/proxy/del":
-		h.handleProxyDel(w, r, user, peerStr)
+		h.handleProxyDel(w, r, a)
+	case "/users":
+		h.handleUsers(w, r, a)
+	case "/account":
+		h.handleAccount(w, r, a)
 	default:
 		http.NotFound(w, r)
 	}
@@ -212,8 +233,9 @@ type snapRow struct {
 // handleZoneHistory is the read-only per-zone history view: the stored snapshot
 // list plus the diff of the most recent change (what records moved, with the
 // SOA serial noise filtered out). Snapshots are captured by the serve poller.
-func (h *Handler) handleZoneHistory(w http.ResponseWriter, user, name string) {
-	hist, err := h.svc.History(name)
+func (h *Handler) handleZoneHistory(w http.ResponseWriter, a service.Actor, name string) {
+	user := a.User
+	hist, err := h.svc.History(a, name)
 	if err != nil {
 		render(w, zoneHistTmpl, map[string]any{"Version": h.version, "User": user, "Name": name, "Error": err.Error()})
 		return
@@ -246,19 +268,20 @@ var sevMark = map[named.Severity]string{named.OK: "✓", named.Info: "·", named
 // handleZone is the read-only per-zone viewer: it pulls the LIVE records from
 // BIND via AXFR (journal-merged) so the operator sees exactly what the server
 // answers, including anything written dynamically. Read-only: AXFR is a query.
-func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string) {
+func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	name := service.NormalizeZone(r.URL.Query().Get("name"))
 	if name == "" {
 		http.Redirect(w, r, "/zones", http.StatusSeeOther)
 		return
 	}
 	if r.URL.Query().Get("history") == "1" {
-		h.handleZoneHistory(w, user, name)
+		h.handleZoneHistory(w, a, name)
 		return
 	}
 
 	// Tier 2 (the live per-nameserver SOA probe) only on demand — N DNS queries.
-	v, err := h.svc.Zone(name, r.URL.Query().Get("check") == "1")
+	v, err := h.svc.Zone(a, name, r.URL.Query().Get("check") == "1")
 	if err != nil {
 		render(w, zoneViewTmpl, map[string]any{
 			"Version": h.version, "User": user, "Name": name, "Error": err.Error(),
@@ -324,7 +347,8 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 // is two-phase: the first POST renders a diff/confirm page, and only confirm=1
 // applies (CSRF-checked; the service routes by zone ownership, snapshots or
 // backs up first, and audits).
-func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, peer string) {
+func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -333,7 +357,7 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 	action := r.FormValue("action")
 	line := strings.TrimSpace(r.FormValue("rr"))
 	apply := r.FormValue("confirm") == "1"
-	res, err := h.svc.EditRecord(actor(user, peer), zone, action, line, apply)
+	res, err := h.svc.EditRecord(a, zone, action, line, apply)
 	if err != nil {
 		h.renderOpErr(w, err)
 		return
@@ -352,7 +376,8 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 // handleRecord: the first POST previews the forward delta (what records the
 // restore would add/remove) and only confirm=1 applies it — CSRF-checked,
 // audited, and itself snapshotted-before (so a restore is undoable).
-func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request, user, peer string) {
+func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -364,7 +389,7 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request, user, pe
 		return
 	}
 	apply := r.FormValue("confirm") == "1"
-	res, err := h.svc.Restore(actor(user, peer), zone, id, apply)
+	res, err := h.svc.Restore(a, zone, id, apply)
 	if err != nil {
 		h.renderOpErr(w, err)
 		return
@@ -387,9 +412,10 @@ func renderRecordErr(w http.ResponseWriter, version, format string, a ...any) {
 // handleZones is the read-only BIND introspection page (zones, dynamic flags,
 // TSIG health). It shells out to `named-checkconf -p`; if goddns can't read
 // named.conf (it runs as the goddns user) the page explains how to allow it.
-func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user string) {
+func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	check := r.URL.Query().Get("check") == "1"
-	zl, err := h.svc.Zones()
+	zl, err := h.svc.Zones(a)
 	if err != nil {
 		render(w, zonesTmpl, map[string]any{"Version": h.version, "User": user, "Error": err.Error()})
 		return
@@ -410,7 +436,12 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 	// On demand: probe every zone's nameservers for serial agreement. Off by
 	// default to keep the list snappy.
 	if check {
-		for i, v := range h.svc.NSVerdicts(zl.Zones) {
+		vs, err := h.svc.NSVerdicts(a, zl.Zones)
+		if err != nil {
+			h.renderOpErr(w, err)
+			return
+		}
+		for i, v := range vs {
 			zr[i].NS, zr[i].NSClass = nsVerdictView(v)
 		}
 	}
@@ -447,16 +478,27 @@ func nsVerdictView(v service.NSVerdict) (status, class string) {
 	}
 }
 
-func (h *Handler) session(r *http.Request) (string, bool) {
+func (h *Handler) session(r *http.Request) (service.Principal, bool) {
 	c, err := r.Cookie(cookieName)
 	if err != nil {
-		return "", false
+		return service.Principal{}, false
 	}
-	ad := &h.cfg().Admin
-	return parseSession(h.secret, c.Value, func(u string) (string, bool) { return adminCred(ad, u) })
+	var p service.Principal
+	user, ok := parseSession(h.secret, c.Value, func(u string) (string, bool) {
+		var fp string
+		var ok bool
+		p, fp, ok = h.svc.Lookup(u)
+		return fp, ok
+	})
+	if !ok {
+		return service.Principal{}, false
+	}
+	p.Name = user
+	return p, true
 }
 
-func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, ad *config.AdminConfig, peer string) {
+func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, peer string) {
+	ad := &h.cfg().Admin
 	if r.Method == http.MethodGet {
 		if _, ok := h.session(r); ok {
 			http.Redirect(w, r, "/", http.StatusSeeOther)
@@ -470,8 +512,8 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, ad *config
 	pass := r.FormValue("pass")
 	// Throttle by client IP only (fail2ban-style): this locks an attacking
 	// source without letting anyone lock out a legit account by failing its
-	// login. Throttling runs BEFORE the (expensive) bcrypt compare so a
-	// flood can't pin the CPU, regardless of whether basic_auth is set.
+	// login. Throttling runs BEFORE the (expensive) password hash so a flood
+	// can't pin the CPU, regardless of whether basic_auth is set.
 	ipKey := "ip:" + peer
 	if until := h.throttle.blockedUntil(ipKey); !until.IsZero() {
 		w.Header().Set("Retry-After", strconv.Itoa(int(time.Until(until).Seconds())+1))
@@ -480,7 +522,8 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, ad *config
 		h.audit(user, peer, "login-throttled")
 		return
 	}
-	if !verifyCred(ad.Users, user, pass) {
+	p, ok := h.svc.Login(user, pass)
+	if !ok {
 		h.throttle.fail(ipKey)
 		h.audit(user, peer, "login-failed")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -488,13 +531,12 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, ad *config
 		return
 	}
 	h.throttle.ok(ipKey)
-	fp, _ := adminCred(ad, user)
 	ttl := time.Duration(ad.SessionTTL) * time.Hour
 	http.SetCookie(w, &http.Cookie{
-		Name: cookieName, Value: newSession(h.secret, fp, user, ttl), Path: "/",
+		Name: cookieName, Value: newSession(h.secret, h.credFP(p.Name), p.Name, ttl), Path: "/",
 		MaxAge: int(ttl.Seconds()), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	})
-	h.audit(user, peer, "login-ok")
+	h.audit(p.Name, peer, "login-ok role=%s", p.Role)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
@@ -545,9 +587,10 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), units[exp])
 }
 
-func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user string) {
+func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	cfg := h.cfg()
-	recs, err := h.svc.DDNSList()
+	recs, err := h.svc.DDNSList(a)
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		log.Printf("admin: list: %v", err)
@@ -574,7 +617,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 	// Which vhosts goddns owns (proxy.d/ fragments) — those get edit/del
 	// controls; base-config vhosts stay read-only. Best-effort: on any error
 	// nothing is marked managed and the table is read-only.
-	managed := h.svc.VhostManaged()
+	managed := h.svc.VhostManaged(a)
 	var pv []proxyView
 	for _, host := range cfg.ProxyHosts() {
 		rule := cfg.Proxy[host]
@@ -621,7 +664,8 @@ type trafficView struct {
 
 // handleTraffic renders the persisted proxy-traffic history: per-month totals
 // (last 12) and per-day rows (last 30), summed from the daily store rows.
-func (h *Handler) handleTraffic(w http.ResponseWriter, r *http.Request, user string) {
+func (h *Handler) handleTraffic(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	conv := func(rows []store.TrafficRow) []trafficView {
 		out := make([]trafficView, 0, len(rows))
 		for _, t := range rows {
@@ -632,13 +676,13 @@ func (h *Handler) handleTraffic(w http.ResponseWriter, r *http.Request, user str
 		}
 		return out
 	}
-	monthly, err := h.svc.TrafficMonthly(12)
+	monthly, err := h.svc.TrafficMonthly(a, 12)
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		log.Printf("admin: traffic monthly: %v", err)
 		return
 	}
-	daily, err := h.svc.TrafficDaily(30)
+	daily, err := h.svc.TrafficDaily(a, 30)
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		log.Printf("admin: traffic daily: %v", err)
@@ -655,7 +699,8 @@ func (h *Handler) handleTraffic(w http.ResponseWriter, r *http.Request, user str
 // basic_auth — so you never need shell access to mint one. It's a pure helper:
 // nothing is written (goddns never rewrites your goddns.conf) and the password
 // is never stored or logged.
-func (h *Handler) handlePasswd(w http.ResponseWriter, r *http.Request, user string) {
+func (h *Handler) handlePasswd(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	data := map[string]any{"Version": h.version, "User": user, "Active": "passwd", "CSRF": h.csrfFor(user)}
 	if r.Method == http.MethodPost {
 		if !h.csrfOK(user, r.FormValue("csrf")) {
@@ -740,12 +785,13 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule, error) {
 
 // handleProxyEdit serves the vhost form pre-filled for an existing managed
 // vhost (GET /proxy/edit?host=). The dashboard's inline form covers "add".
-func (h *Handler) handleProxyEdit(w http.ResponseWriter, r *http.Request, user string) {
+func (h *Handler) handleProxyEdit(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if !h.svc.VhostEditing() {
 		http.NotFound(w, r)
 		return
 	}
-	e, err := h.svc.VhostGet(r.URL.Query().Get("host"))
+	e, err := h.svc.VhostGet(a, r.URL.Query().Get("host"))
 	if err != nil {
 		renderRecordErr(w, h.version, "%v", err)
 		return
@@ -762,7 +808,8 @@ func (h *Handler) handleProxyEdit(w http.ResponseWriter, r *http.Request, user s
 // handleProxySet creates/replaces a managed vhost. Two-phase like the record
 // editor: the first POST previews the rendered fragment, confirm=1 writes it
 // (CSRF-checked; the service audits and triggers an immediate reload).
-func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, peer string) {
+func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || !h.svc.VhostEditing() {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -773,7 +820,7 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 		return
 	}
 	apply := r.FormValue("confirm") == "1"
-	res, err := h.svc.VhostSet(actor(user, peer), host, rule, apply)
+	res, err := h.svc.VhostSet(a, host, rule, apply)
 	if err != nil {
 		renderRecordErr(w, h.version, "%v", err)
 		return
@@ -794,13 +841,14 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 
 // handleProxyDel removes a managed vhost (two-phase confirm; the service
 // audits and reloads).
-func (h *Handler) handleProxyDel(w http.ResponseWriter, r *http.Request, user, peer string) {
+func (h *Handler) handleProxyDel(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || !h.svc.VhostEditing() {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	apply := r.FormValue("confirm") == "1"
-	res, err := h.svc.VhostRemove(actor(user, peer), r.FormValue("host"), apply)
+	res, err := h.svc.VhostRemove(a, r.FormValue("host"), apply)
 	if err != nil {
 		renderRecordErr(w, h.version, "%v", err)
 		return
@@ -818,13 +866,14 @@ func (h *Handler) handleProxyDel(w http.ResponseWriter, r *http.Request, user, p
 
 func relBase(f string) string { return "proxy.d/" + filepath.Base(f) }
 
-func (h *Handler) handleAdd(w http.ResponseWriter, r *http.Request, user, peer string) {
+func (h *Handler) handleAdd(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	ttl, _ := strconv.Atoi(r.FormValue("ttl"))
-	rec, tok, err := h.svc.DDNSAdd(actor(user, peer), r.FormValue("fqdn"), r.FormValue("zone"), ttl)
+	rec, tok, err := h.svc.DDNSAdd(a, r.FormValue("fqdn"), r.FormValue("zone"), ttl)
 	if err != nil {
 		h.renderOpErr(w, err)
 		return
@@ -867,8 +916,8 @@ func (h *Handler) renderHelp(w http.ResponseWriter, rec store.Record, token stri
 	})
 }
 
-func (h *Handler) handleHelp(w http.ResponseWriter, r *http.Request, user string) {
-	rec, err := h.svc.DDNSGet(r.URL.Query().Get("fqdn"))
+func (h *Handler) handleHelp(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	rec, err := h.svc.DDNSGet(a, r.URL.Query().Get("fqdn"))
 	if err != nil {
 		http.Error(w, "no such record", http.StatusNotFound)
 		return
@@ -876,7 +925,8 @@ func (h *Handler) handleHelp(w http.ResponseWriter, r *http.Request, user string
 	h.renderHelp(w, rec, "<token>", false)
 }
 
-func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, user, peer string) {
+func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -890,7 +940,7 @@ func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, user, pee
 		})
 		return
 	}
-	rec, tok, err := h.svc.DDNSRotate(actor(user, peer), fqdn)
+	rec, tok, err := h.svc.DDNSRotate(a, fqdn)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -898,7 +948,8 @@ func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, user, pee
 	h.renderHelp(w, rec, tok, true)
 }
 
-func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer string) {
+func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -915,14 +966,15 @@ func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer s
 		})
 		return
 	}
-	if err := h.svc.DDNSDel(actor(user, peer), fqdn); err != nil {
+	if err := h.svc.DDNSDel(a, fqdn); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request, user string) {
+func (h *Handler) handleLogs(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	user := a.User
 	cfg := h.cfg()
 	which := r.URL.Query().Get("which")
 	path := cfg.LogFile

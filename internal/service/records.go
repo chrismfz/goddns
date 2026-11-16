@@ -44,6 +44,9 @@ type RecordResult struct {
 // zones and snapshots before writing. CanEdit re-reads the live dynamic flag,
 // so routing can't disagree with the display.
 func (s *Service) EditRecord(a Actor, zone, action, line string, apply bool) (*RecordResult, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	zone = strings.TrimSpace(zone)
 	line = strings.TrimSpace(line)
 	if zone == "" || line == "" || (action != ActionAdd && action != ActionDel) {
@@ -131,6 +134,9 @@ type RestoreResult struct {
 // forward delta (what the restore would add/remove); apply=true applies it as
 // one signed UPDATE, itself snapshotted-before so a restore is undoable.
 func (s *Service) Restore(a Actor, zone string, id int64, apply bool) (*RestoreResult, error) {
+	if err := s.requireAdmin(a); err != nil {
+		return nil, err
+	}
 	zone = strings.TrimSpace(zone)
 	if zone == "" || id <= 0 {
 		return nil, missing("missing fields")
