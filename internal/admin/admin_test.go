@@ -440,7 +440,7 @@ func TestStaticZoneRecordEditing(t *testing.T) {
 	zonePath := filepath.Join(dir, "example.db")
 	os.WriteFile(zonePath, []byte("$ORIGIN example.\n$TTL 60\n@ IN SOA ns.example. host.example. 1 3 4 5 6\n@ IN NS ns.example.\nwww IN A 1.1.1.1\n"), 0o640)
 	inv := &named.Inventory{Zones: []named.Zone{{Name: "example", Type: "master", Path: zonePath}}}
-	h.fileEd = func(*config.Config) *filezone.Editor {
+	h.svc.FileEd = func(*config.Config) *filezone.Editor {
 		return &filezone.Editor{
 			Editable: []string{"example"}, LockDir: filepath.Join(dir, "l"), BackupDir: filepath.Join(dir, "b"),
 			Inv:       func() (*named.Inventory, error) { return inv, nil },
@@ -504,7 +504,7 @@ func TestStaticEditRoutesToZonedSocket(t *testing.T) {
 	h, _ := newHandler(t, c)
 	// routing needs CanEdit(Lookup) true — a static master example zone
 	inv := &named.Inventory{Zones: []named.Zone{{Name: "example", Type: "master", Path: filepath.Join(dir, "x.db")}}}
-	h.fileEd = func(*config.Config) *filezone.Editor {
+	h.svc.FileEd = func(*config.Config) *filezone.Editor {
 		return &filezone.Editor{Editable: []string{"example"}, Inv: func() (*named.Inventory, error) { return inv, nil }}
 	}
 	cookie := login(t, h)
@@ -527,7 +527,7 @@ func TestStaticEditNoDirectFallbackWhenSocketDown(t *testing.T) {
 	inv := &named.Inventory{Zones: []named.Zone{{Name: "example", Type: "master", Path: zonePath}}}
 	// A direct editor that WOULD succeed — so if the code fell back, the file
 	// would change. It must not.
-	h.fileEd = func(*config.Config) *filezone.Editor {
+	h.svc.FileEd = func(*config.Config) *filezone.Editor {
 		return &filezone.Editor{Editable: []string{"example"}, LockDir: filepath.Join(dir, "l"), BackupDir: filepath.Join(dir, "b"),
 			Inv:       func() (*named.Inventory, error) { return inv, nil },
 			CheckZone: func(string, []byte) error { return nil }, Reload: func(string) error { return nil }, Verify: func(string, uint32) error { return nil }}

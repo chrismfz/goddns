@@ -17,54 +17,31 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/miekg/dns"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/chrismfz/goddns/internal/config"
-	"github.com/chrismfz/goddns/internal/ddns"
-	"github.com/chrismfz/goddns/internal/filezone"
-	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/proxy"
-	"github.com/chrismfz/goddns/internal/recordmut"
+	"github.com/chrismfz/goddns/internal/service"
 	"github.com/chrismfz/goddns/internal/store"
-	"github.com/chrismfz/goddns/internal/tsig"
-	"github.com/chrismfz/goddns/internal/vhostmut"
-	"github.com/chrismfz/goddns/internal/zoned"
 )
 
 const cookieName = "goddns_admin"
 
 // Store is the slice of the token store the admin UI needs.
-type Store interface {
-	List() ([]store.Record, error)
-	Add(name, zone string, ttl uint32) (store.Record, string, error)
-	Del(name string) error
-	Rotate(name string) (store.Record, string, error)
-	Get(name string) (store.Record, error)
-	TrafficMonthly(months int) ([]store.TrafficRow, error)
-	TrafficDaily(days int) ([]store.TrafficRow, error)
-	SnapshotList(zone string, limit int) ([]store.Snapshot, error)
-	SnapshotByID(id int64) (store.Snapshot, bool, error)
-	SnapshotPut(zone string, serial uint32, content string, keep int) (int64, error)
-}
+type Store = service.Store
 
-// Handler serves the admin UI. Construct with New.
+// Handler serves the admin UI. Construct with New. It owns only the HTTP
+// concerns (gates, sessions, CSRF, forms, templates); every operation goes
+// through the service layer, which the machine API and the CLI share.
 type Handler struct {
 	cfg      func() *config.Config // live config (admin auth + proxy table)
-	store    Store
+	svc      *service.Service
 	secret   []byte
 	version  string
 	throttle *loginThrottle
-	confPath string // goddns.conf path, for proxy.d/ vhost editing (empty = read-only)
-	reload   func() // optional: trigger an immediate config reload after a write
-
-	// fileEd overrides the static-zone file editor (tests inject stubs); nil ⇒
-	// the production builder.
-	fileEd func(*config.Config) *filezone.Editor
 
 	// proxyStats returns the live per-host traffic snapshot; nil ⇒ the proxy is
 	// off (or stats not wired) and the dashboard hides the traffic panel.
@@ -72,7 +49,7 @@ type Handler struct {
 }
 
 func New(cfg func() *config.Config, st Store, secret []byte, version string) *Handler {
-	return &Handler{cfg: cfg, store: st, secret: secret, version: version, throttle: newLoginThrottle()}
+	return &Handler{cfg: cfg, svc: service.New(cfg, st), secret: secret, version: version, throttle: newLoginThrottle()}
 }
 
 // SetProxyStats wires the live per-host proxy traffic counters into the
@@ -83,12 +60,8 @@ func (h *Handler) SetProxyStats(fn func() []proxy.HostStat) { h.proxyStats = fn 
 // proxy.d/, and reload (optional) is called after a successful write so the
 // change applies immediately instead of waiting for the poll.
 func (h *Handler) EnableVhostEditing(confPath string, reload func()) {
-	h.confPath = confPath
-	h.reload = reload
-}
-
-func (h *Handler) vhostEditor() *vhostmut.Editor {
-	return &vhostmut.Editor{ConfPath: h.confPath}
+	h.svc.ConfPath = confPath
+	h.svc.Reload = reload
 }
 
 // adminCred returns the bcrypt hash configured for user (the credential
@@ -121,8 +94,22 @@ func clientIP(r *http.Request) net.IP {
 	return net.ParseIP(host)
 }
 
+// audit logs a session event (login) through the service's audit funnel, so
+// the admin-audit format is defined in one place.
 func (h *Handler) audit(user, peer, format string, a ...any) {
-	log.Printf("admin-audit user=%s peer=%s "+format, append([]any{user, peer}, a...)...)
+	h.svc.Audit(actor(user, peer), format, a...)
+}
+
+func actor(user, peer string) service.Actor { return service.Actor{User: user, Peer: peer} }
+
+// renderOpErr renders a service error: a missing required field is a plain
+// 400 (what the handlers always answered), anything else the result page.
+func (h *Handler) renderOpErr(w http.ResponseWriter, err error) {
+	if service.IsMissing(err) {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	renderRecordErr(w, h.version, "%v", err)
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -226,46 +213,41 @@ type snapRow struct {
 // list plus the diff of the most recent change (what records moved, with the
 // SOA serial noise filtered out). Snapshots are captured by the serve poller.
 func (h *Handler) handleZoneHistory(w http.ResponseWriter, user, name string) {
-	snaps, err := h.store.SnapshotList(name, 200)
+	hist, err := h.svc.History(name)
 	if err != nil {
 		render(w, zoneHistTmpl, map[string]any{"Version": h.version, "User": user, "Name": name, "Error": err.Error()})
 		return
 	}
 	data := map[string]any{"Version": h.version, "User": user, "Active": "zones", "Name": name}
-	rows := make([]snapRow, 0, len(snaps))
-	for _, s := range snaps {
+	rows := make([]snapRow, 0, len(hist.Snapshots))
+	for _, s := range hist.Snapshots {
 		rows = append(rows, snapRow{Serial: s.Serial, Taken: s.TakenAt.Format("2006-01-02 15:04"), ID: s.ID})
 	}
 	data["Snaps"] = rows
 
 	// Show restore controls only where goddns can actually write (dynamic zone,
 	// held key). The restore POST is CSRF-checked like every mutating action.
-	if h.canEditZone(h.cfg(), name) {
+	if hist.Restorable {
 		data["Editable"] = true
 		data["CSRF"] = h.csrfFor(user)
 	}
-
-	if len(snaps) >= 2 {
-		newer, okN, errN := h.store.SnapshotByID(snaps[0].ID)
-		older, okO, errO := h.store.SnapshotByID(snaps[1].ID)
-		if errN == nil && errO == nil && okN && okO {
-			added, removed := history.Diff(older.Content, newer.Content)
-			data["Added"] = history.DropSOA(added)
-			data["Removed"] = history.DropSOA(removed)
-			data["FromSerial"] = older.Serial
-			data["ToSerial"] = newer.Serial
-			data["HasDiff"] = true
-		}
+	if hist.HasDiff {
+		data["Added"] = hist.Added
+		data["Removed"] = hist.Removed
+		data["FromSerial"] = hist.FromSerial
+		data["ToSerial"] = hist.ToSerial
+		data["HasDiff"] = true
 	}
 	render(w, zoneHistTmpl, data)
 }
+
+var sevMark = map[named.Severity]string{named.OK: "✓", named.Info: "·", named.Warn: "⚠", named.Error: "✗"}
 
 // handleZone is the read-only per-zone viewer: it pulls the LIVE records from
 // BIND via AXFR (journal-merged) so the operator sees exactly what the server
 // answers, including anything written dynamically. Read-only: AXFR is a query.
 func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string) {
-	cfg := h.cfg()
-	name := strings.TrimSuffix(strings.TrimSpace(r.URL.Query().Get("name")), ".")
+	name := service.NormalizeZone(r.URL.Query().Get("name"))
 	if name == "" {
 		http.Redirect(w, r, "/zones", http.StatusSeeOther)
 		return
@@ -274,34 +256,18 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 		h.handleZoneHistory(w, user, name)
 		return
 	}
-	nc := cfg.NamedConf
-	if nc == "" {
-		nc = "/etc/named.conf"
-	}
-	server := cfg.DNSServer
-	if server == "" {
-		server = "127.0.0.1:53"
-	}
 
-	// named.conf is best-effort: it supplies the dynamic flag and the TSIG
-	// keys to authenticate the transfer. Without it we still try unauthenticated.
-	inv := &named.Inventory{}
-	if data, err := named.CheckConf(nc); err == nil {
-		inv = named.Parse(data)
-	}
-	z := inv.ZoneByName(name)
-
-	records, auth, err := named.TransferAuto(name, server, inv.AXFRKeys(z, cfg.TSIGName))
+	// Tier 2 (the live per-nameserver SOA probe) only on demand — N DNS queries.
+	v, err := h.svc.Zone(name, r.URL.Query().Get("check") == "1")
 	if err != nil {
 		render(w, zoneViewTmpl, map[string]any{
 			"Version": h.version, "User": user, "Name": name, "Error": err.Error(),
 		})
 		return
 	}
-	named.SortZone(records)
 
 	var rows []rrRow
-	for _, row := range named.Rows(records) {
+	for _, row := range named.Rows(v.Records) {
 		rows = append(rows, rrRow{
 			Name: row.Name, TTL: row.TTL, Type: row.Type, Data: row.Data,
 			Full: fmt.Sprintf("%s %d IN %s %s", row.Name, row.TTL, row.Type, row.Data),
@@ -309,110 +275,55 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, user string
 	}
 	data := map[string]any{
 		"Version": h.version, "User": user, "Active": "zones", "Name": name,
-		"InConf": z != nil, "Records": rows, "Count": len(records), "Auth": auth,
+		"InConf": v.Conf != nil, "Records": rows, "Count": len(v.Records), "Auth": v.Auth,
 	}
-	if z != nil {
+	if z := v.Conf; z != nil {
 		data["Kind"] = z.Kind()
 		data["Dynamic"] = z.Dynamic
 		data["Keys"] = strings.Join(z.UpdateKeys, ", ")
-		if h.editor(cfg).CanEdit(z) || h.fileEditor(cfg).CanEdit(z) {
+		if v.Editable {
 			data["Editable"] = true
 			data["CSRF"] = h.csrfFor(user)
-			data["FileEdit"] = h.fileEditor(cfg).CanEdit(z) // static, edited in place
+			data["FileEdit"] = v.FileEdit // static, edited in place
 		}
 	}
-	if soa := named.SOAOf(records); soa != nil {
+	if soa := named.SOAOf(v.Records); soa != nil {
 		data["Serial"] = soa.Serial
 		data["Primary"] = strings.TrimSuffix(soa.Ns, ".")
 	}
-	if signed, n := named.Signed(records); signed {
+	if signed, n := named.Signed(v.Records); signed {
 		data["Signed"] = true
 		data["SignedCount"] = n
 	}
 
 	// Tier 1: offline SOA-vs-NS checks (always, no network).
-	mark := map[named.Severity]string{named.OK: "✓", named.Info: "·", named.Warn: "⚠", named.Error: "✗"}
 	var dr []findRow
-	for _, f := range named.CheckDelegation(name, records) {
-		dr = append(dr, findRow{Mark: mark[f.Severity], Class: f.Severity.String(), Message: f.Message})
+	for _, f := range v.Delegation {
+		dr = append(dr, findRow{Mark: sevMark[f.Severity], Class: f.Severity.String(), Message: f.Message})
 	}
 	data["Delegation"] = dr
 
-	// Tier 2: live per-nameserver SOA probe (only on demand — N DNS queries).
-	if r.URL.Query().Get("check") == "1" {
-		checks := named.CheckNameservers(name, records, server)
+	if v.Checked {
 		var nsr []nsRow
-		for _, c := range checks {
+		for _, c := range v.NS {
 			addr := ""
 			if len(c.Addrs) > 0 {
 				addr = c.Addrs[0]
 			}
 			nsr = append(nsr, nsRow{Name: c.Name, Addr: addr, Serial: c.Serial, OK: c.OK, Note: c.Note})
 		}
-		agree, seen := named.SerialsAgree(checks)
 		data["Checked"] = true
 		data["NS"] = nsr
-		data["Agree"] = agree && len(seen) == 1
-		data["NoAuth"] = len(seen) == 0
+		data["Agree"] = v.Agree
+		data["NoAuth"] = v.NoAuth
 	}
 	render(w, zoneViewTmpl, data)
 }
 
-// editor builds the record-mutation editor from the live config (keyring or the
-// single key), wired to the snapshot store.
-func (h *Handler) editor(cfg *config.Config) *recordmut.Editor {
-	keys := cfg.TSIGKeys()
-	if len(keys) == 0 {
-		keys = []tsig.Key{{Name: strings.TrimSuffix(cfg.TSIGName, "."), Algo: cfg.TSIGAlgo, Secret: cfg.TSIGSecret}}
-	}
-	nc := cfg.NamedConf
-	if nc == "" {
-		nc = "/etc/named.conf"
-	}
-	server := cfg.DNSServer
-	if server == "" {
-		server = "127.0.0.1:53"
-	}
-	return &recordmut.Editor{NamedConf: nc, DNSServer: server, Keys: keys, Snap: h.store, Keep: cfg.HistoryKeep}
-}
-
-// fileEditor builds the file-as-truth editor for enabled static zones (tests can
-// override via h.fileEd).
-func (h *Handler) fileEditor(cfg *config.Config) *filezone.Editor {
-	if h.fileEd != nil {
-		return h.fileEd(cfg)
-	}
-	nc := cfg.NamedConf
-	if nc == "" {
-		nc = "/etc/named.conf"
-	}
-	server := cfg.DNSServer
-	if server == "" {
-		server = "127.0.0.1:53"
-	}
-	return &filezone.Editor{NamedConf: nc, DNSServer: server, Editable: cfg.EditableZones, Keep: cfg.HistoryKeep}
-}
-
-// canEditZone reports whether goddns may edit the named zone (dynamic + a held
-// key) — used to decide whether to show edit/restore controls. Best-effort: if
-// named.conf can't be read, it returns false (controls stay hidden).
-func (h *Handler) canEditZone(cfg *config.Config, name string) bool {
-	nc := cfg.NamedConf
-	if nc == "" {
-		nc = "/etc/named.conf"
-	}
-	data, err := named.CheckConf(nc)
-	if err != nil {
-		return false
-	}
-	z := named.Parse(data).ZoneByName(name)
-	return h.editor(cfg).CanEdit(z)
-}
-
-// handleRecord adds or deletes a record in a dynamic zone. Like the destructive
-// token actions it is two-phase: the first POST renders a diff/confirm page, and
-// only confirm=1 applies (CSRF-checked, audited; recordmut snapshots first and
-// refuses static/panel zones).
+// handleRecord adds or deletes a record. Like the destructive token actions it
+// is two-phase: the first POST renders a diff/confirm page, and only confirm=1
+// applies (CSRF-checked; the service routes by zone ownership, snapshots or
+// backs up first, and audits).
 func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, peer string) {
 	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -421,114 +332,20 @@ func (h *Handler) handleRecord(w http.ResponseWriter, r *http.Request, user, pee
 	zone := strings.TrimSpace(r.FormValue("zone"))
 	action := r.FormValue("action")
 	line := strings.TrimSpace(r.FormValue("rr"))
-	if zone == "" || line == "" || (action != "add" && action != "del") {
-		http.Error(w, "missing fields", http.StatusBadRequest)
+	apply := r.FormValue("confirm") == "1"
+	res, err := h.svc.EditRecord(actor(user, peer), zone, action, line, apply)
+	if err != nil {
+		h.renderOpErr(w, err)
 		return
 	}
-	cfg := h.cfg()
-	// Route by ownership, matching what the page shows: an enabled static MASTER
-	// zone is edited in place (file-as-truth — via the zoned root helper if one
-	// is configured, else directly); everything else, including a dynamic zone
-	// mistakenly listed in editable_zones, is RFC2136 (recordmut). CanEdit
-	// re-reads the live dynamic flag, so routing can't disagree with the display.
-	fed := h.fileEditor(cfg)
-	if fed.CanEdit(fed.Lookup(zone)) {
-		h.handleStaticRecord(w, r, user, peer, cfg, zone, action, line)
-		return
-	}
-
-	rr, err := dns.NewRR(line)
-	if err != nil || rr == nil {
-		renderRecordErr(w, h.version, "parse record %q: %v", line, err)
-		return
-	}
-	act := ddns.AddRR
-	if action == "del" {
-		act = ddns.DelRR
-	}
-	ops := []ddns.Op{{Action: act, RR: rr}}
-	ed := h.editor(cfg)
-
-	if r.FormValue("confirm") != "1" {
-		res, perr := ed.Preview(zone, ops)
-		if perr != nil {
-			renderRecordErr(w, h.version, "%v", perr)
-			return
-		}
+	if !apply {
 		render(w, recordConfirmTmpl, map[string]any{
 			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
 			"Action": action, "RR": line, "Added": res.Added, "Removed": res.Removed,
 		})
 		return
 	}
-	res, aerr := ed.Apply(zone, ops)
-	if aerr != nil {
-		renderRecordErr(w, h.version, "%v", aerr)
-		return
-	}
-	h.audit(user, peer, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
 	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone), http.StatusSeeOther)
-}
-
-// handleStaticRecord edits a record in an enabled static zone in place, via the
-// zoned root helper when a socket is configured (so the daemon never writes
-// /var/named) or directly otherwise. Two-phase confirm like the dynamic path.
-func (h *Handler) handleStaticRecord(w http.ResponseWriter, r *http.Request, user, peer string, cfg *config.Config, zone, action, line string) {
-	if r.FormValue("confirm") != "1" {
-		added, removed, _, _, err := h.staticEdit(cfg, zone, action, line, false)
-		if err != nil {
-			renderRecordErr(w, h.version, "%v", err)
-			return
-		}
-		render(w, recordConfirmTmpl, map[string]any{
-			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
-			"Action": action, "RR": line, "Added": added, "Removed": removed,
-		})
-		return
-	}
-	_, _, serial, backup, err := h.staticEdit(cfg, zone, action, line, true)
-	if err != nil {
-		renderRecordErr(w, h.version, "%v", err)
-		return
-	}
-	via := "direct"
-	if cfg.ZonedSocket != "" {
-		via = "zoned"
-	}
-	h.audit(user, peer, "record-%s zone=%s rr=%q serial=%d backup=%s via=%s", action, zone, line, serial, backup, via)
-	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone), http.StatusSeeOther)
-}
-
-// staticEdit previews or applies one static-zone record edit, routed through the
-// zoned root helper (if zoned_socket is set) or filezone directly.
-func (h *Handler) staticEdit(cfg *config.Config, zone, action, line string, apply bool) (added, removed []string, serial uint32, backup string, err error) {
-	if cfg.ZonedSocket != "" {
-		resp, e := zoned.Call(cfg.ZonedSocket, zoned.Request{Zone: zone, Action: action, RR: line, Apply: apply})
-		if e != nil {
-			return nil, nil, 0, "", e
-		}
-		return resp.Added, resp.Removed, resp.Serial, resp.Backup, nil
-	}
-	rr, e := filezone.ParseRR(line, zone)
-	if e != nil {
-		return nil, nil, 0, "", fmt.Errorf("parse %q: %v", line, e)
-	}
-	act := ddns.AddRR
-	if action == "del" {
-		act = ddns.DelRR
-	}
-	ops := []ddns.Op{{Action: act, RR: rr}}
-	fed := h.fileEditor(cfg)
-	var res *filezone.Result
-	if apply {
-		res, e = fed.Apply(zone, ops)
-	} else {
-		res, e = fed.Preview(zone, ops)
-	}
-	if e != nil {
-		return nil, nil, 0, "", e
-	}
-	return res.Added, res.Removed, res.Serial, res.Backup, nil
 }
 
 // handleRestore rolls a dynamic zone back to a Phase-1 snapshot. Two-phase like
@@ -542,44 +359,24 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request, user, pe
 	}
 	zone := strings.TrimSpace(r.FormValue("zone"))
 	var id int64
-	if _, err := fmt.Sscan(strings.TrimSpace(r.FormValue("id")), &id); err != nil || zone == "" || id <= 0 {
+	if _, err := fmt.Sscan(strings.TrimSpace(r.FormValue("id")), &id); err != nil {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}
-	snap, ok, err := h.store.SnapshotByID(id)
+	apply := r.FormValue("confirm") == "1"
+	res, err := h.svc.Restore(actor(user, peer), zone, id, apply)
 	if err != nil {
-		renderRecordErr(w, h.version, "read snapshot #%d: %v", id, err)
+		h.renderOpErr(w, err)
 		return
 	}
-	if !ok || !strings.EqualFold(strings.TrimSuffix(snap.Zone, "."), strings.TrimSuffix(zone, ".")) {
-		renderRecordErr(w, h.version, "no snapshot #%d for zone %q", id, zone)
-		return
-	}
-	ed := h.editor(h.cfg())
-	ops, res, err := ed.RestorePlan(zone, snap.Content)
-	if err != nil {
-		renderRecordErr(w, h.version, "%v", err)
-		return
-	}
-	if len(ops) == 0 {
-		renderRecordErr(w, h.version, "%s already matches snapshot #%d — nothing to restore", zone, id)
-		return
-	}
-
-	if r.FormValue("confirm") != "1" {
+	if !apply {
 		render(w, restoreConfirmTmpl, map[string]any{
 			"Version": h.version, "CSRF": h.csrfFor(user), "Zone": zone,
-			"ID": id, "Serial": snap.Serial, "Taken": snap.TakenAt.Format("2006-01-02 15:04"),
+			"ID": id, "Serial": res.Snapshot.Serial, "Taken": res.Snapshot.TakenAt.Format("2006-01-02 15:04"),
 			"Added": res.Added, "Removed": res.Removed,
 		})
 		return
 	}
-	res, err = ed.Apply(zone, ops)
-	if err != nil {
-		renderRecordErr(w, h.version, "%v", err)
-		return
-	}
-	h.audit(user, peer, "record-restore zone=%s snapshot=%d key=%s pre-snapshot=%d", zone, id, res.Key, res.Snapshot)
 	http.Redirect(w, r, "/zone?name="+url.QueryEscape(zone)+"&history=1", http.StatusSeeOther)
 }
 
@@ -591,28 +388,16 @@ func renderRecordErr(w http.ResponseWriter, version, format string, a ...any) {
 // TSIG health). It shells out to `named-checkconf -p`; if goddns can't read
 // named.conf (it runs as the goddns user) the page explains how to allow it.
 func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user string) {
-	cfg := h.cfg()
-	nc := cfg.NamedConf
-	if nc == "" {
-		nc = "/etc/named.conf"
-	}
-	server := cfg.DNSServer
-	if server == "" {
-		server = "127.0.0.1:53"
-	}
 	check := r.URL.Query().Get("check") == "1"
-
-	data, err := named.CheckConf(nc)
+	zl, err := h.svc.Zones()
 	if err != nil {
 		render(w, zonesTmpl, map[string]any{"Version": h.version, "User": user, "Error": err.Error()})
 		return
 	}
-	inv := named.Parse(data)
 
-	zones := inv.UserZones()
-	zr := make([]zoneRow, len(zones))
+	zr := make([]zoneRow, len(zl.Zones))
 	hasViews := false
-	for i, z := range zones {
+	for i, z := range zl.Zones {
 		if z.View != "" {
 			hasViews = true
 		}
@@ -622,64 +407,43 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, user strin
 			Keys:   strings.Join(z.UpdateKeys, ", "), Dynamic: z.Dynamic,
 		}
 	}
-
-	// On demand: probe every zone's nameservers for serial agreement. Each
-	// zone is a cheap NS query + a few SOA probes (no AXFR), run with a small
-	// concurrency cap so a host with many zones can't be made to open a flood
-	// of sockets from one click. Off by default to keep the list snappy.
+	// On demand: probe every zone's nameservers for serial agreement. Off by
+	// default to keep the list snappy.
 	if check {
-		sem := make(chan struct{}, nsCheckConcurrency)
-		var wg sync.WaitGroup
-		for i := range zones {
-			wg.Add(1)
-			go func(i int) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				zr[i].NS, zr[i].NSClass = zoneNSVerdict(zones[i], server)
-			}(i)
+		for i, v := range h.svc.NSVerdicts(zl.Zones) {
+			zr[i].NS, zr[i].NSClass = nsVerdictView(v)
 		}
-		wg.Wait()
 	}
 	var kr []keyRow
-	for _, k := range inv.Keys {
+	for _, k := range zl.Keys {
 		kr = append(kr, keyRow{Name: k.Name, Algorithm: k.Algorithm}) // secret never exposed
 	}
 	var fr []findRow
-	for _, f := range inv.Check(cfg.TSIGName, cfg.TSIGSecret) {
-		mark := map[named.Severity]string{named.OK: "✓", named.Info: "·", named.Warn: "⚠", named.Error: "✗"}[f.Severity]
-		fr = append(fr, findRow{Mark: mark, Class: f.Severity.String(), Zone: f.Zone, Message: f.Message})
+	for _, f := range zl.Findings {
+		fr = append(fr, findRow{Mark: sevMark[f.Severity], Class: f.Severity.String(), Zone: f.Zone, Message: f.Message})
 	}
 
 	render(w, zonesTmpl, map[string]any{
-		"Version": h.version, "User": user, "Active": "zones", "Directory": inv.Directory,
+		"Version": h.version, "User": user, "Active": "zones", "Directory": zl.Directory,
 		"Zones": zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
-		"Builtin": len(inv.Zones) - len(zr), "Checked": check,
+		"Builtin": zl.Builtin, "Checked": check,
 	})
 }
 
-// nsCheckConcurrency bounds how many zones are probed at once on /zones?check=1.
-const nsCheckConcurrency = 8
-
-// zoneNSVerdict runs the on-demand live NS-serial check for one zone (a cheap
-// apex NS query, then a direct SOA probe to each nameserver). Returns a short
-// status and a CSS class. Non-master zones (hint/slave/forward) return blank —
-// there's no apex NS set to compare. Read-only.
-func zoneNSVerdict(z named.Zone, server string) (status, class string) {
-	switch z.Kind() {
-	case "static file", "dynamic":
+// nsVerdictView renders a live NS-serial verdict as a short status and a CSS
+// class (blank for zones with no apex NS set to compare).
+func nsVerdictView(v service.NSVerdict) (status, class string) {
+	switch v.Status {
+	case service.NSAgree:
+		return fmt.Sprintf("✓ %d", v.Serial), "ok"
+	case service.NSMismatch:
+		return "✗ mismatch", "err"
+	case service.NSUnreachable:
+		return "unreachable", "warn"
+	case service.NSNone:
+		return "no NS", "muted"
 	default:
 		return "", ""
-	}
-	switch st, serial := named.ZoneSerialCheck(z.Name, server); st {
-	case named.SerialAgree:
-		return fmt.Sprintf("✓ %d", serial), "ok"
-	case named.SerialMismatch:
-		return "✗ mismatch", "err"
-	case named.SerialUnreachable:
-		return "unreachable", "warn"
-	default:
-		return "no NS", "muted"
 	}
 }
 
@@ -783,7 +547,7 @@ func humanBytes(n int64) string {
 
 func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user string) {
 	cfg := h.cfg()
-	recs, err := h.store.List()
+	recs, err := h.svc.DDNSList()
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		log.Printf("admin: list: %v", err)
@@ -810,14 +574,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 	// Which vhosts goddns owns (proxy.d/ fragments) — those get edit/del
 	// controls; base-config vhosts stay read-only. Best-effort: on any error
 	// nothing is marked managed and the table is read-only.
-	managed := map[string]bool{}
-	if h.confPath != "" {
-		if entries, err := h.vhostEditor().List(); err == nil {
-			for _, e := range entries {
-				managed[e.Host] = e.Managed
-			}
-		}
-	}
+	managed := h.svc.VhostManaged()
 	var pv []proxyView
 	for _, host := range cfg.ProxyHosts() {
 		rule := cfg.Proxy[host]
@@ -848,7 +605,7 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, user s
 		"Records":    rv,
 		"Proxies":    pv,
 		"ProxyOn":    cfg.ProxyEnabled,
-		"ProxyEdit":  h.confPath != "",
+		"ProxyEdit":  h.svc.VhostEditing(),
 		"ProxyStats": ps,
 		"HasStats":   len(ps) > 0,
 		"HasAccess":  cfg.AccessLog != "",
@@ -875,13 +632,13 @@ func (h *Handler) handleTraffic(w http.ResponseWriter, r *http.Request, user str
 		}
 		return out
 	}
-	monthly, err := h.store.TrafficMonthly(12)
+	monthly, err := h.svc.TrafficMonthly(12)
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		log.Printf("admin: traffic monthly: %v", err)
 		return
 	}
-	daily, err := h.store.TrafficDaily(30)
+	daily, err := h.svc.TrafficDaily(30)
 	if err != nil {
 		http.Error(w, "store error", http.StatusInternalServerError)
 		log.Printf("admin: traffic daily: %v", err)
@@ -984,36 +741,29 @@ func proxyRuleFromForm(r *http.Request) (string, config.ProxyRule, error) {
 // handleProxyEdit serves the vhost form pre-filled for an existing managed
 // vhost (GET /proxy/edit?host=). The dashboard's inline form covers "add".
 func (h *Handler) handleProxyEdit(w http.ResponseWriter, r *http.Request, user string) {
-	if h.confPath == "" {
+	if !h.svc.VhostEditing() {
 		http.NotFound(w, r)
 		return
 	}
-	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("host"))), ".")
-	entries, err := h.vhostEditor().List()
+	e, err := h.svc.VhostGet(r.URL.Query().Get("host"))
 	if err != nil {
 		renderRecordErr(w, h.version, "%v", err)
 		return
 	}
-	for _, e := range entries {
-		if e.Host == host && e.Managed {
-			render(w, proxyFormTmpl, map[string]any{
-				"Version": h.version, "CSRF": h.csrfFor(user), "Edit": true,
-				"Host": e.Host, "Upstream": e.Rule.Upstream,
-				"Allow": strings.Join(e.Rule.Allow, ", "), "Auth": strings.Join(e.Rule.BasicAuth, "\n"),
-				"Rate": e.Rule.RateLimit, "Verify": e.Rule.UpstreamVerify, "Preserve": e.Rule.PreserveHost,
-				"BMC": e.Rule.BMCCompat, "Console": joinInts(e.Rule.ConsolePorts),
-			})
-			return
-		}
-	}
-	renderRecordErr(w, h.version, "no goddns-managed vhost %q to edit", host)
+	render(w, proxyFormTmpl, map[string]any{
+		"Version": h.version, "CSRF": h.csrfFor(user), "Edit": true,
+		"Host": e.Host, "Upstream": e.Rule.Upstream,
+		"Allow": strings.Join(e.Rule.Allow, ", "), "Auth": strings.Join(e.Rule.BasicAuth, "\n"),
+		"Rate": e.Rule.RateLimit, "Verify": e.Rule.UpstreamVerify, "Preserve": e.Rule.PreserveHost,
+		"BMC": e.Rule.BMCCompat, "Console": joinInts(e.Rule.ConsolePorts),
+	})
 }
 
 // handleProxySet creates/replaces a managed vhost. Two-phase like the record
 // editor: the first POST previews the rendered fragment, confirm=1 writes it
-// (CSRF-checked, audited) and triggers an immediate reload.
+// (CSRF-checked; the service audits and triggers an immediate reload).
 func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, peer string) {
-	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || h.confPath == "" {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || !h.svc.VhostEditing() {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1022,23 +772,13 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 		renderRecordErr(w, h.version, "%v", err)
 		return
 	}
-	// Reject a console port that collides with the proxy listener up front, so
-	// the form can't silently write a fragment that then breaks every reload.
-	if _, plPort, e := net.SplitHostPort(h.cfg().ProxyListen); e == nil && plPort != "" {
-		for _, p := range rule.ConsolePorts {
-			if strconv.Itoa(p) == plPort {
-				renderRecordErr(w, h.version, "console_ports %d collides with proxy_listen (%s)", p, plPort)
-				return
-			}
-		}
-	}
-	ed := h.vhostEditor()
-	res, err := ed.PreviewSet(host, rule)
+	apply := r.FormValue("confirm") == "1"
+	res, err := h.svc.VhostSet(actor(user, peer), host, rule, apply)
 	if err != nil {
 		renderRecordErr(w, h.version, "%v", err)
 		return
 	}
-	if r.FormValue("confirm") != "1" {
+	if !apply {
 		render(w, proxyConfirmTmpl, map[string]any{
 			"Version": h.version, "CSRF": h.csrfFor(user),
 			"Action": res.Action, "Host": res.Host, "Fragment": res.Fragment,
@@ -1049,45 +789,29 @@ func (h *Handler) handleProxySet(w http.ResponseWriter, r *http.Request, user, p
 		})
 		return
 	}
-	if _, err := ed.Set(host, rule); err != nil {
-		renderRecordErr(w, h.version, "%v", err)
-		return
-	}
-	h.audit(user, peer, "vhost-%s host=%s upstream=%s", res.Action, res.Host, rule.Upstream)
-	if h.reload != nil {
-		h.reload()
-	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
-// handleProxyDel removes a managed vhost (two-phase confirm, audited, reloads).
+// handleProxyDel removes a managed vhost (two-phase confirm; the service
+// audits and reloads).
 func (h *Handler) handleProxyDel(w http.ResponseWriter, r *http.Request, user, peer string) {
-	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || h.confPath == "" {
+	if r.Method != http.MethodPost || !h.csrfOK(user, r.FormValue("csrf")) || !h.svc.VhostEditing() {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	host := strings.TrimSpace(r.FormValue("host"))
-	ed := h.vhostEditor()
-	res, err := ed.PreviewRemove(host)
+	apply := r.FormValue("confirm") == "1"
+	res, err := h.svc.VhostRemove(actor(user, peer), r.FormValue("host"), apply)
 	if err != nil {
 		renderRecordErr(w, h.version, "%v", err)
 		return
 	}
-	if r.FormValue("confirm") != "1" {
+	if !apply {
 		render(w, confirmTmpl, map[string]any{
 			"Version": h.version, "CSRF": h.csrfFor(user), "FQDN": res.Host, "Host": res.Host,
 			"Action": "/proxy/del", "Verb": "yes, remove",
 			"Msg": "Remove this proxy vhost? Its " + relBase(res.File) + " fragment is deleted and the route stops on the next reload.",
 		})
 		return
-	}
-	if _, err := ed.Remove(host); err != nil {
-		renderRecordErr(w, h.version, "%v", err)
-		return
-	}
-	h.audit(user, peer, "vhost-remove host=%s", res.Host)
-	if h.reload != nil {
-		h.reload()
 	}
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
@@ -1099,22 +823,12 @@ func (h *Handler) handleAdd(w http.ResponseWriter, r *http.Request, user, peer s
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	fqdn := strings.TrimSpace(r.FormValue("fqdn"))
-	zone := strings.TrimSpace(r.FormValue("zone"))
 	ttl, _ := strconv.Atoi(r.FormValue("ttl"))
-	if ttl <= 0 {
-		ttl = 60
-	}
-	if fqdn == "" || zone == "" {
-		http.Error(w, "fqdn and zone are required", http.StatusBadRequest)
-		return
-	}
-	rec, tok, err := h.store.Add(fqdn, zone, uint32(ttl))
+	rec, tok, err := h.svc.DDNSAdd(actor(user, peer), r.FormValue("fqdn"), r.FormValue("zone"), ttl)
 	if err != nil {
-		render(w, resultTmpl, map[string]any{"Version": h.version, "Error": err.Error()})
+		h.renderOpErr(w, err)
 		return
 	}
-	h.audit(user, peer, "ddns-add fqdn=%s zone=%s ttl=%d", rec.FQDN, rec.Zone, rec.TTL)
 	h.renderHelp(w, rec, tok, true)
 }
 
@@ -1154,7 +868,7 @@ func (h *Handler) renderHelp(w http.ResponseWriter, rec store.Record, token stri
 }
 
 func (h *Handler) handleHelp(w http.ResponseWriter, r *http.Request, user string) {
-	rec, err := h.store.Get(strings.TrimSpace(r.URL.Query().Get("fqdn")))
+	rec, err := h.svc.DDNSGet(r.URL.Query().Get("fqdn"))
 	if err != nil {
 		http.Error(w, "no such record", http.StatusNotFound)
 		return
@@ -1176,12 +890,11 @@ func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, user, pee
 		})
 		return
 	}
-	rec, tok, err := h.store.Rotate(fqdn)
+	rec, tok, err := h.svc.DDNSRotate(actor(user, peer), fqdn)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.audit(user, peer, "ddns-rotate fqdn=%s", rec.FQDN)
 	h.renderHelp(w, rec, tok, true)
 }
 
@@ -1202,11 +915,10 @@ func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, user, peer s
 		})
 		return
 	}
-	if err := h.store.Del(fqdn); err != nil {
+	if err := h.svc.DDNSDel(actor(user, peer), fqdn); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.audit(user, peer, "ddns-del fqdn=%s", store.FQDN(fqdn))
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 

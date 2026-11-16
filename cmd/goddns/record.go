@@ -10,9 +10,8 @@ import (
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
-	"github.com/chrismfz/goddns/internal/filezone"
 	"github.com/chrismfz/goddns/internal/recordmut"
-	"github.com/chrismfz/goddns/internal/tsig"
+	"github.com/chrismfz/goddns/internal/service"
 )
 
 // cmdRecord edits records in a DYNAMIC zone via signed RFC2136 UPDATEs. It
@@ -81,9 +80,10 @@ func cmdRecord(args []string) {
 		os.Exit(2)
 	}
 
-	// Route by ownership: a static zone the operator enabled for file editing
-	// goes through the file-as-truth path; everything else is RFC2136 (dynamic).
-	if inEditable(cfg, zone) {
+	// Route by ownership, with the same rule as the UI/API (service.EditsInPlace):
+	// an enabled static master goes through the file-as-truth path; everything
+	// else, including a dynamic zone mistakenly in editable_zones, is RFC2136.
+	if service.EditsInPlace(service.FileEditor(cfg), zone) {
 		cmdRecordFile(cfg, zone, ops, *yes)
 		return
 	}
@@ -91,10 +91,7 @@ func cmdRecord(args []string) {
 	st := openStore(cfg)
 	defer healDBOwnership(cfg.DBPath)
 	defer st.Close()
-	ed := &recordmut.Editor{
-		NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
-		Keys: editorKeys(cfg), Snap: st, Keep: cfg.HistoryKeep,
-	}
+	ed := service.RecordEditor(cfg, st)
 
 	res, err := ed.Preview(zone, ops)
 	if err != nil {
@@ -166,10 +163,7 @@ func inEditable(cfg *config.Config, zone string) bool {
 // backup + atomic write + rndc reload). A surgically-unsafe edit is refused with
 // guidance to use raw mode (a later stage).
 func cmdRecordFile(cfg *config.Config, zone string, ops []ddns.Op, yes bool) {
-	ed := &filezone.Editor{
-		NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
-		Editable: cfg.EditableZones, Keep: cfg.HistoryKeep,
-	}
+	ed := service.FileEditor(cfg)
 	res, err := ed.Preview(zone, ops)
 	if err != nil {
 		fatal("%v", err)
@@ -244,10 +238,7 @@ func cmdRecordRestore(cfg *config.Config, rest []string, yes bool) {
 		fatal("snapshot #%d is for zone %q, not %q", id, snap.Zone, zone)
 	}
 
-	ed := &recordmut.Editor{
-		NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
-		Keys: editorKeys(cfg), Snap: st, Keep: cfg.HistoryKeep,
-	}
+	ed := service.RecordEditor(cfg, st)
 	ops, res, err := ed.RestorePlan(zone, snap.Content)
 	if err != nil {
 		fatal("%v", err)
@@ -283,18 +274,6 @@ func printRecordDiff(res *recordmut.Result) {
 	for _, l := range res.Added {
 		fmt.Printf("+ %s\n", l)
 	}
-}
-
-// editorKeys returns goddns's keyring (from tsig_keys_file) or the single key.
-func editorKeys(cfg *config.Config) []tsig.Key {
-	if ks := cfg.TSIGKeys(); len(ks) > 0 {
-		return ks
-	}
-	return []tsig.Key{{
-		Name:   strings.TrimSuffix(cfg.TSIGName, "."),
-		Algo:   cfg.TSIGAlgo,
-		Secret: cfg.TSIGSecret,
-	}}
 }
 
 func confirmPrompt(q string) bool {
