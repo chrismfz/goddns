@@ -7,6 +7,7 @@ package history
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -65,6 +66,44 @@ func lineSet(s string) map[string]bool {
 type Poller struct {
 	Cfg   func() *config.Config // live config (named_conf, dns_server, tsig, history_*)
 	Store *store.Store
+
+	// Logf is where the poller logs (nil ⇒ log.Printf).
+	Logf func(format string, a ...any)
+
+	// failing remembers the last error logged per key (the BIND config, or a
+	// zone), so a condition that persists across cycles — e.g. goddns not
+	// allowed to run named-checkconf — is logged once, not every few
+	// minutes, and its recovery once more (issue #62). Run is the only
+	// goroutine touching it.
+	failing map[string]string
+}
+
+func (p *Poller) logf(format string, a ...any) {
+	if p.Logf != nil {
+		p.Logf(format, a...)
+		return
+	}
+	log.Printf(format, a...)
+}
+
+// fail logs msg for key unless it is the same message logged last time.
+func (p *Poller) fail(key, msg string) {
+	if p.failing == nil {
+		p.failing = map[string]string{}
+	}
+	if p.failing[key] == msg {
+		return
+	}
+	p.failing[key] = msg
+	p.logf("%s (logged once; again only if it changes)", msg)
+}
+
+// ok clears key's failure, logging the recovery if there was one.
+func (p *Poller) ok(key string) {
+	if _, was := p.failing[key]; was {
+		delete(p.failing, key)
+		p.logf("history: %s: working again", key)
+	}
 }
 
 // Run loops until ctx is cancelled, re-reading the interval each cycle so a
@@ -112,9 +151,10 @@ func (p *Poller) sweep(cfg *config.Config) {
 	}
 	data, err := named.CheckConf(nc)
 	if err != nil {
-		log.Printf("history: cannot read BIND config: %v", err)
+		p.fail("BIND config", fmt.Sprintf("history: cannot read BIND config: %v — zone snapshots paused (history_interval = 0 turns history off)", err))
 		return
 	}
+	p.ok("BIND config")
 	inv := named.Parse(data)
 	for _, z := range inv.UserZones() {
 		switch z.Kind() {
@@ -136,7 +176,7 @@ func (p *Poller) capture(z named.Zone, inv *named.Inventory, server, tsigName st
 		// Don't fall through to capture on a read error (e.g. a transient
 		// "database is locked"): that would AXFR + write every cycle and
 		// amplify the very contention that caused the error.
-		log.Printf("history: read latest %s: %v", z.Name, err)
+		p.fail(z.Name, fmt.Sprintf("history: read latest %s: %v", z.Name, err))
 		return
 	}
 	if has && latest.Serial == serial {
@@ -144,15 +184,16 @@ func (p *Poller) capture(z named.Zone, inv *named.Inventory, server, tsigName st
 	}
 	records, _, err := named.TransferAuto(z.Name, server, inv.AXFRKeys(&z, tsigName))
 	if err != nil {
-		log.Printf("history: axfr %s: %v", z.Name, err)
+		p.fail(z.Name, fmt.Sprintf("history: axfr %s: %v", z.Name, err))
 		return
 	}
 	if soa := named.SOAOf(records); soa != nil {
 		serial = soa.Serial // trust the transferred SOA
 	}
 	if _, err := p.Store.SnapshotPut(z.Name, serial, named.Canonical(records), keep); err != nil {
-		log.Printf("history: store %s: %v", z.Name, err)
+		p.fail(z.Name, fmt.Sprintf("history: store %s: %v", z.Name, err))
 		return
 	}
-	log.Printf("history: snapshot %s serial %d (%d records)", z.Name, serial, len(records))
+	p.ok(z.Name)
+	p.logf("history: snapshot %s serial %d (%d records)", z.Name, serial, len(records))
 }
