@@ -112,7 +112,7 @@ func (h *Handler) renderOpErr(w http.ResponseWriter, err error) {
 // refused here AND by the service's role check (two layers: some admin pages
 // — logs, the hash helper, proxy stats — read files without the service).
 var userPaths = map[string]bool{
-	"/": true, "/account": true,
+	"/": true, "/account": true, "/account/apitoken": true,
 	// zone pages: the service scopes every one of these to the user's grants
 	"/zones": true, "/zone": true, "/zone/record": true, "/zone/restore": true,
 	"/ddns/add": true, "/ddns/del": true, "/ddns/rotate": true, "/ddns/help": true,
@@ -206,6 +206,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleUsers(w, r, a)
 	case "/account":
 		h.handleAccount(w, r, a)
+	case "/account/apitoken":
+		h.handleAPIToken(w, r, a)
 	default:
 		http.NotFound(w, r)
 	}

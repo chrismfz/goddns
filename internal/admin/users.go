@@ -81,12 +81,70 @@ func (h *Handler) renderUsers(w http.ResponseWriter, a service.Actor, code int, 
 // goddns.conf admin is told to change it in the file). The session is
 // re-issued afterwards, because the password change rotates the credential
 // fingerprint the old cookie was bound to.
-func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request, a service.Actor) {
+func (h *Handler) accountData(a service.Actor) map[string]any {
 	p, _, _ := h.svc.Lookup(a.User)
-	data := map[string]any{
+	toks, _ := h.svc.APITokens(a, a.User)
+	return map[string]any{
 		"Version": h.version, "User": a.User, "Active": "account", "CSRF": h.csrfFor(a.User),
 		"Role": a.Role, "Config": p.Config, "Restricted": a.Role != service.RoleAdmin,
+		"Tokens": toks, "Scopes": service.ScopesFor(a.Role),
 	}
+}
+
+// handleAPIToken creates (op=add) or revokes (op=revoke) one of your own API
+// tokens. A new token is shown once, on the account page.
+func (h *Handler) handleAPIToken(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	if r.Method != http.MethodPost || !h.csrfOK(a.User, r.FormValue("csrf")) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	data := h.accountData(a)
+	switch r.FormValue("op") {
+	case "add":
+		days, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("expires")))
+		var nets []string
+		for _, f := range strings.FieldsFunc(r.FormValue("allow"), func(c rune) bool { return c == ',' || c == ' ' || c == '\n' || c == '\r' }) {
+			nets = append(nets, f)
+		}
+		t, tok, err := h.svc.APITokenCreate(a, a.User, r.FormValue("name"), r.Form["scope"], nets, days)
+		if err != nil {
+			if service.IsForbidden(err) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			data["TokenError"] = err.Error()
+			renderStatus(w, http.StatusBadRequest, accountTmpl, h.refresh(a, data))
+			return
+		}
+		data = h.refresh(a, data)
+		data["NewToken"], data["NewTokenName"] = tok, t.Name
+		render(w, accountTmpl, data)
+	case "revoke":
+		id, _ := strconv.ParseInt(r.FormValue("id"), 10, 64)
+		if err := h.svc.APITokenRevoke(a, id); err != nil {
+			if service.IsForbidden(err) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			data["TokenError"] = err.Error()
+			renderStatus(w, http.StatusBadRequest, accountTmpl, data)
+			return
+		}
+		http.Redirect(w, r, "/account", http.StatusSeeOther)
+	default:
+		http.Error(w, "bad request", http.StatusBadRequest)
+	}
+}
+
+// refresh reloads the token list into data (after a create).
+func (h *Handler) refresh(a service.Actor, data map[string]any) map[string]any {
+	toks, _ := h.svc.APITokens(a, a.User)
+	data["Tokens"] = toks
+	return data
+}
+
+func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	data := h.accountData(a)
 	if r.Method != http.MethodPost {
 		render(w, accountTmpl, data)
 		return
@@ -216,6 +274,32 @@ const userPages = `
 <div style="margin-top:.6rem"><label>repeat</label><input name="repeat" type="password" autocomplete="new-password" style="width:100%"></div>
 <div style="margin-top:.8rem"><button type="submit">change password</button></div>
 </form></div>{{end}}
+
+<h2>API tokens</h2>
+{{if .NewToken}}<div class="card">
+<div class="warn">Token <b>{{.NewTokenName}}</b> — copy it now, it is shown once (only its hash is stored):</div>
+<div class="tok">{{.NewToken}}</div>
+<div class="muted" style="font-size:.78rem;margin-top:.4rem">Send it as a header, never in a URL: <code>curl -H "Authorization: Bearer &lt;token&gt;" https://&lt;goddns-host&gt;:8245/api/v1/me</code></div>
+</div>{{end}}
+{{if .TokenError}}<div class="card" style="border-color:#5a2230;color:#ff8aa6">{{.TokenError}}</div>{{end}}
+<div class="card"><table>
+<tr><th>name</th><th>scopes</th><th>allow</th><th>expires</th><th>last used</th><th></th></tr>
+{{range .Tokens}}<tr><td><b>{{.Name}}</b></td><td class="muted">{{range $i, $s := .Scopes}}{{if $i}}, {{end}}{{$s}}{{end}}</td>
+<td class="muted">{{if .AllowNets}}{{range $i, $n := .AllowNets}}{{if $i}}, {{end}}{{$n}}{{end}}{{else}}anywhere{{end}}</td>
+<td>{{if .Expired}}<span class="warn">{{.Expires}} (expired)</span>{{else}}{{.Expires}}{{end}}</td><td class="muted">{{.LastUsed}}</td>
+<td><form method="post" action="/account/apitoken" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="op" value="revoke"><input type="hidden" name="id" value="{{.ID}}"><button class="danger" type="submit">revoke</button></form></td></tr>
+{{else}}<tr><td colspan="6" class="muted">(no API tokens)</td></tr>{{end}}
+</table></div>
+<div class="card"><form method="post" action="/account/apitoken">
+<input type="hidden" name="csrf" value="{{.CSRF}}"><input type="hidden" name="op" value="add">
+<div><label>name</label> <input name="name" placeholder="e.g. ci" autocomplete="off"></div>
+<div style="margin-top:.4rem"><label>scopes</label> {{range .Scopes}}<label style="margin-right:.8rem"><input type="checkbox" name="scope" value="{{.}}"> {{.}}</label>{{end}}</div>
+<div style="margin-top:.4rem"><label>allow</label> <input name="allow" placeholder="optional: 203.0.113.0/24, 2001:db8::/48" size="40"></div>
+<div style="margin-top:.4rem"><label>expires in</label> <input name="expires" value="90" size="4"> days <span class="muted">(0 = never)</span></div>
+<div style="margin-top:.6rem"><button type="submit">create API token</button></div>
+</form>
+<div class="muted" style="font-size:.72rem;margin-top:.5rem">A token acts as you — never with more than your role and zones — narrowed to the scopes you tick. Revoking it, or disabling your login, stops it at once.</div>
+</div>
 </main></body></html>{{end}}
 
 {{define "userhome"}}{{template "head" .}}{{template "topbar" .}}

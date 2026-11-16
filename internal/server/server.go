@@ -36,6 +36,9 @@ type Server struct {
 	Store   *store.Store
 	GetCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)
 
+	// API, when set, serves /api/v1/ on this listener (internal/api).
+	API http.Handler
+
 	// Logf receives the per-request update-result lines (nil ⇒ log.Printf).
 	Logf func(format string, a ...any)
 
@@ -87,6 +90,9 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/update/", s.handleSimple)
 	mux.HandleFunc("/nic/update", s.handleDynDNS2)
+	if s.API != nil {
+		mux.Handle("/api/v1/", s.API)
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
@@ -162,6 +168,17 @@ func Listen(cfg *config.Config) (net.Listener, error) {
 		return nil, fmt.Errorf("listen %s: chmod: %w", path, err)
 	}
 	return ln, nil
+}
+
+// ClientIP is the caller's address as goddns resolves it (trusted proxies,
+// tls_mode none), or nil when there is none; the API uses it for token CIDR
+// checks, the auth-failure lockout and audit.
+func (s *Server) ClientIP(r *http.Request) net.IP {
+	ip, err := s.clientIP(r, "")
+	if err != nil {
+		return nil
+	}
+	return ip
 }
 
 // clientIP returns the source IP to register. Priority:

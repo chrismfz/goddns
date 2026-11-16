@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/named"
+	"github.com/chrismfz/goddns/internal/service"
 )
 
 func loginAs(t *testing.T, h *Handler, user, pass string) *http.Cookie {
@@ -239,5 +241,38 @@ func TestGrantedUserUI(t *testing.T) {
 	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "revoke", "name": "alice", "zone": "example.com"}, admin)
 	if rr := do(h, "GET", "/zone?name=example.com", "127.0.0.1:1", nil, alice); rr.Code != http.StatusForbidden {
 		t.Fatalf("after revoke: %d", rr.Code)
+	}
+}
+
+func TestAccountAPITokens(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	admin := login(t, h)
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": h.csrfFor("admin"), "op": "add", "name": "fay", "pass": "faypass123", "role": "user"}, admin)
+	fay := loginAs(t, h, "fay", "faypass123")
+	csrf := h.csrfFor("fay")
+	page := do(h, "GET", "/account", "127.0.0.1:1", nil, fay).Body.String()
+	if !strings.Contains(page, `value="ddns:write"`) || strings.Contains(page, `value="users:admin"`) {
+		t.Fatal("account page offers scopes beyond the user role")
+	}
+	rr := do(h, "POST", "/account/apitoken", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "add", "name": "ci", "scope": "zones:read", "expires": "30"}, fay)
+	if rr.Code != 200 || !strings.Contains(rr.Body.String(), "gdapi_") {
+		t.Fatalf("create: %d", rr.Code)
+	}
+	if again := do(h, "GET", "/account", "127.0.0.1:1", nil, fay).Body.String(); strings.Contains(again, "gdapi_") {
+		t.Fatal("the token was shown a second time")
+	}
+	rr = do(h, "POST", "/account/apitoken", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "add", "name": "x", "scope": "users:admin"}, fay)
+	if rr.Code != 400 {
+		t.Fatalf("admin scope for a user: %d", rr.Code)
+	}
+	toks, _ := h.svc.APITokens(service.Actor{User: "fay", Role: service.RoleUser}, "fay")
+	if len(toks) != 1 {
+		t.Fatalf("tokens: %+v", toks)
+	}
+	if rr := do(h, "POST", "/account/apitoken", "127.0.0.1:1", map[string]string{"op": "revoke", "id": fmt.Sprint(toks[0].ID)}, fay); rr.Code != 400 {
+		t.Fatalf("revoke without csrf: %d", rr.Code)
+	}
+	if rr := do(h, "POST", "/account/apitoken", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "revoke", "id": fmt.Sprint(toks[0].ID)}, fay); rr.Code != http.StatusSeeOther {
+		t.Fatalf("revoke: %d", rr.Code)
 	}
 }

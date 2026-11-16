@@ -103,6 +103,9 @@ func Open(path string) (*Store, error) {
 	if err := migrateGrants(db); err != nil {
 		return nil, err
 	}
+	if err := migrateAPITokens(db); err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 

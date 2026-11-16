@@ -121,8 +121,12 @@ approval workflow on top of the audit/history substrate:
 - **Per-zone grants** — DONE. `zone_grants` (user, zone); a `user` manages
   exactly its granted zones (view, history, record edits, restore, their
   DDNS tokens), never subzones; `goddns user grant|revoke`, users page.
-- Still open for RBAC: per-record-type limits, read-only grants, grants for
-  API tokens (with the machine API). goauth (or any SSO/2FA) gates the door; this is the app-level model
+- **Machine API** — DONE (`internal/api`, `/api/v1` on the DDNS listener).
+  Bearer tokens owned by a login, acting as it, narrowed by scopes, CIDRs and
+  an expiry; per-token rate limit, auth-failure lockout; `goddns apitoken`,
+  account page.
+- Still open for RBAC: per-record-type limits, read-only grants, per-token
+  zone subsets (today a token sees all of its owner's zones). goauth (or any SSO/2FA) gates the door; this is the app-level model
   behind it, with per-tenant audit + history.
 - **External API / connectors**: a machine API (bearer / mTLS, rate-limited,
   audited) and a **zonecloud.io** connector that syncs zones/records to/from
