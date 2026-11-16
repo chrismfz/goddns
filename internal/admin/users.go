@@ -40,6 +40,10 @@ func (h *Handler) handleUsers(w http.ResponseWriter, r *http.Request, a service.
 		if err == nil && name == a.User {
 			h.setSession(w, a.User) // own reset rotated the fingerprint: stay signed in
 		}
+	case "grant":
+		err = h.svc.Grant(a, name, r.FormValue("zone"))
+	case "revoke":
+		err = h.svc.Revoke(a, name, r.FormValue("zone"))
 	case "del":
 		if r.FormValue("confirm") != "1" {
 			render(w, userDelTmpl, map[string]any{"Version": h.version, "CSRF": h.csrfFor(a.User), "Name": name})
@@ -134,11 +138,22 @@ func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request, a servic
 	render(w, accountTmpl, data)
 }
 
-// handleUserHome is a non-admin login's landing page. Until zone grants
-// exist the role reaches nothing else, and the page says so.
+// handleUserHome is a non-admin login's landing page: its granted zones and
+// the DDNS records in them, with the add form limited to those zones.
 func (h *Handler) handleUserHome(w http.ResponseWriter, r *http.Request, a service.Actor) {
+	zones, err := h.svc.MyZones(a)
+	if err != nil {
+		h.renderOpErr(w, err)
+		return
+	}
+	recs, err := h.svc.DDNSList(a)
+	if err != nil {
+		h.renderOpErr(w, err)
+		return
+	}
 	render(w, userHomeTmpl, map[string]any{
 		"Version": h.version, "User": a.User, "Active": "home", "Restricted": true, "Role": a.Role,
+		"Zones": zones, "Records": recordViews(recs), "CSRF": h.csrfFor(a.User),
 	})
 }
 
@@ -148,12 +163,13 @@ const userPages = `
 <main>
 {{if .Error}}<div class="card" style="border-color:#5a2230;color:#ff8aa6">{{.Error}}</div>{{end}}
 <div class="card"><table>
-<tr><th>user</th><th>role</th><th>state</th><th>source</th><th>created</th><th></th></tr>
+<tr><th>user</th><th>role</th><th>state</th><th>source</th><th>created</th><th>zones</th><th></th></tr>
 {{range .Users}}<tr>
 <td><b>{{.Name}}</b></td><td>{{.Role}}</td>
 <td>{{if .Disabled}}<span class="warn">disabled</span>{{else}}enabled{{end}}</td>
 <td>{{if .Config}}<span class="muted" title="[admin] users in goddns.conf">goddns.conf</span>{{else if .Shadowed}}<span class="warn" title="a goddns.conf user of the same name wins">db (shadowed)</span>{{else}}db{{end}}</td>
 <td class="muted">{{.Created}}</td>
+<td>{{$u := .Name}}{{range .Zones}}<form method="post" action="/users" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{$u}}"><input type="hidden" name="op" value="revoke"><input type="hidden" name="zone" value="{{.}}"><span>{{.}}</span><button type="submit" title="revoke">×</button></form> {{end}}{{if and (not .Config) (not .Shadowed)}}<form method="post" action="/users" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="op" value="grant"><input name="zone" placeholder="zone" size="14"><button type="submit">grant</button></form>{{end}}{{if and .Zones (eq .Role "admin")}} <span class="muted" title="an admin reaches every zone">(unused while admin)</span>{{end}}</td>
 <td>{{if .Shadowed}}<form method="post" action="/users" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="op" value="del"><button class="danger" type="submit" title="this row can't log in; delete it so it can't come back if the goddns.conf line is removed">delete</button></form>
 {{else if not .Config}}
 <form method="post" action="/users" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="name" value="{{.Name}}"><input type="hidden" name="op" value="role">
@@ -172,7 +188,7 @@ const userPages = `
 <label>role</label> <select name="role"><option value="user">user</option><option value="admin">admin</option></select>
 <button type="submit">add user</button>
 </form>
-<div class="muted" style="font-size:.72rem;margin-top:.6rem">An <b>admin</b> can do everything. A <b>user</b> can sign in and change their own password; zones are granted to users in a later release, so today the role reaches nothing else. Changing a role, password or state ends that user's sessions. goddns.conf <code>[admin] users</code> are always admins and are edited in the file.</div>
+<div class="muted" style="font-size:.72rem;margin-top:.6rem">An <b>admin</b> can do everything. A <b>user</b> manages only the zones granted to it — view, history, record edits, restore, and the DDNS tokens in those zones — plus their own password; nothing server-wide. A grant is one zone, not its subzones. Changing a role, password or state ends that user's sessions. goddns.conf <code>[admin] users</code> are always admins and are edited in the file.</div>
 </div>
 </main></body></html>{{end}}
 
@@ -203,9 +219,22 @@ const userPages = `
 </main></body></html>{{end}}
 
 {{define "userhome"}}{{template "head" .}}{{template "topbar" .}}
-<div class="subnav"><span class="here">home</span><span class="sp"></span><span class="muted">goddns {{.Version}}</span></div>
-<main><h2>signed in as {{.User}}</h2>
-<div class="card">Your account has the <b>{{.Role}}</b> role. No zones are assigned to it yet, so there is nothing to manage here. Ask an admin to grant you a zone.</div>
-<div class="card"><a href="/account">change your password</a></div>
+<div class="subnav"><span class="here">home</span><span class="sp"></span><span class="muted">{{.User}} · {{.Role}} · goddns {{.Version}}</span></div>
+<main>
+<h2>your zones</h2>
+{{if .Zones}}<div class="card">{{range .Zones}}<div><a href="/zone?name={{.}}">{{.}}</a></div>{{end}}</div>
+{{else}}<div class="card">No zones are assigned to your account yet, so there is nothing to manage here. Ask an admin to grant you a zone.</div>{{end}}
+{{if .Zones}}
+<h2>DDNS records</h2>
+{{template "ddnstable" .}}
+<div class="card"><form method="post" action="/ddns/add">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<label>hostname</label> <input name="fqdn" placeholder="home.{{index .Zones 0}}" autocomplete="off">
+<label>zone</label> <select name="zone">{{range .Zones}}<option value="{{.}}">{{.}}</option>{{end}}</select>
+<label>ttl</label> <input name="ttl" value="60" size="5">
+<button type="submit">add DDNS record</button>
+</form>
+<div class="muted" style="font-size:.72rem;margin-top:.5rem">A DDNS record is a token that lets a router or script keep one hostname pointed at its current IP. The token is shown once.</div>
+</div>{{end}}
 </main></body></html>{{end}}
 `

@@ -90,6 +90,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 {{define "topbar"}}<header>
 <div><a href="/" class="b">goddns admin</a><nav>
 {{if .Restricted}}<a href="/" {{if eq .Active "home"}}class="on"{{end}}>home</a>
+<a href="/zones" {{if eq .Active "zones"}}class="on"{{end}}>zones</a>
 {{else}}<a href="/" {{if eq .Active "dash"}}class="on"{{end}}>dashboard</a>
 <a href="/zones" {{if eq .Active "zones"}}class="on"{{end}}>zones</a>
 <a href="/logs?which=access" {{if eq .Active "logs"}}class="on"{{end}}>logs</a>
@@ -113,12 +114,9 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <div class="muted" style="font-size:.7rem;margin-top:1rem">goddns {{.Version}}</div>
 </main></body></html>{{end}}
 
-{{define "dash"}}{{template "head" .}}{{template "topbar" .}}
-<div class="subnav"><span class="here">dashboard</span><span class="sp"></span><span class="muted">goddns {{.Version}}</span></div>
-<main>
-
-<h2>DDNS records</h2>
-<table><thead><tr><th>FQDN</th><th>zone</th><th>TTL</th><th>last IP</th><th>last change</th><th>last seen</th><th>state</th><th></th></tr></thead><tbody>
+{{/* ddnstable: the DDNS records with help/rotate/delete — the dashboard and a
+   user's home both render it from .Records + .CSRF. */}}
+{{define "ddnstable"}}<table><thead><tr><th>FQDN</th><th>zone</th><th>TTL</th><th>last IP</th><th>last change</th><th>last seen</th><th>state</th><th></th></tr></thead><tbody>
 {{range .Records}}<tr>
 <td>{{.FQDN}}</td><td class="muted">{{.Zone}}</td><td>{{.TTL}}</td>
 <td>{{if .LastIP}}{{.LastIP}}{{else}}<span class="muted">—</span>{{end}}</td>
@@ -131,7 +129,14 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <form class="inline" method="post" action="/ddns/del"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="fqdn" value="{{.FQDN}}"><button class="danger" type="submit">delete</button></form>
 </td>
 </tr>{{else}}<tr><td colspan="8" class="muted">(no records)</td></tr>{{end}}
-</tbody></table>
+</tbody></table>{{end}}
+
+{{define "dash"}}{{template "head" .}}{{template "topbar" .}}
+<div class="subnav"><span class="here">dashboard</span><span class="sp"></span><span class="muted">goddns {{.Version}}</span></div>
+<main>
+
+<h2>DDNS records</h2>
+{{template "ddnstable" .}}
 
 <div class="card"><form method="post" action="/ddns/add"><div class="row">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -311,14 +316,14 @@ curl "https://{{.Host}}:{{.Port}}/nic/update?hostname={{.Name}}&token={{.Token}}
 <div class="card" style="border-color:#5a2230">
 <div class="warn">Can't read the BIND config:</div>
 <pre style="margin:.5rem 0">{{.Error}}</pre>
-<div class="muted" style="font-size:.8rem">goddns runs as the <code>goddns</code> user. To let it read named.conf for this
+{{if not .Restricted}}<div class="muted" style="font-size:.8rem">goddns runs as the <code>goddns</code> user. To let it read named.conf for this
 read-only view, add it to the named group:<br>
 &nbsp;&nbsp;<code>usermod -aG named goddns &amp;&amp; systemctl restart goddns</code><br>
-(or just use the CLI as root: <code>goddns zones</code>). This page never edits anything.</div>
+(or just use the CLI as root: <code>goddns zones</code>). This page never edits anything.</div>{{end}}
 </div>
 {{else}}
 
-<h2>zones{{if .Directory}} <span class="muted">(directory {{.Directory}})</span>{{end}}</h2>
+<h2>{{if .Restricted}}your zones{{else}}zones{{end}}{{if .Directory}} <span class="muted">(directory {{.Directory}})</span>{{end}}</h2>
 <table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th>{{if .Checked}}<th>NS (live)</th>{{end}}</tr></thead><tbody>
 {{range .Zones}}<tr>
 {{if $.HasViews}}<td class="muted">{{if .View}}{{.View}}{{else}}_default{{end}}</td>{{end}}
@@ -331,9 +336,9 @@ read-only view, add it to the named group:<br>
 </tbody></table>
 {{if .Checked}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">live NS check: <span class="ok">✓ serial</span> = all nameservers agree · <span class="err">✗ mismatch</span> = a secondary is out of sync · <a href="/zones?check=1">re-check</a> · <a href="/zones">clear</a></div>
 {{else}}<div style="font-size:.78rem;margin-top:.3rem"><a href="/zones?check=1">▸ check nameservers live</a> <span class="muted">(probe every zone's NS for serial agreement)</span></div>{{end}}
-{{if .Builtin}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">(+ {{.Builtin}} built-in empty zones hidden; <code>goddns zones -all</code> on the CLI to show)</div>{{end}}
+{{if and .Builtin (not .Restricted)}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">(+ {{.Builtin}} built-in empty zones hidden; <code>goddns zones -all</code> on the CLI to show)</div>{{end}}
 
-<h2>TSIG keys</h2>
+{{if not .Restricted}}<h2>TSIG keys</h2>
 <table><thead><tr><th>key</th><th>algorithm</th></tr></thead><tbody>
 {{range .Keys}}<tr><td>{{.Name}}</td><td class="muted">{{.Algorithm}}</td></tr>
 {{else}}<tr><td colspan="2" class="muted">(none)</td></tr>{{end}}
@@ -344,7 +349,7 @@ read-only view, add it to the named group:<br>
 <div class="card">
 {{range .Findings}}<div class="{{if eq .Class "ok"}}ok{{else if eq .Class "error"}}err{{else if eq .Class "warn"}}warn{{else}}muted{{end}}" style="padding:.15rem 0">{{.Mark}} {{if .Zone}}<b>{{.Zone}}</b>: {{end}}{{.Message}}</div>
 {{else}}<div class="muted">(nothing to report)</div>{{end}}
-</div>
+</div>{{end}}
 {{end}}
 </main></body></html>{{end}}
 
@@ -388,7 +393,7 @@ This page never edits BIND — it only reads.</div>
 </div></form>
 <div class="muted" style="font-size:.72rem">{{if .FileEdit}}static zone — del/add rewrite the file in place (surgical), checkzone + backup + rndc reload, with a confirm + diff. Raw whole-file edits stay on the CLI (<code>goddns zone edit</code>).{{else}}dynamic zone — edits go via a signed RFC2136 UPDATE, snapshotted first; del/add show a confirm + diff. The key's update-policy is the hard bound.{{end}}</div></div>
 {{end}}
-<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR ({{.Auth}}). CLI: <code>goddns zone {{.Name}}</code> / <code>goddns record …</code>.</div>
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR{{if .Auth}} ({{.Auth}}){{end}}.{{if not .Restricted}} CLI: <code>goddns zone {{.Name}}</code> / <code>goddns record …</code>.{{end}}</div>
 
 <h2>SOA / NS checks</h2>
 <div class="card">

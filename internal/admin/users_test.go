@@ -7,6 +7,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/named"
 )
 
 func loginAs(t *testing.T, h *Handler, user, pass string) *http.Cookie {
@@ -48,7 +51,7 @@ func TestUsersPageAndUserRole(t *testing.T) {
 		t.Fatalf("user home: %d", rr.Code)
 	}
 	// every admin page is 403 for the user role, GET and POST alike
-	for _, p := range []string{"/zones", "/zone?name=x", "/logs?which=access", "/traffic", "/users", "/passwd",
+	for _, p := range []string{"/zone?name=x", "/zone?name=x&history=1", "/logs?which=access", "/traffic", "/users", "/passwd",
 		"/ddns/help?fqdn=x", "/proxy/edit?host=x"} {
 		if rr := do(h, "GET", p, "127.0.0.1:1", nil, alice); rr.Code != http.StatusForbidden {
 			t.Errorf("GET %s as user: %d", p, rr.Code)
@@ -57,7 +60,7 @@ func TestUsersPageAndUserRole(t *testing.T) {
 	aliceCSRF := h.csrfFor("alice")
 	for _, p := range []string{"/ddns/add", "/ddns/del", "/zone/record", "/zone/restore", "/proxy/set", "/proxy/del", "/users"} {
 		if rr := do(h, "POST", p, "127.0.0.1:1", map[string]string{"csrf": aliceCSRF, "op": "add", "name": "eve",
-			"pass": "evepass123", "role": "admin", "fqdn": "a.b", "zone": "b", "confirm": "1"}, alice); rr.Code != http.StatusForbidden {
+			"pass": "evepass123", "role": "admin", "fqdn": "a.b", "zone": "b", "confirm": "1", "id": "1", "action": "add", "rr": "a.b 60 IN A 1.1.1.1"}, alice); rr.Code != http.StatusForbidden {
 			t.Errorf("POST %s as user: %d", p, rr.Code)
 		}
 	}
@@ -182,5 +185,59 @@ func TestOwnResetOnUsersPageKeepsSession(t *testing.T) {
 	}
 	if rr := do(h, "GET", "/users", "127.0.0.1:1", nil, fresh); rr.Code != http.StatusOK {
 		t.Fatalf("re-issued session after own reset: %d", rr.Code)
+	}
+}
+
+func TestGrantedUserUI(t *testing.T) {
+	h, _ := newHandler(t, mkConfig(t, ""))
+	inv := &named.Inventory{Zones: []named.Zone{
+		{Name: "example.com", Type: "master", Path: "/var/named/example.com.db"},
+		{Name: "other.net", Type: "master", Path: "/var/named/other.net.db"},
+	}, Keys: []named.Key{{Name: "goddns-key", Algorithm: "hmac-sha256"}}}
+	h.svc.Inv = func(*config.Config) (*named.Inventory, error) { return inv, nil }
+	admin := login(t, h)
+	csrf := h.csrfFor("admin")
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "add", "name": "alice", "pass": "alicepass1", "role": "user"}, admin)
+	if rr := do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "grant", "name": "alice", "zone": "example.com"}, admin); rr.Code != http.StatusSeeOther {
+		t.Fatalf("grant: %d %s", rr.Code, rr.Body.String())
+	}
+	if rr := do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "grant", "name": "alice", "zone": "typo.example"}, admin); rr.Code != http.StatusBadRequest {
+		t.Fatalf("grant of an unserved zone: %d", rr.Code)
+	}
+	if rr := do(h, "GET", "/users", "127.0.0.1:1", nil, admin); !strings.Contains(rr.Body.String(), `name="zone" value="example.com"`) {
+		t.Fatal("users page doesn't show the grant with its revoke form")
+	}
+
+	alice := loginAs(t, h, "alice", "alicepass1")
+	home := do(h, "GET", "/", "127.0.0.1:1", nil, alice).Body.String()
+	if !strings.Contains(home, `/zone?name=example.com`) || strings.Contains(home, "other.net") {
+		t.Fatal("home doesn't list exactly the granted zone")
+	}
+	zones := do(h, "GET", "/zones", "127.0.0.1:1", nil, alice)
+	body := zones.Body.String()
+	if zones.Code != http.StatusOK || !strings.Contains(body, "example.com") || strings.Contains(body, "other.net") ||
+		strings.Contains(body, "goddns-key") || strings.Contains(body, "/var/named") {
+		t.Fatalf("zones page leaks beyond the grant (%d):\n%s", zones.Code, body)
+	}
+	if rr := do(h, "GET", "/zone?name=other.net", "127.0.0.1:1", nil, alice); rr.Code != http.StatusForbidden {
+		t.Fatalf("ungranted zone view: %d", rr.Code)
+	}
+	if rr := do(h, "GET", "/zone?name=example.com", "127.0.0.1:1", nil, alice); rr.Code == http.StatusForbidden {
+		t.Fatal("granted zone view refused")
+	}
+	ac := h.csrfFor("alice")
+	if rr := do(h, "POST", "/ddns/add", "127.0.0.1:1", map[string]string{"csrf": ac, "fqdn": "cam.other.net", "zone": "other.net"}, alice); rr.Code != http.StatusForbidden {
+		t.Fatalf("DDNS add in an ungranted zone: %d", rr.Code)
+	}
+	if rr := do(h, "POST", "/ddns/add", "127.0.0.1:1", map[string]string{"csrf": ac, "fqdn": "cam.example.com", "zone": "example.com"}, alice); rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), "cam.example.com") {
+		t.Fatalf("DDNS add in the granted zone: %d", rr.Code)
+	}
+	if home := do(h, "GET", "/", "127.0.0.1:1", nil, alice).Body.String(); !strings.Contains(home, "cam.example.com") {
+		t.Fatal("home doesn't list the user's DDNS record")
+	}
+	// revoking ends access at once (no session change needed)
+	do(h, "POST", "/users", "127.0.0.1:1", map[string]string{"csrf": csrf, "op": "revoke", "name": "alice", "zone": "example.com"}, admin)
+	if rr := do(h, "GET", "/zone?name=example.com", "127.0.0.1:1", nil, alice); rr.Code != http.StatusForbidden {
+		t.Fatalf("after revoke: %d", rr.Code)
 	}
 }

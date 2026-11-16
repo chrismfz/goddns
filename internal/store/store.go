@@ -28,6 +28,7 @@ type Record struct {
 	LastUpdate time.Time // when the IP last CHANGED (a DNS write happened)
 	LastSeen   time.Time // when the client last checked in (incl. nochg polls)
 	Disabled   bool
+	Owner      string // the user-role login that created it ("" = an admin / the CLI)
 }
 
 type Store struct{ db *sql.DB }
@@ -63,6 +64,13 @@ func Open(path string) (*Store, error) {
 		!strings.Contains(err.Error(), "duplicate column name") {
 		return nil, err
 	}
+	// owner: the user-role login that created the record. Such a token
+	// works only while that login is enabled and still holds the zone (see
+	// Lookup); "" is an admin/CLI record, unaffected by grants.
+	if _, err := db.Exec(`ALTER TABLE records ADD COLUMN owner TEXT NOT NULL DEFAULT ''`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return nil, err
+	}
 	// Zone history snapshots (Phase 1): one row per captured zone state.
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS snapshots (
 		id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,6 +98,9 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if err := migrateUsers(db); err != nil {
+		return nil, err
+	}
+	if err := migrateGrants(db); err != nil {
 		return nil, err
 	}
 	return &Store{db: db}, nil
@@ -124,11 +135,16 @@ var ErrNotFound = errors.New("record not found")
 
 // Add creates a binding and returns the plaintext token exactly once.
 func (s *Store) Add(name, zone string, ttl uint32) (Record, string, error) {
+	return s.AddFor("", name, zone, ttl)
+}
+
+// AddFor is Add with an owner (a user-role login; "" for admin/CLI records).
+func (s *Store) AddFor(owner, name, zone string, ttl uint32) (Record, string, error) {
 	tok := newToken()
-	rec := Record{FQDN: FQDN(name), Zone: FQDN(zone), TTL: ttl, TokenHash: hashToken(tok)}
+	rec := Record{FQDN: FQDN(name), Zone: FQDN(zone), TTL: ttl, TokenHash: hashToken(tok), Owner: owner}
 	res, err := s.db.Exec(
-		`INSERT INTO records (fqdn, zone, ttl, token_hash) VALUES (?,?,?,?)`,
-		rec.FQDN, rec.Zone, rec.TTL, rec.TokenHash)
+		`INSERT INTO records (fqdn, zone, ttl, token_hash, owner) VALUES (?,?,?,?,?)`,
+		rec.FQDN, rec.Zone, rec.TTL, rec.TokenHash, rec.Owner)
 	if err != nil {
 		return Record{}, "", err
 	}
@@ -140,7 +156,7 @@ func (s *Store) scan(row interface{ Scan(...any) error }) (Record, error) {
 	var r Record
 	var updTs, seenTs int64
 	var dis int
-	err := row.Scan(&r.ID, &r.FQDN, &r.Zone, &r.TTL, &r.TokenHash, &r.LastIP, &updTs, &seenTs, &dis)
+	err := row.Scan(&r.ID, &r.FQDN, &r.Zone, &r.TTL, &r.TokenHash, &r.LastIP, &updTs, &seenTs, &dis, &r.Owner)
 	if err != nil {
 		return Record{}, err
 	}
@@ -150,11 +166,21 @@ func (s *Store) scan(row interface{ Scan(...any) error }) (Record, error) {
 	return r, nil
 }
 
-const cols = `id, fqdn, zone, ttl, token_hash, last_ip, last_update, last_seen, disabled`
+const cols = `id, fqdn, zone, ttl, token_hash, last_ip, last_update, last_seen, disabled, owner`
 
 // Lookup finds an enabled record by plaintext token (matched on its hash).
 func (s *Store) Lookup(tok string) (Record, error) {
-	row := s.db.QueryRow(`SELECT `+cols+` FROM records WHERE token_hash=? AND disabled=0`, hashToken(tok))
+	// A user-owned token is honoured only while its owner is an enabled
+	// login that is an admin or still holds the record's zone: revoking a
+	// grant, disabling or deleting the user stops the token at once, and
+	// re-granting restores it (authorization decided when it's used, not
+	// copied onto the token).
+	row := s.db.QueryRow(`SELECT `+cols+` FROM records WHERE token_hash=? AND disabled=0 AND (
+		owner = '' OR EXISTS (
+			SELECT 1 FROM users u WHERE u.name = records.owner AND u.disabled = 0 AND (
+				u.role = 'admin' OR EXISTS (
+					SELECT 1 FROM zone_grants g WHERE g.user = u.name AND g.zone || '.' = records.zone))))`,
+		hashToken(tok))
 	r, err := s.scan(row)
 	if err == sql.ErrNoRows {
 		return Record{}, ErrNotFound

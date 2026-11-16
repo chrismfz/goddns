@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/miekg/dns"
+
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filezone"
@@ -44,24 +46,42 @@ type RecordResult struct {
 // zones and snapshots before writing. CanEdit re-reads the live dynamic flag,
 // so routing can't disagree with the display.
 func (s *Service) EditRecord(a Actor, zone, action, line string, apply bool) (*RecordResult, error) {
-	if err := s.requireAdmin(a); err != nil {
-		return nil, err
-	}
 	zone = strings.TrimSpace(zone)
 	line = strings.TrimSpace(line)
 	if zone == "" || line == "" || (action != ActionAdd && action != ActionDel) {
 		return nil, missing("missing fields")
 	}
-	cfg := s.cfg()
-	fed := s.fileEditor(cfg)
-	if EditsInPlace(fed, zone) {
-		return s.editStatic(a, cfg, fed, zone, action, line, apply)
+	if err := s.authZone(a, zone); err != nil {
+		return nil, err
 	}
-
+	cfg := s.cfg()
 	rr, err := ParseRR(line, zone)
 	if err != nil {
 		return nil, err
 	}
+	// A granted user's record must belong to THIS zone, not a more specific
+	// one served here: a grant on a.com is not one on sub.a.com, and the
+	// static path's own check is only "is a subdomain". Admins keep the
+	// parent-side delegation records (NS/DS at a child apex, glue below it),
+	// which live in the parent zone by definition; the RFC2136 path applies
+	// its own rule to them as before.
+	if a.Role != RoleAdmin {
+		inv, err := s.inventory(cfg)
+		if err != nil {
+			return nil, err // can't prove the owner zone: fail closed
+		}
+		if owner := ownerZone(inv, rr.Header().Name); owner != NormZone(zone) {
+			if owner == "" {
+				return nil, invalid("record %q is not inside any zone served here", rr.Header().Name)
+			}
+			return nil, invalid("record %q belongs to the more specific zone %q — ask for that zone", rr.Header().Name, owner)
+		}
+	}
+	fed := s.fileEditor(cfg)
+	if EditsInPlace(fed, zone) {
+		return s.editStatic(a, cfg, fed, zone, action, line, rr, apply)
+	}
+
 	ops := []ddns.Op{{Action: opFor(action), RR: rr}}
 	ed := s.recordEditor(cfg)
 	if !apply {
@@ -89,7 +109,7 @@ func opFor(action string) ddns.Action {
 // editStatic previews or applies one static-zone record edit, through the
 // zoned root helper when a socket is configured (so the daemon never writes
 // /var/named) or filezone directly.
-func (s *Service) editStatic(a Actor, cfg *config.Config, fed *filezone.Editor, zone, action, line string, apply bool) (*RecordResult, error) {
+func (s *Service) editStatic(a Actor, cfg *config.Config, fed *filezone.Editor, zone, action, line string, rr dns.RR, apply bool) (*RecordResult, error) {
 	out := &RecordResult{Zone: zone, Static: true, Via: "direct"}
 	if cfg.ZonedSocket != "" {
 		out.Via = "zoned"
@@ -99,12 +119,9 @@ func (s *Service) editStatic(a Actor, cfg *config.Config, fed *filezone.Editor, 
 		}
 		out.Added, out.Removed, out.Serial, out.Backup = resp.Added, resp.Removed, resp.Serial, resp.Backup
 	} else {
-		rr, err := ParseRR(line, zone)
-		if err != nil {
-			return nil, err
-		}
 		ops := []ddns.Op{{Action: opFor(action), RR: rr}}
 		var res *filezone.Result
+		var err error
 		if apply {
 			res, err = fed.Apply(zone, ops)
 		} else {
@@ -134,10 +151,10 @@ type RestoreResult struct {
 // forward delta (what the restore would add/remove); apply=true applies it as
 // one signed UPDATE, itself snapshotted-before so a restore is undoable.
 func (s *Service) Restore(a Actor, zone string, id int64, apply bool) (*RestoreResult, error) {
-	if err := s.requireAdmin(a); err != nil {
+	zone = strings.TrimSpace(zone)
+	if err := s.authZone(a, zone); err != nil {
 		return nil, err
 	}
-	zone = strings.TrimSpace(zone)
 	if zone == "" || id <= 0 {
 		return nil, missing("missing fields")
 	}
