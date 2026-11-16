@@ -53,7 +53,7 @@ type Config struct {
 	LogFile        string `toml:"log_file"`        // dedicated log file; empty = stderr/journald. Hot-swappable.
 	AccessLog      string `toml:"access_log"`      // separate file for proxy-access lines; empty = into log_file. Hot-swappable.
 	UpdateLog      string `toml:"update_log"`      // which DDNS update results are logged: all | changes | updates (default) | none. Hot-swappable.
-	PublicHost     string `toml:"public_host"`     // hostname clients use to reach the DDNS endpoint (e.g. sdns.myip.gr); fills the admin help snippets. Optional.
+	PublicHost     string `toml:"public_host"`     // hostname clients use to reach the DDNS endpoint (e.g. dns.example.com); fills the admin help snippets. Optional.
 	NamedConf      string `toml:"named_conf"`      // path to named.conf for the read-only Zones view (default /etc/named.conf)
 
 	// Zone history (Phase 1): the serve loop snapshots every master zone whose
@@ -68,7 +68,7 @@ type Config struct {
 
 	// ACME (tls_mode = "acme"): the DNS-01 challenge TXT record is written
 	// through the same BIND via RFC2136, so no port 80/443 is ever needed.
-	ACMEDomain     string `toml:"acme_domain"`      // certificate hostname, e.g. sdns.myip.gr
+	ACMEDomain     string `toml:"acme_domain"`      // certificate hostname, e.g. dns.example.com
 	ACMEEmail      string `toml:"acme_email"`       // account contact (optional)
 	ACMECA         string `toml:"acme_ca"`          // directory URL; empty = Let's Encrypt production
 	ACMEStorage    string `toml:"acme_storage"`     // cert/account storage dir
@@ -135,7 +135,7 @@ func (c *Config) TSIGKeys() []tsig.Key { return c.tsigKeys }
 // AdminConfig configures the admin web UI (see internal/admin).
 type AdminConfig struct {
 	Enabled    bool     `toml:"enabled"`
-	Host       string   `toml:"host"`        // vhost served on the proxy listener, e.g. admin.myip.gr
+	Host       string   `toml:"host"`        // vhost served on the proxy listener, e.g. admin.example.com
 	Allow      []string `toml:"allow"`       // client CIDRs (a real filter, not obscurity); empty = anywhere
 	BasicAuth  []string `toml:"basic_auth"`  // optional outer HTTP Basic gate ("user:bcrypt"); keeps scanners off the login form
 	Users      []string `toml:"users"`       // bootstrap admins, "user:bcrypt" (goddns passwd); more logins: goddns user add
@@ -383,7 +383,7 @@ func Load(path string) (*Config, error) {
 		}
 		c.Admin.Host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Admin.Host)), ".")
 		if c.Admin.Host == "" || strings.ContainsAny(c.Admin.Host, "/: \t") {
-			return nil, fmt.Errorf("admin: host must be a hostname (e.g. admin.myip.gr)")
+			return nil, fmt.Errorf("admin: host must be a hostname (e.g. admin.example.com)")
 		}
 		if _, dup := c.Proxy[c.Admin.Host]; dup {
 			return nil, fmt.Errorf("admin: host %q also has a [proxy] rule — pick a distinct name", c.Admin.Host)
