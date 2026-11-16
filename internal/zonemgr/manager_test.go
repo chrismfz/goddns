@@ -12,10 +12,11 @@ import (
 )
 
 type rig struct {
-	m        *Manager
-	inv      *named.Inventory
-	confErr  error
-	reconfig int
+	m         *Manager
+	inv       *named.Inventory
+	confErr   error
+	verifyErr error
+	reconfig  int
 }
 
 func newRig(t *testing.T) *rig {
@@ -34,6 +35,7 @@ func newRig(t *testing.T) *rig {
 		CheckZone: func(string, []byte) error { return nil },
 		CheckConf: func() error { return r.confErr },
 		Reconfig:  func() error { r.reconfig++; return nil },
+		Verify:    func(string) error { return r.verifyErr },
 		Now:       func() time.Time { return time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC) },
 	}
 	return r
@@ -132,5 +134,55 @@ func TestCreateValidation(t *testing.T) {
 	os.WriteFile(r.m.NamedConf, []byte("options { };\n"), 0o644)
 	if _, err := r.m.PlanCreate(CreateRequest{Zone: "ok.example.org", NS: []string{"ns1.example.com"}}); err == nil || !strings.Contains(err.Error(), "include") {
 		t.Errorf("unreferenced include: %v", err)
+	}
+}
+
+// named-checkconf passes but named doesn't serve the zone (a file it can't
+// read): the create is rolled back, not reported as done.
+func TestCreateRollsBackWhenNamedDoesNotLoad(t *testing.T) {
+	r := newRig(t)
+	r.verifyErr = errors.New("answered SERVFAIL")
+	if _, err := r.m.Create(CreateRequest{Zone: "new.example.org", NS: []string{"ns1.example.com"}}); err == nil || !strings.Contains(err.Error(), "did not load") {
+		t.Fatalf("want a load failure, got %v", err)
+	}
+	if _, err := os.Stat(r.m.zoneFile("new.example.org")); !os.IsNotExist(err) {
+		t.Fatal("zone file left behind")
+	}
+	if z, _ := ManagedZones(r.m.Include); len(z) != 0 {
+		t.Fatalf("stanza left behind: %v", z)
+	}
+}
+
+func TestStrictNSAndDeleteOutsideZoneDir(t *testing.T) {
+	r := newRig(t)
+	for _, ns := range []string{"ns1.example.com.\nevil 60 IN A 203.0.113.66", "ns 1.example.com", "ns1.example.com;x", "localhost"} {
+		if _, err := r.m.PlanCreate(CreateRequest{Zone: "x.example.org", NS: []string{ns}}); err == nil {
+			t.Errorf("NS %q accepted", ns)
+		}
+	}
+	if _, err := r.m.PlanCreate(CreateRequest{Zone: "x.example.org", NS: []string{"ns1.example.com"}, Hostmaster: "a\nb.example.com"}); err == nil {
+		t.Error("hostmaster with a newline accepted")
+	}
+	// a hand-edited stanza pointing outside the zone dir: the file is left alone
+	outside := filepath.Join(t.TempDir(), "precious.conf")
+	os.WriteFile(outside, []byte("keep"), 0o640)
+	os.WriteFile(r.m.Include, []byte("zone \"h.example\" { type master; file \""+outside+"\"; };\n"), 0o640)
+	p, err := r.m.Delete("h.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.MovedTo != "" {
+		t.Fatalf("moved a file outside managed_zone_dir: %q", p.MovedTo)
+	}
+	if b, _ := os.ReadFile(outside); string(b) != "keep" {
+		t.Fatal("the outside file was touched")
+	}
+}
+
+func TestCreateRefusesViews(t *testing.T) {
+	r := newRig(t)
+	r.inv.Zones = append(r.inv.Zones, named.Zone{Name: "int.example.com", Type: "master", View: "internal"})
+	if _, err := r.m.PlanCreate(CreateRequest{Zone: "x.example.org", NS: []string{"ns1.example.com"}}); !IsRefused(err) || !strings.Contains(err.Error(), "views") {
+		t.Fatalf("views: %v", err)
 	}
 }

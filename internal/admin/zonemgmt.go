@@ -56,6 +56,10 @@ func (h *Handler) handleZoneCreate(w http.ResponseWriter, r *http.Request, a ser
 		})
 		return
 	}
+	if p.Warning != "" {
+		renderRecordErr(w, h.version, "zone %s %s", p.Zone, p.Warning)
+		return
+	}
 	http.Redirect(w, r, "/zone?name="+url.QueryEscape(p.Zone), http.StatusSeeOther)
 }
 

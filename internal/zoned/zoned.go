@@ -61,6 +61,7 @@ type Server struct {
 	Cfg     func() (*config.Config, error)
 	PeerGID int                                   // >0: require the connecting peer be uid 0 or this gid (SO_PEERCRED)
 	editor  func(*config.Config) *filezone.Editor // tests override; nil = from cfg
+	zoneMgr func(*config.Config) *zonemgr.Manager // tests override; nil = zonemgr.ForConfig
 }
 
 // Serve handles one request per connection on ln until ctx is cancelled, with a
@@ -186,6 +187,9 @@ func (s *Server) processZone(req Request) Response {
 		return Response{Error: "config: " + err.Error()}
 	}
 	m := zonemgr.ForConfig(cfg)
+	if s.zoneMgr != nil {
+		m = s.zoneMgr(cfg)
+	}
 	var p *zonemgr.Plan
 	switch {
 	case req.Action == "zone-create" && req.Apply:

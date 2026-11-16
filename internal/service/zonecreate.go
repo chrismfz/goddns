@@ -26,6 +26,7 @@ type ZoneChange struct {
 	Shadowed   []string
 	Delegated  bool
 	AssignedTo string
+	Warning    string // the zone was created, but something after it failed (e.g. the assignment)
 }
 
 // ZoneManager is the production zone creator/deleter for cfg (tests swap
@@ -100,19 +101,25 @@ func (s *Service) ZoneCreate(a Actor, zone string, ns []string, assignTo string,
 		return nil, err
 	}
 	out := &ZoneChange{Zone: p.Zone, File: p.File, Stanza: p.Stanza, Content: p.Content, Parent: p.Parent}
-	if p.Parent != "" {
-		out.Shadowed, out.Delegated = s.shadowedBy(cfg, p.Parent, p.Zone)
-	}
 	if !apply {
+		if p.Parent != "" { // the preview's job; the apply already saw it
+			out.Shadowed, out.Delegated = s.shadowedBy(cfg, p.Parent, p.Zone)
+		}
 		return out, nil
 	}
 	s.Audit(a, "zone-create zone=%s file=%s parent=%s", p.Zone, p.File, p.Parent)
+	// A zone of this name may have existed before (removed by hand from the
+	// include, grants left behind): a new zone starts with no grants.
+	if err := s.store.GrantsDelZone(p.Zone); err != nil {
+		out.Warning = "created, but clearing old grants on it failed: " + err.Error()
+	}
 	if assignTo != "" {
 		if err := s.store.GrantAdd(assignTo, p.Zone); err != nil {
-			return out, err
+			out.Warning = "created, but assigning it to " + assignTo + " failed: " + err.Error() + " — grant it from the users page"
+		} else {
+			s.Audit(a, "grant-add user=%s zone=%s", assignTo, p.Zone)
+			out.AssignedTo = assignTo
 		}
-		s.Audit(a, "grant-add user=%s zone=%s", assignTo, p.Zone)
-		out.AssignedTo = assignTo
 	}
 	return out, nil
 }

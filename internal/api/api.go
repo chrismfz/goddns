@@ -361,7 +361,8 @@ func (h *Handler) zoneCreate(w http.ResponseWriter, r *http.Request, c ctxActor)
 		code = http.StatusOK
 	}
 	writeJSON(w, code, map[string]any{"zone": p.Zone, "applied": !in.DryRun, "file": p.File, "stanza": p.Stanza,
-		"content": p.Content, "parent": p.Parent, "shadowed": p.Shadowed, "delegated": p.Delegated, "assigned_to": p.AssignedTo})
+		"content": p.Content, "parent": p.Parent, "shadowed": p.Shadowed, "delegated": p.Delegated, "assigned_to": p.AssignedTo,
+		"warning": p.Warning})
 }
 
 // zoneDelete: DELETE /api/v1/zones/{zone}[?dry_run=1] — managed zones only.

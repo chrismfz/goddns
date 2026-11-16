@@ -371,7 +371,7 @@ func TestAPIZoneCreateDelete(t *testing.T) {
 	f.svc.ZoneMgr = func(*config.Config) *zonemgr.Manager {
 		return &zonemgr.Manager{NamedConf: nc, Include: inc, ZoneDir: filepath.Join(dir, "z"), LockDir: filepath.Join(dir, "l"),
 			Inv: func() (*named.Inventory, error) { return inv, nil }, CheckZone: func(string, []byte) error { return nil },
-			CheckConf: func() error { return nil }, Reconfig: func() error { return nil }}
+			CheckConf: func() error { return nil }, Reconfig: func() error { return nil }, Verify: func(string) error { return nil }}
 	}
 	f.svc.UserAdd(admin, "max", "maxpass123", service.RoleAdmin)
 	_, tok, _ := f.svc.APITokenCreate(admin, "max", "zones", []string{service.ScopeZonesAdmin}, nil, 0)

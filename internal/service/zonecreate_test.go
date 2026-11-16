@@ -23,7 +23,7 @@ func zoneRig(t *testing.T) (*Service, *named.Inventory, *[]string) {
 	s.ZoneMgr = func(*config.Config) *zonemgr.Manager {
 		return &zonemgr.Manager{NamedConf: nc, Include: inc, ZoneDir: filepath.Join(dir, "zones"), LockDir: filepath.Join(dir, "l"),
 			Inv: func() (*named.Inventory, error) { return inv, nil }, CheckZone: func(string, []byte) error { return nil },
-			CheckConf: func() error { return nil }, Reconfig: func() error { return nil }}
+			CheckConf: func() error { return nil }, Reconfig: func() error { return nil }, Verify: func(string) error { return nil }}
 	}
 	return s, inv, lines
 }

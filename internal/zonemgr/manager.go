@@ -45,6 +45,8 @@ type Manager struct {
 	CheckZone func(zone string, content []byte) error // default: named-checkzone
 	CheckConf func() error                            // default: named-checkconf <NamedConf>
 	Reconfig  func() error                            // default: rndc reconfig
+	Verify    func(zone string) error                 // default: SOA query to DNSServer
+	DNSServer string                                  // for the default Verify (default 127.0.0.1:53)
 	Now       func() time.Time
 }
 
@@ -70,6 +72,10 @@ type Plan struct {
 // zoneNameRe: lowercase labels of letters, digits, '-' and '_' (for
 // _acme-challenge style names), at least two labels, nothing that could
 // escape the zone directory or the quoted stanza.
+// hostRe is a host name for NS / hostmaster: the same strict labels (no
+// spaces, quotes, ';' or newlines — they would be zone-file text).
+var hostRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)+$`)
+
 var zoneNameRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)+$`)
 
 // NormName lowercases and strips a trailing dot.
@@ -185,8 +191,8 @@ func render(req CreateRequest, z string, serial uint32, day time.Time) (string, 
 	if hm == "" {
 		hm = "hostmaster." + z
 	}
-	hm = strings.ReplaceAll(strings.TrimSuffix(hm, "."), "@", ".")
-	if _, ok := dns.IsDomainName(hm); !ok {
+	hm = strings.ToLower(strings.ReplaceAll(strings.TrimSuffix(hm, "."), "@", "."))
+	if !hostRe.MatchString(hm) {
 		return "", refused("hostmaster %q is not a valid name", req.Hostmaster)
 	}
 	var b strings.Builder
@@ -197,7 +203,7 @@ func render(req CreateRequest, z string, serial uint32, day time.Time) (string, 
 	var nsLines []string
 	for _, ns := range req.NS {
 		ns = NormName(ns)
-		if _, ok := dns.IsDomainName(ns); !ok || ns == "" || !strings.Contains(ns, ".") {
+		if !hostRe.MatchString(ns) {
 			return "", refused("nameserver %q is not a valid host name", ns)
 		}
 		if ns0 == "" {
@@ -232,6 +238,13 @@ func (m *Manager) PlanCreate(req CreateRequest) (*Plan, error) {
 		return nil, err
 	}
 	for _, uz := range inv.Zones { // every view, built-ins included
+		if uz.View != "" {
+			// BIND forbids top-level zones once views are used, so a managed
+			// stanza would fail named-checkconf every time
+			return nil, refused("this BIND config uses views; goddns can't create zones in it (managed zones are top-level)")
+		}
+	}
+	for _, uz := range inv.Zones {
 		if NormName(uz.Name) == z {
 			return nil, refused("zone %s already exists in the BIND configuration", z)
 		}
@@ -316,7 +329,47 @@ func (m *Manager) Create(req CreateRequest) (*Plan, error) {
 		_ = m.reconfig() // best effort: BIND back on the restored config
 		return nil, fmt.Errorf("rolled back: %w", err)
 	}
+	// named-checkconf doesn't load zone data: confirm named now SERVES the
+	// zone (a file it can't read — permissions, SELinux — passes every check
+	// and only shows up as SERVFAIL).
+	if err := m.verify(p.Zone); err != nil {
+		restore()
+		_ = m.reconfig()
+		return nil, fmt.Errorf("named did not load %s after reconfig (rolled back): %v — check named's log; the zone file (%s) must be readable by named (permissions, SELinux label)", p.Zone, err, p.File)
+	}
 	return p, nil
+}
+
+func (m *Manager) verify(zone string) error {
+	if m.Verify != nil {
+		return m.Verify(zone)
+	}
+	srv := m.DNSServer
+	if srv == "" {
+		srv = "127.0.0.1:53"
+	}
+	var last error
+	for i := 0; i < 6; i++ { // reconfig loads zones asynchronously
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
+		c := &dns.Client{Timeout: 2 * time.Second}
+		resp, _, err := c.Exchange(m, srv)
+		switch {
+		case err != nil:
+			last = err
+		case resp.Rcode == dns.RcodeSuccess && resp.Authoritative:
+			for _, rr := range resp.Answer {
+				if _, ok := rr.(*dns.SOA); ok {
+					return nil
+				}
+			}
+			last = errors.New("no SOA in the answer")
+		default:
+			last = fmt.Errorf("answered %s (authoritative=%v)", dns.RcodeToString[resp.Rcode], resp.Authoritative)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return last
 }
 
 // PlanDelete finds a managed zone and returns what Delete would remove. A
@@ -395,7 +448,12 @@ func (m *Manager) Delete(zone string) (*Plan, error) {
 		_ = m.reconfig()
 		return nil, fmt.Errorf("rolled back: %w", err)
 	}
-	if p.File != "" {
+	if p.File != "" && !m.inZoneDir(p.File) {
+		// a hand-edited stanza can name any path: goddns moves aside only
+		// files in its own zone directory
+		p.MovedTo = ""
+		p.File += " (left in place: outside managed_zone_dir)"
+	} else if p.File != "" {
 		if _, err := os.Lstat(p.File); err == nil {
 			to := p.File + ".deleted-" + m.now().UTC().Format("20060102-150405")
 			if err := os.Rename(p.File, to); err == nil {
@@ -404,6 +462,20 @@ func (m *Manager) Delete(zone string) (*Plan, error) {
 		}
 	}
 	return p, nil
+}
+
+// inZoneDir reports whether path resolves to a file directly inside
+// ZoneDir (symlinks resolved on the directory side).
+func (m *Manager) inZoneDir(path string) bool {
+	dir, err := filepath.EvalSymlinks(m.ZoneDir)
+	if err != nil {
+		dir = filepath.Clean(m.ZoneDir)
+	}
+	pdir, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+	return pdir == dir && filepath.Base(path) != "." && filepath.Base(path) != ".."
 }
 
 func readMaybe(path string) (string, bool, error) {
@@ -463,7 +535,7 @@ func matchGroup(path, dir string) {
 
 // ForConfig builds the production Manager from goddns's config.
 func ForConfig(cfg *config.Config) *Manager {
-	return &Manager{NamedConf: cfg.NamedConf, Include: cfg.ManagedInclude, ZoneDir: cfg.ManagedZoneDir}
+	return &Manager{NamedConf: cfg.NamedConf, Include: cfg.ManagedInclude, ZoneDir: cfg.ManagedZoneDir, DNSServer: cfg.DNSServer}
 }
 
 // EditableZones is the static-zone edit allowlist: the operator's
