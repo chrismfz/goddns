@@ -115,7 +115,7 @@ func TestGrantedUserDDNS(t *testing.T) {
 	if _, _, err := s.DDNSAdd(who, "home.other.net", "other.net", 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.DDNSAdd(who, "home.elsewhere.org", "other.net", 0); !IsInvalid(err) {
+	if _, _, err := s.DDNSAdd(who, "home.elsewhere.org.", "other.net", 0); !IsInvalid(err) {
 		t.Fatalf("an out-of-zone hostname must be refused (even for an admin): %v", err)
 	}
 	if _, _, err := s.DDNSAdd(alice, "home.other.net", "other.net", 0); !IsForbidden(err) {

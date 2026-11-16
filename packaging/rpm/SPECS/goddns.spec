@@ -152,12 +152,16 @@ for lf in /var/log/goddns.log /var/log/goddns-access.log; do
     chmod 0640 "$lf" || true
 done
 
-# $1 = 1 fresh install, >=2 upgrade. On upgrade: restart only if the
-# service is actually running, and never touch the admin's enable state.
+# $1 = 1 fresh install, >=2 upgrade. A fresh install is NOT enabled or
+# started: the service can't work until goddns.conf is configured, and the
+# operator may run goddns some other way (issue 61). On upgrade: restart
+# only if the service is actually running, and never touch the admin's
+# enable state.
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
     if [ "$1" -eq 1 ]; then
-        systemctl enable --now goddns.service || true
+        echo "goddns installed but NOT enabled: configure /etc/goddns/goddns.conf"
+        echo "(and goddns.env), then: systemctl enable --now goddns"
     elif systemctl is-active --quiet goddns.service; then
         systemctl restart goddns.service || true
     fi

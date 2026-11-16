@@ -229,7 +229,7 @@ const userPages = `
 {{template "ddnstable" .}}
 <div class="card"><form method="post" action="/ddns/add">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
-<label>hostname</label> <input name="fqdn" placeholder="home.{{index .Zones 0}}" autocomplete="off">
+<label>hostname</label> <input name="fqdn" placeholder="home" autocomplete="off" title="a name in the zone (home), @ for the zone itself, or the full name">
 <label>zone</label> <select name="zone">{{range .Zones}}<option value="{{.}}">{{.}}</option>{{end}}</select>
 <label>ttl</label> <input name="ttl" value="60" size="5">
 <button type="submit">add DDNS record</button>

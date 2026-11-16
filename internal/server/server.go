@@ -16,7 +16,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chrismfz/goddns/internal/config"
@@ -31,6 +33,52 @@ type Server struct {
 	Backend func() ddns.Backend
 	Store   *store.Store
 	GetCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+
+	// Logf receives the per-request update-result lines (nil ⇒ log.Printf).
+	Logf func(format string, a ...any)
+
+	resMu      sync.Mutex
+	resWindow  int64        // unix second of the current rate window
+	resCount   int          // result lines logged in it
+	resDropped int          // lines suppressed since the last summary
+	now        func() int64 // test clock (unix seconds); nil ⇒ time.Now
+}
+
+// maxResultLinesPerSec caps the update-result lines an unauthenticated flood
+// (a scanner trying tokens) can write at update_log = changes/all; the rest
+// are counted and summarised in one line, so the log can't fill the disk.
+const maxResultLinesPerSec = 20
+
+func (s *Server) logf(format string, a ...any) {
+	if s.Logf != nil {
+		s.Logf(format, a...)
+		return
+	}
+	log.Printf(format, a...)
+}
+
+// allowResult reports whether one more result line fits this second, and
+// logs a summary of what the previous windows suppressed.
+func (s *Server) allowResult() bool {
+	now := time.Now().Unix()
+	if s.now != nil {
+		now = s.now()
+	}
+	s.resMu.Lock()
+	defer s.resMu.Unlock()
+	if now != s.resWindow {
+		if s.resDropped > 0 {
+			s.logf("update: %d result lines suppressed (more than %d/s)", s.resDropped, maxResultLinesPerSec)
+			s.resDropped = 0
+		}
+		s.resWindow, s.resCount = now, 0
+	}
+	if s.resCount >= maxResultLinesPerSec {
+		s.resDropped++
+		return false
+	}
+	s.resCount++
+	return true
 }
 
 func (s *Server) Handler() http.Handler {
@@ -107,6 +155,54 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 	return peer, nil
 }
 
+// logResult writes one update-result line if update_log asks for it:
+//
+//	update result=badauth proto=simple peer=203.0.113.9 fqdn=- ip=-
+//
+// Never the token. Values the client chose (a bad ip=, a hostname=) are
+// quoted so they can't split the line or forge fields.
+func (s *Server) logResult(r *http.Request, proto, result string, rec *store.Record, ip, detail string) {
+	// "good" keeps its historical "updated <fqdn> -> <ip>" line (logged at
+	// every level but none), so existing log searches still match.
+	lvl := s.Cfg().UpdateLog
+	switch result {
+	case "nochg":
+		if lvl != config.UpdateLogAll {
+			return
+		}
+	default: // badauth, badip, nohost, missing token ...
+		if lvl != config.UpdateLogAll && lvl != config.UpdateLogChanges {
+			return
+		}
+	}
+	if !s.allowResult() {
+		return
+	}
+	// peer is the client as goddns resolves it (X-Forwarded-For from a
+	// trusted proxy), so a guesser behind the proxy is named, not the proxy;
+	// via= carries the raw connection peer when it differs.
+	raw, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		raw = r.RemoteAddr
+	}
+	peer := raw
+	if c, err := s.clientIP(r, ""); err == nil && c.String() != raw {
+		peer = c.String() + " via=" + raw
+	}
+	fqdn := "-"
+	if rec != nil {
+		fqdn = rec.FQDN
+	}
+	if ip == "" {
+		ip = "-"
+	}
+	line := fmt.Sprintf("update result=%s proto=%s peer=%s fqdn=%s ip=%s", result, proto, peer, fqdn, ip)
+	if detail != "" {
+		line += " detail=" + strconv.Quote(detail)
+	}
+	s.logf("%s", line)
+}
+
 func (s *Server) doUpdate(rec store.Record, ip net.IP) (changed bool, err error) {
 	if rec.LastIP == ip.String() {
 		// nochg: skip the DNS write, but still record the check-in so the
@@ -139,6 +235,7 @@ func (s *Server) handleSimple(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/update/")
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
+		s.logResult(r, "simple", "notoken", nil, "", "")
 		http.Error(w, "missing token", http.StatusBadRequest)
 		return
 	}
@@ -154,30 +251,36 @@ func (s *Server) handleSimple(w http.ResponseWriter, r *http.Request) {
 
 	rec, err := s.Store.Lookup(token)
 	if errors.Is(err, store.ErrNotFound) {
+		s.logResult(r, "simple", "badauth", nil, "", "")
 		http.Error(w, "badauth", http.StatusForbidden)
 		return
 	} else if err != nil {
 		http.Error(w, "911", http.StatusInternalServerError)
-		log.Printf("lookup error: %v", err)
+		s.logf("lookup error: %v", err)
 		return
 	}
 
 	ip, err := s.clientIP(r, override)
 	if err != nil {
+		s.logResult(r, "simple", "badip", &rec, "", err.Error())
 		http.Error(w, "badip", http.StatusBadRequest)
 		return
 	}
 
 	changed, err := s.doUpdate(rec, ip)
 	if err != nil {
-		log.Printf("update %s -> %s failed: %v", rec.FQDN, ip, err)
+		s.logf("update %s -> %s failed: %v", rec.FQDN, ip, err)
 		http.Error(w, "dnserr", http.StatusBadGateway)
 		return
 	}
 	status := "nochg"
 	if changed {
 		status = "good"
-		log.Printf("updated %s -> %s", rec.FQDN, ip)
+		if s.Cfg().UpdateLog != config.UpdateLogNone {
+			s.logf("updated %s -> %s", rec.FQDN, ip)
+		}
+	} else {
+		s.logResult(r, "simple", "nochg", &rec, ip.String(), "")
 	}
 	fmt.Fprintf(w, "%s %s\n", status, ip)
 }
@@ -193,16 +296,22 @@ func (s *Server) handleDynDNS2(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if token == "" {
+		s.logResult(r, "dyndns2", "badauth", nil, "", "no token")
 		fmt.Fprintln(w, "badauth")
 		return
 	}
 	rec, err := s.Store.Lookup(token)
 	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.logf("lookup error: %v", err)
+		}
+		s.logResult(r, "dyndns2", "badauth", nil, "", "")
 		fmt.Fprintln(w, "badauth")
 		return
 	}
 	// Optional hostname check: if supplied it must match the token's FQDN.
 	if h := r.URL.Query().Get("hostname"); h != "" && store.FQDN(h) != rec.FQDN {
+		s.logResult(r, "dyndns2", "nohost", &rec, "", "hostname="+h)
 		fmt.Fprintln(w, "nohost")
 		return
 	}
@@ -210,19 +319,23 @@ func (s *Server) handleDynDNS2(w http.ResponseWriter, r *http.Request) {
 	override := r.URL.Query().Get("myip")
 	ip, err := s.clientIP(r, override)
 	if err != nil {
+		s.logResult(r, "dyndns2", "badip", &rec, "", err.Error())
 		fmt.Fprintln(w, "badip")
 		return
 	}
 	changed, err := s.doUpdate(rec, ip)
 	if err != nil {
-		log.Printf("dyndns2 update %s -> %s failed: %v", rec.FQDN, ip, err)
+		s.logf("dyndns2 update %s -> %s failed: %v", rec.FQDN, ip, err)
 		fmt.Fprintln(w, "dnserr 911")
 		return
 	}
 	if changed {
-		log.Printf("updated %s -> %s", rec.FQDN, ip)
+		if s.Cfg().UpdateLog != config.UpdateLogNone {
+			s.logf("updated %s -> %s", rec.FQDN, ip)
+		}
 		fmt.Fprintf(w, "good %s\n", ip)
 	} else {
+		s.logResult(r, "dyndns2", "nochg", &rec, ip.String(), "")
 		fmt.Fprintf(w, "nochg %s\n", ip)
 	}
 }

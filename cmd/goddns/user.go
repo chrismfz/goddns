@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"os/user"
 	"strings"
@@ -43,6 +44,9 @@ func cmdUser(args []string) {
 	defer healDBOwnership(cfg.DBPath)
 	defer st.Close()
 	svc := service.New(func() *config.Config { return cfg }, st)
+	logf, closeLog := cliAuditLog(cfg)
+	defer closeLog()
+	svc.Logf = logf
 	a := cliActor()
 
 	need := func(n int) {
@@ -145,6 +149,29 @@ func flagsFirst(args []string, withValue ...string) []string {
 	// "--" ends flag parsing, so a positional that starts with '-' (after a
 	// "--" the caller typed) stays a positional. flag.Parse consumes it.
 	return append(append(flags, "--"), pos...)
+}
+
+// cliAuditLog returns where the CLI's admin-audit lines go: stderr, as
+// before, and the daemon's log_file too when one is configured, so the
+// server's log shows who changed logins from the console. The file is opened
+// for append only and never created here (a root CLI run must not leave a
+// root-owned log behind for the unprivileged daemon); O_APPEND keeps a line
+// whole next to the daemon's own writes.
+func cliAuditLog(cfg *config.Config) (func(string, ...any), func()) {
+	toErr := log.New(os.Stderr, "", log.LstdFlags)
+	if cfg.LogFile == "" {
+		return toErr.Printf, func() {}
+	}
+	f, err := os.OpenFile(cfg.LogFile, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		toErr.Printf("warning: audit not written to %s: %v", cfg.LogFile, err)
+		return toErr.Printf, func() {}
+	}
+	toFile := log.New(f, "", log.LstdFlags)
+	return func(format string, a ...any) {
+		toErr.Printf(format, a...)
+		toFile.Printf(format, a...)
+	}, func() { f.Close() }
 }
 
 // cliActor names the console operator in audit lines ("cli:<unix user>").

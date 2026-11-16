@@ -19,6 +19,54 @@ import (
 // lowercase, no surrounding space, no trailing dot.
 func NormZone(z string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".") }
 
+// QualifyName resolves a hostname typed for zone into a FQDN:
+//
+//	"" or "@"            → the zone apex
+//	"name."              → as written (absolute)
+//	"x.zone" or "zone"   → absolute: it already ends in the zone (typing the
+//	                       full name without the trailing dot must not become
+//	                       x.zone.zone, which nobody ever means)
+//	anything else        → relative to the zone ("test" → test.zone.)
+//
+// The UI's DDNS form and the CLI's name arguments share it.
+func QualifyName(name, zone string) string {
+	name = strings.TrimSpace(name)
+	zone = NormZone(zone)
+	switch {
+	case name == "" || name == "@":
+		return dns.Fqdn(zone)
+	case strings.HasSuffix(name, "."):
+		return name
+	}
+	l := strings.ToLower(name)
+	if l == zone || strings.HasSuffix(l, "."+zone) {
+		return dns.Fqdn(name)
+	}
+	return dns.Fqdn(name + "." + zone)
+}
+
+// NormalizeRRLine applies QualifyName's "already ends in the zone" rule to
+// the owner (first field) of a zone-file record line: a full name typed
+// without the trailing dot gets one, instead of zone-file semantics turning
+// test.ddns.example into test.ddns.example.ddns.example. Everything else in
+// the line keeps zone-file meaning (relative names, "@", absolute names).
+func NormalizeRRLine(line, zone string) string {
+	line = strings.TrimSpace(line)
+	i := strings.IndexAny(line, " \t")
+	if i <= 0 {
+		return line
+	}
+	owner := line[:i]
+	if owner == "@" || strings.HasSuffix(owner, ".") {
+		return line
+	}
+	l, z := strings.ToLower(owner), NormZone(zone)
+	if l == z || strings.HasSuffix(l, "."+z) {
+		return owner + "." + line[i:]
+	}
+	return line
+}
+
 // grantSet returns the zones granted to a user-role actor.
 func (s *Service) grantSet(a Actor) (map[string]bool, error) {
 	zs, err := s.store.GrantsFor(a.User)

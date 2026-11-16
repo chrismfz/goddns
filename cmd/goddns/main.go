@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/service"
 	"github.com/chrismfz/goddns/internal/store"
 )
 
@@ -194,7 +195,13 @@ func cmdToken(args []string) {
 		if *fqdnArg == "" || *zoneArg == "" {
 			fatal("token add requires -fqdn and -zone")
 		}
-		rec, tok, err := st.Add(*fqdnArg, *zoneArg, uint32(*ttlArg))
+		// Through the service, like the UI: the same name rule, in-zone
+		// check and audit line (as the console operator).
+		svc := service.New(func() *config.Config { return cfg }, st)
+		logf, closeLog := cliAuditLog(cfg)
+		defer closeLog()
+		svc.Logf = logf
+		rec, tok, err := svc.DDNSAdd(cliActor(), *fqdnArg, *zoneArg, *ttlArg)
 		if err != nil {
 			fatal("add: %v", err)
 		}
