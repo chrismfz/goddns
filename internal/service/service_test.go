@@ -222,3 +222,36 @@ func TestVhostHostNormalized(t *testing.T) {
 		t.Fatalf("audit hosts not normalized: %v", *lines)
 	}
 }
+
+func TestQualifyName(t *testing.T) {
+	for in, want := range map[string]string{
+		"test":                  "test.ddns.example.com.",
+		"a.b":                   "a.b.ddns.example.com.",
+		"@":                     "ddns.example.com.",
+		"":                      "ddns.example.com.",
+		"test.ddns.example.com": "test.ddns.example.com.", // the live-test trap: not x.zone.zone
+		"Test.DDNS.example.com": "Test.DDNS.example.com.",
+		"ddns.example.com":      "ddns.example.com.",
+		"other.net.":            "other.net.",
+		"xddns.example.com":     "xddns.example.com.ddns.example.com.", // label boundary, not a suffix match
+	} {
+		if got := QualifyName(in, "DDNS.example.com."); got != want {
+			t.Errorf("QualifyName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestDDNSAddRelativeName(t *testing.T) {
+	s, _, _, _ := newSvc(t, "")
+	rec, _, err := s.DDNSAdd(who, "home", "ddns.example.com", 0)
+	if err != nil || rec.FQDN != "home.ddns.example.com." {
+		t.Fatalf("relative: %+v %v", rec, err)
+	}
+	rec, _, err = s.DDNSAdd(who, "@", "ddns.example.com", 0)
+	if err != nil || rec.FQDN != "ddns.example.com." {
+		t.Fatalf("apex: %+v %v", rec, err)
+	}
+	if _, _, err := s.DDNSAdd(who, "x.other.net.", "ddns.example.com", 0); !IsInvalid(err) {
+		t.Fatalf("an absolute name outside the zone stays refused: %v", err)
+	}
+}

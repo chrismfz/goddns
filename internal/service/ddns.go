@@ -76,6 +76,7 @@ func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, st
 	if fqdn == "" || zone == "" {
 		return store.Record{}, "", missing("fqdn and zone are required")
 	}
+	fqdn = QualifyName(fqdn, zone) // "test" in zone ddns.example → test.ddns.example.
 	if err := s.authZone(a, zone); err != nil {
 		return store.Record{}, "", err
 	}

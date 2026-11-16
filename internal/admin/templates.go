@@ -140,7 +140,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 
 <div class="card"><form method="post" action="/ddns/add"><div class="row">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
-<div><label>fqdn</label><input name="fqdn" placeholder="home.ddns.myip.gr" size="26"></div>
+<div><label>fqdn</label><input name="fqdn" placeholder="home or home.ddns.myip.gr" size="26" title="a name in the zone, @ for the zone itself, or the full name"></div>
 <div><label>zone</label><input name="zone" placeholder="ddns.myip.gr" size="20"></div>
 <div><label>ttl</label><input name="ttl" type="number" value="60" size="6" style="width:5rem"></div>
 <div><button type="submit">add token</button></div>

@@ -133,19 +133,10 @@ func parseRRInZone(s, zone string) (dns.RR, error) {
 	return rr, nil
 }
 
-// qualifyName resolves an owner name against the zone: "@" → apex, a trailing
-// dot → absolute as-typed, otherwise relative to the zone.
-func qualifyName(name, zone string) string {
-	name = strings.TrimSpace(name)
-	switch {
-	case name == "@" || name == "":
-		return dns.Fqdn(zone)
-	case strings.HasSuffix(name, "."):
-		return name
-	default:
-		return dns.Fqdn(name + "." + zone)
-	}
-}
+// qualifyName resolves an owner name against the zone (service.QualifyName:
+// "@" → apex, a trailing dot → absolute, a name already ending in the zone →
+// absolute, anything else relative).
+func qualifyName(name, zone string) string { return service.QualifyName(name, zone) }
 
 // inEditable reports whether the zone is on the operator's file-edit allowlist.
 func inEditable(cfg *config.Config, zone string) bool {

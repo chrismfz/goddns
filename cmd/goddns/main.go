@@ -14,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/service"
 	"github.com/chrismfz/goddns/internal/store"
 )
 
@@ -194,7 +195,7 @@ func cmdToken(args []string) {
 		if *fqdnArg == "" || *zoneArg == "" {
 			fatal("token add requires -fqdn and -zone")
 		}
-		rec, tok, err := st.Add(*fqdnArg, *zoneArg, uint32(*ttlArg))
+		rec, tok, err := st.Add(service.QualifyName(*fqdnArg, *zoneArg), *zoneArg, uint32(*ttlArg))
 		if err != nil {
 			fatal("add: %v", err)
 		}
