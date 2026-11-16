@@ -29,6 +29,7 @@ import (
 	"github.com/chrismfz/goddns/internal/store"
 	"github.com/chrismfz/goddns/internal/tsig"
 	"github.com/chrismfz/goddns/internal/vhostmut"
+	"github.com/chrismfz/goddns/internal/zonemgr"
 )
 
 // Store is the slice of the SQLite store the service needs.
@@ -64,6 +65,7 @@ type Store interface {
 	GrantDel(user, zone string) error
 	GrantsFor(user string) ([]string, error)
 	GrantsAll() (map[string][]string, error)
+	GrantsDelZone(zone string) error
 }
 
 // Actor is who performs a call: the audit line names them and their Role
@@ -90,6 +92,9 @@ type Service struct {
 	// FileEd overrides the static-zone editor builder (tests inject stubs);
 	// nil ⇒ FileEditor.
 	FileEd func(*config.Config) *filezone.Editor
+	// ZoneMgr overrides the zone creator/deleter (tests inject one with
+	// seams); nil ⇒ zonemgr.ForConfig, through zoned when a socket is set.
+	ZoneMgr func(*config.Config) *zonemgr.Manager
 	// Inv overrides how the BIND inventory is read (tests inject one); nil ⇒
 	// `named-checkconf -p` on cfg.NamedConf.
 	Inv func(*config.Config) (*named.Inventory, error)
@@ -175,7 +180,8 @@ func RecordEditor(cfg *config.Config, snap recordmut.Snapshotter) *recordmut.Edi
 
 // FileEditor builds the file-as-truth editor for enabled static zones.
 func FileEditor(cfg *config.Config) *filezone.Editor {
-	return &filezone.Editor{NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer, Editable: cfg.EditableZones, Keep: cfg.HistoryKeep}
+	return &filezone.Editor{NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
+		Editable: zonemgr.EditableZones(cfg.EditableZones, cfg.ManagedInclude), Keep: cfg.HistoryKeep}
 }
 
 // EditsInPlace is THE routing rule for a record edit: true when zone is an

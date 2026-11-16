@@ -95,6 +95,15 @@ func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, st
 	if _, ok := dns.IsDomainName(fqdn); !ok || !dns.IsSubDomain(dns.CanonicalName(zone), dns.CanonicalName(fqdn)) {
 		return store.Record{}, "", invalid("%s is not a name inside zone %s", fqdn, zone)
 	}
+	// A DDNS token updates its name with a signed RFC2136 UPDATE, which only
+	// a dynamic zone accepts: a token in a static zone would fail every time.
+	// (Checked when the inventory is readable; a zone BIND doesn't serve is
+	// left to the in-zone checks.)
+	if inv, err := s.inventory(s.cfg()); err == nil {
+		if z := inv.ZoneByName(NormZone(zone)); z != nil && !z.Dynamic {
+			return store.Record{}, "", invalid("%s is a static zone: DDNS needs a dynamic zone (update-policy for goddns's key) — use one, e.g. a ddns.<domain> zone, or put the name in it", NormZone(zone))
+		}
+	}
 	if a.Role != RoleAdmin {
 		inv, err := s.inventory(s.cfg())
 		if err != nil {

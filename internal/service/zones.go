@@ -10,6 +10,7 @@ import (
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
+	"github.com/chrismfz/goddns/internal/zonemgr"
 )
 
 // KeyInfo is a TSIG key as the inventory reports it. The secret is never
@@ -23,6 +24,7 @@ type ZoneList struct {
 	Builtin   int          // how many built-in zones were left out
 	Keys      []KeyInfo
 	Findings  []named.Finding // TSIG / grant health for goddns's own key
+	Managed   map[string]bool // zones in the managed include (goddns may delete them)
 }
 
 // Inventory reads named.conf through `named-checkconf -p` (every include
@@ -85,7 +87,12 @@ func (s *Service) Zones(a Actor) (*ZoneList, error) {
 		}
 		return zl, nil
 	}
-	zl := &ZoneList{Directory: inv.Directory, Zones: inv.UserZones()}
+	zl := &ZoneList{Directory: inv.Directory, Zones: inv.UserZones(), Managed: map[string]bool{}}
+	if mz, err := zonemgr.ManagedZones(cfg.ManagedInclude); err == nil {
+		for _, z := range mz {
+			zl.Managed[z] = true
+		}
+	}
 	zl.Builtin = len(inv.Zones) - len(zl.Zones)
 	for _, k := range inv.Keys {
 		zl.Keys = append(zl.Keys, KeyInfo{Name: k.Name, Algorithm: k.Algorithm})

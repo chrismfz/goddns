@@ -26,9 +26,10 @@ const (
 	userDelTmpl        = "userdel"
 	accountTmpl        = "account"
 	userHomeTmpl       = "userhome"
+	zoneConfirmTmpl    = "zoneconfirm"
 )
 
-var tmpls = template.Must(template.Must(template.New("").Parse(pages)).Parse(userPages))
+var tmpls = template.Must(template.Must(template.Must(template.New("").Parse(pages)).Parse(userPages)).Parse(zonePages))
 
 func render(w http.ResponseWriter, name string, data any) { renderStatus(w, 0, name, data) }
 
@@ -324,7 +325,7 @@ read-only view, add it to the named group:<br>
 {{else}}
 
 <h2>{{if .Restricted}}your zones{{else}}zones{{end}}{{if .Directory}} <span class="muted">(directory {{.Directory}})</span>{{end}}</h2>
-<table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th>{{if .Checked}}<th>NS (live)</th>{{end}}</tr></thead><tbody>
+<table><thead><tr>{{if .HasViews}}<th>view</th>{{end}}<th>zone</th><th>kind</th><th>file</th><th>update key(s)</th>{{if .Checked}}<th>NS (live)</th>{{end}}{{if not .Restricted}}<th></th>{{end}}</tr></thead><tbody>
 {{range .Zones}}<tr>
 {{if $.HasViews}}<td class="muted">{{if .View}}{{.View}}{{else}}_default{{end}}</td>{{end}}
 <td><a href="/zone?name={{.Name}}">{{.Name}}</a></td>
@@ -332,10 +333,19 @@ read-only view, add it to the named group:<br>
 <td>{{if .File}}{{.File}}{{if .Status}} <span class="{{if eq .Status "missing"}}err{{else if eq .Status "no journal yet"}}warn{{else}}muted{{end}}">({{.Status}})</span>{{end}}{{else}}<span class="muted">—</span>{{end}}</td>
 <td>{{if .Keys}}{{.Keys}}{{else}}<span class="muted">—</span>{{end}}</td>
 {{if $.Checked}}<td>{{if .NS}}<span class="{{.NSClass}}">{{.NS}}</span>{{else}}<span class="muted">—</span>{{end}}</td>{{end}}
+{{if not $.Restricted}}<td>{{if .Managed}}<form method="post" action="/zones/delete" style="display:inline"><input type="hidden" name="csrf" value="{{$.CSRF}}"><input type="hidden" name="zone" value="{{.Name}}"><span class="muted" title="in the managed include">goddns</span> <button class="danger" type="submit">delete</button></form>{{end}}</td>{{end}}
 </tr>{{else}}<tr><td class="muted">(no zones)</td></tr>{{end}}
 </tbody></table>
 {{if .Checked}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">live NS check: <span class="ok">✓ serial</span> = all nameservers agree · <span class="err">✗ mismatch</span> = a secondary is out of sync · <a href="/zones?check=1">re-check</a> · <a href="/zones">clear</a></div>
 {{else}}<div style="font-size:.78rem;margin-top:.3rem"><a href="/zones?check=1">▸ check nameservers live</a> <span class="muted">(probe every zone's NS for serial agreement)</span></div>{{end}}
+{{if not .Restricted}}<div class="card" style="margin-top:.8rem"><form method="post" action="/zones/create">
+<input type="hidden" name="csrf" value="{{.CSRF}}">
+<b>new zone</b> <input name="zone" placeholder="example.org" autocomplete="off">
+<label>NS</label> <input name="ns" value="{{.ZoneNS}}" placeholder="ns1.example.com, ns2.example.com" size="34">
+{{if .Assignable}}<label>assign to</label> <select name="assign"><option value="">—</option>{{range .Assignable}}<option>{{.}}</option>{{end}}</select>{{end}}
+<button type="submit">create…</button>
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">A static master zone in <code>{{.ManagedInclude}}</code> (include it once from named.conf). You see the file and what it changes before it is created; zones defined elsewhere in named.conf are never created or deleted here.</div>
+</form></div>{{end}}
 {{if and .Builtin (not .Restricted)}}<div class="muted" style="font-size:.72rem;margin-top:.3rem">(+ {{.Builtin}} built-in empty zones hidden; <code>goddns zones -all</code> on the CLI to show)</div>{{end}}
 
 {{if not .Restricted}}<h2>TSIG keys</h2>

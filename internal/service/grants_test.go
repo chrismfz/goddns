@@ -111,6 +111,13 @@ func TestGrantedUserScope(t *testing.T) {
 
 func TestGrantedUserDDNS(t *testing.T) {
 	s, alice, _, _ := grantFixture(t)
+	// DDNS needs dynamic zones (the fixture's are static for the edit tests)
+	dyn := &named.Inventory{Zones: []named.Zone{
+		{Name: "example.com", Type: "master", Dynamic: true},
+		{Name: "sub.example.com", Type: "master", Dynamic: true},
+		{Name: "other.net", Type: "master", Dynamic: true},
+	}}
+	s.Inv = func(*config.Config) (*named.Inventory, error) { return dyn, nil }
 	// admin-owned records in two zones
 	if _, _, err := s.DDNSAdd(who, "home.other.net", "other.net", 0); err != nil {
 		t.Fatal(err)

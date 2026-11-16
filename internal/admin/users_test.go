@@ -193,8 +193,8 @@ func TestOwnResetOnUsersPageKeepsSession(t *testing.T) {
 func TestGrantedUserUI(t *testing.T) {
 	h, _ := newHandler(t, mkConfig(t, ""))
 	inv := &named.Inventory{Zones: []named.Zone{
-		{Name: "example.com", Type: "master", Path: "/var/named/example.com.db"},
-		{Name: "other.net", Type: "master", Path: "/var/named/other.net.db"},
+		{Name: "example.com", Type: "master", Path: "/var/named/example.com.db", Dynamic: true},
+		{Name: "other.net", Type: "master", Path: "/var/named/other.net.db", Dynamic: true},
 	}, Keys: []named.Key{{Name: "goddns-key", Algorithm: "hmac-sha256"}}}
 	h.svc.Inv = func(*config.Config) (*named.Inventory, error) { return inv, nil }
 	admin := login(t, h)

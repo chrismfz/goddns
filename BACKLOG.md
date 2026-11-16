@@ -125,6 +125,12 @@ approval workflow on top of the audit/history substrate:
   Bearer tokens owned by a login, acting as it, narrowed by scopes, CIDRs and
   an expiry; per-token rate limit, auth-failure lockout; `goddns apitoken`,
   account page.
+- **Zone create/delete** — DONE (`internal/zonemgr`). Static master zones in
+  ONE managed include + managed_zone_dir; goddns never edits named.conf; the
+  include stays hand-editable and is re-read, never mirrored in the DB;
+  checkzone + checkconf before reconfig, rolled back on failure; delete only
+  managed zones, files moved aside; admin only, with assign-to-user; shadow /
+  delegation warnings for a zone inside another.
 - Still open for RBAC: per-record-type limits, read-only grants, per-token
   zone subsets (today a token sees all of its owner's zones). goauth (or any SSO/2FA) gates the door; this is the app-level model
   behind it, with per-tenant audit + history.

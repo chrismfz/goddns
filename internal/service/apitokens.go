@@ -22,13 +22,14 @@ const (
 	ScopeProxyRead    = "proxy:read"    // list proxy vhosts (admin)
 	ScopeProxyWrite   = "proxy:write"   // set / remove proxy vhosts (admin)
 	ScopeUsersAdmin   = "users:admin"   // list users, grant / revoke zones (admin)
+	ScopeZonesAdmin   = "zones:admin"   // create / delete managed zones (admin)
 )
 
 // scopesFor is what a role may put on a token: a user-role token can't carry
 // a scope its owner could never use.
 var scopesFor = map[string][]string{
 	RoleUser:  {ScopeZonesRead, ScopeRecordsWrite, ScopeDDNSRead, ScopeDDNSWrite},
-	RoleAdmin: {ScopeZonesRead, ScopeRecordsWrite, ScopeDDNSRead, ScopeDDNSWrite, ScopeProxyRead, ScopeProxyWrite, ScopeUsersAdmin},
+	RoleAdmin: {ScopeZonesRead, ScopeRecordsWrite, ScopeDDNSRead, ScopeDDNSWrite, ScopeProxyRead, ScopeProxyWrite, ScopeUsersAdmin, ScopeZonesAdmin},
 }
 
 // AllScopes lists every scope (for help texts and forms).

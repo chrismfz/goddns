@@ -100,6 +100,15 @@ type Config struct {
 	// the perms; CLI editing as root is unaffected either way).
 	ZonedSocket string `toml:"zoned_socket"`
 
+	// Zones goddns creates and deletes (admin only). Their stanzas live in
+	// ONE managed include — a plain named.conf fragment the operator includes
+	// once from named.conf and may edit by hand — and their files in
+	// managed_zone_dir. They are static master zones, editable in place
+	// without listing them in editable_zones. goddns never edits named.conf.
+	ManagedInclude string   `toml:"managed_include"`  // default /etc/named/goddns-zones.conf
+	ManagedZoneDir string   `toml:"managed_zone_dir"` // default /var/named (files are <zone>.hosts)
+	ZoneNS         []string `toml:"zone_ns"`          // default apex NS for a new zone (overridable per zone)
+
 	// Reverse proxy mode: a second TLS listener that routes by SNI/Host to
 	// internal upstreams (iDRAC, switches, anything without proper TLS).
 	// Off by default — pure-DDNS deployments are unaffected.
@@ -176,6 +185,8 @@ func defaults() Config {
 		HistoryInterval: 300,
 		HistoryKeep:     50,
 		UpdateLog:       UpdateLogUpdates,
+		ManagedInclude:  "/etc/named/goddns-zones.conf",
+		ManagedZoneDir:  "/var/named",
 	}
 }
 

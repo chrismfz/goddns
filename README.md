@@ -432,6 +432,7 @@ and zones — narrowed by **scopes**:
 | `ddns:read` / `ddns:write` | list / add, rotate, delete DDNS records | user, admin |
 | `proxy:read` / `proxy:write` | list / set, remove proxy vhosts | admin |
 | `users:admin` | list users, grant / revoke zones | admin |
+| `zones:admin` | create / delete managed zones | admin |
 
 Create one on the **account** page (your own) or on the console:
 
@@ -454,6 +455,8 @@ restore). A login holds at most 25 tokens.
 | `GET /api/v1/zones` | | `zones:read` |
 | `GET /api/v1/zones/{zone}` | | `zones:read` |
 | `GET /api/v1/zones/{zone}/history` | | `zones:read` |
+| `POST /api/v1/zones` | `{"zone":"example.org","ns":["ns1.example.com"],"assign_to":"alice","dry_run":true}` | `zones:admin` |
+| `DELETE /api/v1/zones/{zone}[?dry_run=1]` | (managed zones only) | `zones:admin` |
 | `POST /api/v1/zones/{zone}/records` | `{"action":"add\|del","rr":"www 300 IN A 192.0.2.1","dry_run":true}` | `records:write` |
 | `POST /api/v1/zones/{zone}/restore` | `{"id":42,"dry_run":true}` | `records:write` |
 | `GET /api/v1/ddns` | | `ddns:read` |
@@ -474,6 +477,48 @@ is in the server log, and in the response for an admin token).
     curl -H "Authorization: Bearer $TOKEN" https://sdns.example.com:8245/api/v1/zones
     curl -H "Authorization: Bearer $TOKEN" -d '{"action":"add","rr":"www 300 IN A 192.0.2.1","dry_run":true}' \
          https://sdns.example.com:8245/api/v1/zones/example.com/records
+
+## Creating and deleting zones
+
+An admin can create a new zone and hand it to a user — from the **zones**
+page, the console, or the API:
+
+    goddns zone create example.org -ns sdns.example.com,ns2.example.com -assign alice
+    goddns zone delete example.org
+
+**goddns never edits named.conf.** Its zones live in **one managed include**,
+a plain named.conf fragment you include once:
+
+    include "/etc/named/goddns-zones.conf";     # managed_include
+
+and their files in `managed_zone_dir` (default `/var/named`) as
+`<zone>.hosts` — ordinary static master zones you can open with vi/nano;
+goddns edits them in place too (no need to list them in `editable_zones`).
+The include stays yours to edit by hand: add or remove a stanza and goddns
+sees it, because what exists is always read back from BIND
+(`named-checkconf -p`) and from that file, never from a database.
+
+- **Create** writes a minimal zone (one-line SOA, the NS you give or
+  `zone_ns`), `named-checkzone`s it, adds the stanza, runs `named-checkconf`
+  on the whole config and only then `rndc reconfig`. If any check fails,
+  everything is put back. A zone that already exists anywhere in the BIND
+  config, or a file already at the path, is refused.
+- **Inside another zone served here** (e.g. `zone.ddns.example.com`), the
+  preview lists the parent's records the new zone will **shadow** (BIND
+  answers from the most specific zone) and warns if the parent has no NS
+  delegation for it yet.
+- **Delete** works only for zones in the managed include — a zone defined
+  anywhere else (by you, a panel) is refused with where it lives. Its stanza
+  is removed with the same checks; its file is **moved aside**
+  (`<file>.deleted-<UTC time>`), never deleted; its grants go with it.
+- **Assign** grants the new zone to a `user`-role login (the same as
+  `goddns user grant`).
+- With `zoned_socket` set, the web UI and API write through the root helper
+  (the daemon can't write named's files or run `rndc`); the console acts
+  directly as root.
+
+DDNS needs a **dynamic** zone (RFC 2136 updates): goddns refuses a DDNS
+token in a static one, since it could never update anything.
 
 ## Zones (read-only BIND introspection)
 
