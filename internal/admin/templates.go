@@ -141,8 +141,8 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 
 <div class="card"><form method="post" action="/ddns/add"><div class="row">
 <input type="hidden" name="csrf" value="{{.CSRF}}">
-<div><label>fqdn</label><input name="fqdn" placeholder="home or home.ddns.myip.gr" size="26" title="a name in the zone, @ for the zone itself, or the full name"></div>
-<div><label>zone</label><input name="zone" placeholder="ddns.myip.gr" size="20"></div>
+<div><label>fqdn</label><input name="fqdn" placeholder="home or home.ddns.example.com" size="26" title="a name in the zone, @ for the zone itself, or the full name"></div>
+<div><label>zone</label><input name="zone" placeholder="ddns.example.com" size="20"></div>
 <div><label>ttl</label><input name="ttl" type="number" value="60" size="6" style="width:5rem"></div>
 <div><button type="submit">add token</button></div>
 </div></form></div>
@@ -162,7 +162,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 </tbody></table>
 {{if .ProxyEdit}}
 <div class="card"><form method="post" action="/proxy/set"><input type="hidden" name="csrf" value="{{.CSRF}}"><div class="row">
-<div><label>host</label><input name="host" placeholder="idrac.internal.myip.gr" size="26"></div>
+<div><label>host</label><input name="host" placeholder="idrac.internal.example.com" size="26"></div>
 <div><label>upstream</label><input name="upstream" placeholder="https://10.23.0.5" size="22"></div>
 <div><label>allow (CIDRs)</label><input name="allow" placeholder="10.0.0.0/8" size="16"></div>
 <div><label>rate/s</label><input name="rate" type="number" value="0" style="width:5rem"></div>
@@ -203,7 +203,7 @@ pre{background:#0a0c10;border:1px solid #1d222b;border-radius:6px;padding:.6rem;
 <header><div><span class="b">goddns admin</span> <span class="muted">{{if .Edit}}edit{{else}}add{{end}} vhost</span></div><div><a href="/">cancel</a></div></header>
 <main><h2>{{if .Edit}}edit {{.Host}}{{else}}add a proxy vhost{{end}}</h2>
 <div class="card"><form method="post" action="/proxy/set"><input type="hidden" name="csrf" value="{{.CSRF}}">
-<div><label>host</label><input name="host" value="{{.Host}}" {{if .Edit}}readonly{{end}} placeholder="idrac.internal.myip.gr" style="width:100%"></div>
+<div><label>host</label><input name="host" value="{{.Host}}" {{if .Edit}}readonly{{end}} placeholder="idrac.internal.example.com" style="width:100%"></div>
 <div style="margin-top:.6rem"><label>upstream</label><input name="upstream" value="{{.Upstream}}" placeholder="https://10.23.0.5" style="width:100%"></div>
 <div style="margin-top:.6rem"><label>allow (CIDRs, comma/space separated)</label><input name="allow" value="{{.Allow}}" placeholder="10.0.0.0/8" style="width:100%"></div>
 <div style="margin-top:.6rem"><label>basic_auth (user:bcrypt, one per line — existing entries; edit/clear to remove)</label><textarea name="auth" rows="2" style="width:100%;background:#0c0e12;color:#d7dae0;border:1px solid #2a313c;border-radius:4px;padding:.35rem .5rem;font:inherit">{{.Auth}}</textarea></div>

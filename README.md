@@ -22,11 +22,30 @@ certificate, or access control on their own.
   per-IP rate limiting, access logging and websocket passthrough.
   Combined with SSH reverse tunnels, it exposes a whole home LAN with
   **zero open ports** at home.
+- **Zone management on your BIND**: reads `named.conf` (includes and all)
+  and shows every zone, its file, its update keys and a health check;
+  per-zone live view over AXFR, versioned snapshots with diff and one-click
+  rollback; record edits on dynamic **and** static zones (static files stay
+  plain text you can still open in `vi`); create and delete whole zones in a
+  managed include, each step checked by `named-checkzone`/`named-checkconf`
+  and rolled back on failure.
+- **Users, roles and an API**: admins do everything; users manage only the
+  zones an admin granted them (records, history, their DDNS tokens). A
+  scoped bearer-token **machine API** (`/api/v1`) covers zones, records, DDNS
+  and proxy for scripts, CI and provisioning systems — with lockout and rate
+  limits, and every change audited with who made it and how.
 - **Operations-friendly**: flat TOML config, hot-reloaded while running
   (poll + SIGHUP, no restarts); pure Go (no cgo); .deb/.rpm packaging;
   hardened systemd unit running unprivileged; runs on its own port
   (default **:8245**, the historical DynDNS update port) so it drops onto
   any server without touching the existing web stack.
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" width="32%" alt="Dashboard: DDNS records, proxy hosts and proxy traffic">
+  <img src="docs/screenshots/zones.png" width="32%" alt="Zones: every zone BIND serves, with create/delete for managed zones">
+  <img src="docs/screenshots/users.png" width="32%" alt="Users: roles and per-zone grants">
+</p>
+<p align="center"><sub>Dashboard · zones · users (demo data, addresses blurred)</sub></p>
 
 > **New here? Start with [QUICKSTART.md](QUICKSTART.md)** — your own DynDNS
 > from zero in ~10 minutes, self-issued TLS included, no certbot needed.
@@ -42,6 +61,11 @@ certificate, or access control on their own.
 | Expose a home service on a dynamic IP | [DDNS + proxy together](#ddns--proxy-together-a-home-service-on-a-dynamic-ip) |
 | Expose a whole LAN with zero open ports | [SSH reverse tunnels](#zero-open-ports-ssh-reverse-tunnels-the-whole-lan-not-just-one-box) |
 | Manage records from a web dashboard | [Admin web UI](#admin-web-ui-optional) |
+| Give a customer or colleague their own zones | [Users and roles](#users-and-roles) |
+| See every zone BIND serves, its history, roll back | [Zones](#zones-read-only-bind-introspection) |
+| Edit records in any zone (dynamic or static) | [Editing records](#editing-records-goddns-record) |
+| Create or delete a whole zone | [Creating and deleting zones](#creating-and-deleting-zones) |
+| Run it behind nginx/Caddy/your own proxy | [`tls_mode = "none"`](#behind-your-own-reverse-proxy-tls_mode--none) |
 | Automate it (scripts, CI, a provisioning system) | [Machine API](#machine-api-apiv1) |
 | Build .deb/.rpm packages | [Build & packaging](#build--packaging-cfm-style-workflow) |
 | Something broke | [Troubleshooting](#troubleshooting) |
@@ -1191,5 +1215,5 @@ validation instead of blind trust.
 
 ## Roadmap
 
-See `BACKLOG.md` — cPanel/DirectAdmin/Virtualmin write backends, admin HTTP
-API, `goddns top` termui dashboard, per-zone TSIG keys.
+See `BACKLOG.md` — cPanel/DirectAdmin/Virtualmin write backends, `goddns top`
+termui dashboard, per-zone TSIG keys.

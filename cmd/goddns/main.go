@@ -31,10 +31,10 @@ func usage() {
 
 Usage:
   goddns serve  [-config %s]
-  goddns token add  -fqdn home.myip.gr -zone myip.gr [-ttl 60] [-config ...]
+  goddns token add  -fqdn home.example.com -zone example.com [-ttl 60] [-config ...]
   goddns token list [-config ...]
-  goddns token rotate -fqdn home.myip.gr [-config ...]  # new token, old stops
-  goddns token del  -fqdn home.myip.gr [-config ...]
+  goddns token rotate -fqdn home.example.com [-config ...]  # new token, old stops
+  goddns token del  -fqdn home.example.com [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth / [admin] users
   goddns user list|add|del|passwd|role|disable|enable|grant|revoke ...  # admin UI logins, roles, zone grants
   goddns apitoken list|add|revoke ...                                  # machine-API (/api/v1) tokens
@@ -47,8 +47,8 @@ Usage:
   goddns zone edit|import|export <zone> [file]  # raw whole-file edit / import / export of an enabled static zone
   goddns vhost list|set|del ...    # manage reverse-proxy vhosts (proxy.d/ fragments)
   goddns zones [-check]                        # read-only: zones, dynamic, TSIG health (-check: NS serials)
-  goddns zone home.myip.gr [-export|-check]    # read-only: live records via AXFR (+ backup, NS serials)
-  goddns zone myip.gr -history | -diff         # zone snapshot history / what changed last
+  goddns zone example.com [-export|-check]     # read-only: live records via AXFR (+ backup, NS serials)
+  goddns zone example.com -history | -diff     # zone snapshot history / what changed last
   goddns version
 `, Version, defaultConf)
 }
