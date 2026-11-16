@@ -244,7 +244,7 @@ func (h *Handler) handleZoneHistory(w http.ResponseWriter, a service.Actor, name
 		return
 	}
 	if err != nil {
-		render(w, zoneHistTmpl, map[string]any{"Version": h.version, "User": user, "Name": name, "Error": err.Error()})
+		render(w, zoneHistTmpl, map[string]any{"Version": h.version, "User": user, "Name": name, "Error": err.Error(), "Restricted": a.Role != service.RoleAdmin})
 		return
 	}
 	data := map[string]any{"Version": h.version, "User": user, "Active": "zones", "Name": name, "Restricted": a.Role != service.RoleAdmin}
@@ -295,7 +295,7 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, a service.A
 	}
 	if err != nil {
 		render(w, zoneViewTmpl, map[string]any{
-			"Version": h.version, "User": user, "Name": name, "Error": err.Error(),
+			"Version": h.version, "User": user, "Name": name, "Error": err.Error(), "Restricted": a.Role != service.RoleAdmin,
 		})
 		return
 	}
@@ -309,7 +309,7 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, a service.A
 	}
 	data := map[string]any{
 		"Version": h.version, "User": user, "Active": "zones", "Name": name, "Restricted": a.Role != service.RoleAdmin,
-		"InConf": v.Conf != nil, "Records": rows, "Count": len(v.Records), "Auth": v.Auth,
+		"InConf": v.Conf != nil, "Records": rows, "Count": len(v.Records),
 	}
 	if z := v.Conf; z != nil {
 		data["Kind"] = z.Kind()
@@ -317,6 +317,11 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, a service.A
 		if a.Role == service.RoleAdmin {
 			data["Keys"] = strings.Join(z.UpdateKeys, ", ")
 		}
+	}
+	if a.Role == service.RoleAdmin { // names the TSIG key used for the transfer
+		data["Auth"] = v.Auth
+	}
+	if z := v.Conf; z != nil {
 		if v.Editable {
 			data["Editable"] = true
 			data["CSRF"] = h.csrfFor(user)

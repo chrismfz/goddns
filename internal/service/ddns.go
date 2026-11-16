@@ -13,7 +13,9 @@ const DefaultDDNSTTL = 60
 
 // DDNSList returns every DDNS record (token → hostname binding).
 // DDNSList returns every DDNS record (token → hostname binding); a user-role
-// actor gets only the records in its granted zones.
+// actor gets only the records it created, in zones it still holds. A user
+// never sees or touches an admin's records, even in a granted zone (they may
+// serve the admin's own infrastructure).
 func (s *Service) DDNSList(a Actor) ([]store.Record, error) {
 	switch a.Role {
 	case RoleAdmin:
@@ -29,7 +31,7 @@ func (s *Service) DDNSList(a Actor) ([]store.Record, error) {
 		}
 		var out []store.Record
 		for _, r := range all {
-			if g[NormZone(r.Zone)] {
+			if r.Owner == a.User && g[NormZone(r.Zone)] {
 				out = append(out, r)
 			}
 		}
@@ -52,6 +54,9 @@ func (s *Service) ddnsRecord(a Actor, fqdn string) (store.Record, error) {
 	if err := s.authZone(a, rec.Zone); err != nil {
 		return store.Record{}, err
 	}
+	if a.Role != RoleAdmin && rec.Owner != a.User {
+		return store.Record{}, ErrForbidden
+	}
 	return rec, nil
 }
 
@@ -68,14 +73,14 @@ func (s *Service) DDNSGet(a Actor, fqdn string) (store.Record, error) {
 // hostname must belong to it, not to a more specific zone served here.
 func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, string, error) {
 	fqdn, zone = strings.TrimSpace(fqdn), strings.TrimSpace(zone)
+	if fqdn == "" || zone == "" {
+		return store.Record{}, "", missing("fqdn and zone are required")
+	}
 	if err := s.authZone(a, zone); err != nil {
 		return store.Record{}, "", err
 	}
 	if ttl <= 0 {
 		ttl = DefaultDDNSTTL
-	}
-	if fqdn == "" || zone == "" {
-		return store.Record{}, "", missing("fqdn and zone are required")
 	}
 	if _, ok := dns.IsDomainName(fqdn); !ok || !dns.IsSubDomain(dns.CanonicalName(zone), dns.CanonicalName(fqdn)) {
 		return store.Record{}, "", invalid("%s is not a name inside zone %s", fqdn, zone)
@@ -89,7 +94,13 @@ func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, st
 			return store.Record{}, "", invalid("%s belongs to zone %q, not %s", fqdn, owner, NormZone(zone))
 		}
 	}
-	rec, tok, err := s.store.Add(fqdn, zone, uint32(ttl))
+	// A user's record is owned by it: the token then works only while the
+	// user is enabled and holds the zone (store.Lookup decides at use).
+	owner := ""
+	if a.Role != RoleAdmin {
+		owner = a.User
+	}
+	rec, tok, err := s.store.AddFor(owner, fqdn, zone, uint32(ttl))
 	if err != nil {
 		return store.Record{}, "", err
 	}

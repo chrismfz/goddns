@@ -393,7 +393,7 @@ This page never edits BIND — it only reads.</div>
 </div></form>
 <div class="muted" style="font-size:.72rem">{{if .FileEdit}}static zone — del/add rewrite the file in place (surgical), checkzone + backup + rndc reload, with a confirm + diff. Raw whole-file edits stay on the CLI (<code>goddns zone edit</code>).{{else}}dynamic zone — edits go via a signed RFC2136 UPDATE, snapshotted first; del/add show a confirm + diff. The key's update-policy is the hard bound.{{end}}</div></div>
 {{end}}
-<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR ({{.Auth}}). CLI: <code>goddns zone {{.Name}}</code> / <code>goddns record …</code>.</div>
+<div class="muted" style="font-size:.72rem;margin-top:.4rem">live via AXFR{{if .Auth}} ({{.Auth}}){{end}}.{{if not .Restricted}} CLI: <code>goddns zone {{.Name}}</code> / <code>goddns record …</code>.{{end}}</div>
 
 <h2>SOA / NS checks</h2>
 <div class="card">

@@ -323,15 +323,19 @@ Logins live in two places:
       goddns user del alice
 
 Two roles: an **admin** can do everything; a **user** manages only the zones
-granted to it — the zone view and history, record add/del, restore, and the
-DDNS tokens in those zones — plus their own password on the **account** page.
-Nothing server-wide (proxy, logs, traffic, users, TSIG keys, file paths) and
-every other page answers 403. A grant is **one zone, not its subzones**: if
-`sub.example.com` is its own zone here, it needs its own grant, and an edit
-through `example.com` can't write names that belong to it (true for admins
-too — that rule already held for dynamic zones, now for static ones as well).
-A grant must name a zone named.conf serves; revoking takes effect on the next
-request. Role and grants are enforced in the service layer, so the UI, the
+granted to it — the zone view and history, record add/del, restore, and its
+own DDNS tokens in those zones — plus their own password on the **account**
+page. Nothing server-wide (proxy, logs, traffic, users, TSIG keys, file paths)
+and every other page answers 403. A grant is **one zone, not its subzones**: if
+`sub.example.com` is its own zone here, it needs its own grant, and a user's
+edit through `example.com` can't write names that belong to it (an admin still
+can, for the parent-side delegation NS/DS and glue). A grant must name a zone
+named.conf serves; revoking takes effect on the next request.
+
+A user's DDNS tokens belong to it: it never sees or touches an admin's tokens,
+even in a granted zone. Its tokens work only while it is enabled and still
+holds the zone — revoking the grant or disabling the user stops them at once
+(re-granting restores them), and deleting the user deletes them. Role and grants are enforced in the service layer, so the UI, the
 CLI and the coming API can't diverge.
 
 A DDNS hostname must now be inside its zone (an out-of-zone token could never

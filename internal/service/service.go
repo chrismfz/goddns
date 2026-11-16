@@ -34,6 +34,7 @@ import (
 type Store interface {
 	List() ([]store.Record, error)
 	Add(name, zone string, ttl uint32) (store.Record, string, error)
+	AddFor(owner, name, zone string, ttl uint32) (store.Record, string, error)
 	Del(name string) error
 	Rotate(name string) (store.Record, string, error)
 	Get(name string) (store.Record, error)

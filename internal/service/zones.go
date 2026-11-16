@@ -109,12 +109,19 @@ type NSVerdict struct {
 // host with many zones can't be made to open a flood of sockets from one call.
 // The result is index-aligned with zones.
 func (s *Service) NSVerdicts(a Actor, zones []named.Zone) ([]NSVerdict, error) {
-	for _, z := range zones {
-		if err := s.authZone(a, z.Name); err != nil {
+	switch a.Role {
+	case RoleAdmin:
+	case RoleUser:
+		g, err := s.grantSet(a) // once, not per zone
+		if err != nil {
 			return nil, err
 		}
-	}
-	if a.Role != RoleAdmin && a.Role != RoleUser { // an empty list still needs a role
+		for _, z := range zones {
+			if !g[NormZone(z.Name)] {
+				return nil, ErrForbidden
+			}
+		}
+	default:
 		return nil, ErrForbidden
 	}
 	srv := server(s.cfg())

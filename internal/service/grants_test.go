@@ -95,6 +95,10 @@ func TestGrantedUserScope(t *testing.T) {
 	if _, err := s.EditRecord(alice, "example.com", ActionAdd, "x.sub 60 IN A 9.9.9.9", true); err == nil || !strings.Contains(err.Error(), "more specific zone") {
 		t.Fatalf("edit into a child zone via the parent: %v", err)
 	}
+	// An admin keeps the parent-side delegation records (NS at a child apex).
+	if _, err := s.EditRecord(who, "example.com", ActionAdd, "sub 60 IN NS ns1.example.net.", false); err != nil {
+		t.Fatalf("admin delegation NS in the parent: %v", err)
+	}
 	// Its own zone works, in place.
 	res, err := s.EditRecord(alice, "example.com", ActionAdd, "new 60 IN A 9.9.9.9", true)
 	if err != nil || !res.Static {
@@ -123,6 +127,16 @@ func TestGrantedUserDDNS(t *testing.T) {
 	if _, _, err := s.DDNSAdd(alice, "cam.example.com", "example.com", 0); err != nil {
 		t.Fatal(err)
 	}
+	// an admin's record in the granted zone is not the user's to touch
+	if _, _, err := s.DDNSAdd(who, "gw.example.com", "example.com", 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.DDNSRotate(alice, "gw.example.com"); !IsForbidden(err) {
+		t.Fatalf("user rotated an admin's token: %v", err)
+	}
+	if err := s.DDNSDel(alice, "gw.example.com"); !IsForbidden(err) {
+		t.Fatalf("user deleted an admin's token: %v", err)
+	}
 	recs, err := s.DDNSList(alice)
 	if err != nil || len(recs) != 1 || recs[0].FQDN != "cam.example.com." {
 		t.Fatalf("user's DDNS list: %+v %v", recs, err)
@@ -143,7 +157,7 @@ func TestGrantedUserDDNS(t *testing.T) {
 	if err := s.DDNSDel(alice, "cam.example.com"); err != nil {
 		t.Fatal(err)
 	}
-	if all, _ := s.DDNSList(who); len(all) != 1 {
+	if all, _ := s.DDNSList(who); len(all) != 2 {
 		t.Fatalf("admin's record touched: %+v", all)
 	}
 }
