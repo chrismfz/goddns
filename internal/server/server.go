@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,6 +108,44 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 	return peer, nil
 }
 
+// logResult writes one update-result line if update_log asks for it:
+//
+//	update result=badauth proto=simple peer=203.0.113.9 fqdn=- ip=-
+//
+// Never the token. Values the client chose (a bad ip=, a hostname=) are
+// quoted so they can't split the line or forge fields.
+func (s *Server) logResult(r *http.Request, proto, result string, rec *store.Record, ip, detail string) {
+	// "good" keeps its historical "updated <fqdn> -> <ip>" line (logged at
+	// every level but none), so existing log searches still match.
+	lvl := s.Cfg().UpdateLog
+	switch result {
+	case "nochg":
+		if lvl != config.UpdateLogAll {
+			return
+		}
+	default: // badauth, badip, nohost, missing token ...
+		if lvl != config.UpdateLogAll && lvl != config.UpdateLogChanges {
+			return
+		}
+	}
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr
+	}
+	fqdn := "-"
+	if rec != nil {
+		fqdn = rec.FQDN
+	}
+	if ip == "" {
+		ip = "-"
+	}
+	line := fmt.Sprintf("update result=%s proto=%s peer=%s fqdn=%s ip=%s", result, proto, peer, fqdn, ip)
+	if detail != "" {
+		line += " detail=" + strconv.Quote(detail)
+	}
+	log.Print(line)
+}
+
 func (s *Server) doUpdate(rec store.Record, ip net.IP) (changed bool, err error) {
 	if rec.LastIP == ip.String() {
 		// nochg: skip the DNS write, but still record the check-in so the
@@ -139,6 +178,7 @@ func (s *Server) handleSimple(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/update/")
 	rest = strings.Trim(rest, "/")
 	if rest == "" {
+		s.logResult(r, "simple", "notoken", nil, "", "")
 		http.Error(w, "missing token", http.StatusBadRequest)
 		return
 	}
@@ -154,6 +194,7 @@ func (s *Server) handleSimple(w http.ResponseWriter, r *http.Request) {
 
 	rec, err := s.Store.Lookup(token)
 	if errors.Is(err, store.ErrNotFound) {
+		s.logResult(r, "simple", "badauth", nil, "", "")
 		http.Error(w, "badauth", http.StatusForbidden)
 		return
 	} else if err != nil {
@@ -164,6 +205,7 @@ func (s *Server) handleSimple(w http.ResponseWriter, r *http.Request) {
 
 	ip, err := s.clientIP(r, override)
 	if err != nil {
+		s.logResult(r, "simple", "badip", &rec, "", err.Error())
 		http.Error(w, "badip", http.StatusBadRequest)
 		return
 	}
@@ -177,7 +219,11 @@ func (s *Server) handleSimple(w http.ResponseWriter, r *http.Request) {
 	status := "nochg"
 	if changed {
 		status = "good"
-		log.Printf("updated %s -> %s", rec.FQDN, ip)
+		if s.Cfg().UpdateLog != config.UpdateLogNone {
+			log.Printf("updated %s -> %s", rec.FQDN, ip)
+		}
+	} else {
+		s.logResult(r, "simple", "nochg", &rec, ip.String(), "")
 	}
 	fmt.Fprintf(w, "%s %s\n", status, ip)
 }
@@ -193,16 +239,22 @@ func (s *Server) handleDynDNS2(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if token == "" {
+		s.logResult(r, "dyndns2", "badauth", nil, "", "no token")
 		fmt.Fprintln(w, "badauth")
 		return
 	}
 	rec, err := s.Store.Lookup(token)
 	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			log.Printf("lookup error: %v", err)
+		}
+		s.logResult(r, "dyndns2", "badauth", nil, "", "")
 		fmt.Fprintln(w, "badauth")
 		return
 	}
 	// Optional hostname check: if supplied it must match the token's FQDN.
 	if h := r.URL.Query().Get("hostname"); h != "" && store.FQDN(h) != rec.FQDN {
+		s.logResult(r, "dyndns2", "nohost", &rec, "", "hostname="+h)
 		fmt.Fprintln(w, "nohost")
 		return
 	}
@@ -210,6 +262,7 @@ func (s *Server) handleDynDNS2(w http.ResponseWriter, r *http.Request) {
 	override := r.URL.Query().Get("myip")
 	ip, err := s.clientIP(r, override)
 	if err != nil {
+		s.logResult(r, "dyndns2", "badip", &rec, "", err.Error())
 		fmt.Fprintln(w, "badip")
 		return
 	}
@@ -220,9 +273,12 @@ func (s *Server) handleDynDNS2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if changed {
-		log.Printf("updated %s -> %s", rec.FQDN, ip)
+		if s.Cfg().UpdateLog != config.UpdateLogNone {
+			log.Printf("updated %s -> %s", rec.FQDN, ip)
+		}
 		fmt.Fprintf(w, "good %s\n", ip)
 	} else {
+		s.logResult(r, "dyndns2", "nochg", &rec, ip.String(), "")
 		fmt.Fprintf(w, "nochg %s\n", ip)
 	}
 }

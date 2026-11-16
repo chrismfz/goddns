@@ -24,6 +24,15 @@ const (
 	TLSHybrid = "hybrid" // file cert when it covers the SNI, else ACME on-demand (gated)
 )
 
+// update_log levels: which DDNS update results get a log line. A failed
+// DNS write is an application error and is logged at every level.
+const (
+	UpdateLogAll     = "all"     // every result, including nochg
+	UpdateLogChanges = "changes" // everything except nochg: good, badauth, badip, nohost, ...
+	UpdateLogUpdates = "updates" // only good (the IP changed) — the historical behaviour
+	UpdateLogNone    = "none"    // no per-request results
+)
+
 // Config holds the server configuration. Secrets can be overridden by env
 // (GODDNS_TSIG_SECRET, GODDNS_ACME_TSIG_SECRET) so they never have to live
 // in the config file on disk.
@@ -33,6 +42,7 @@ type Config struct {
 	ReloadInterval int    `toml:"reload_interval"` // config re-check period, seconds
 	LogFile        string `toml:"log_file"`        // dedicated log file; empty = stderr/journald. Hot-swappable.
 	AccessLog      string `toml:"access_log"`      // separate file for proxy-access lines; empty = into log_file. Hot-swappable.
+	UpdateLog      string `toml:"update_log"`      // which DDNS update results are logged: all | changes | updates (default) | none. Hot-swappable.
 	PublicHost     string `toml:"public_host"`     // hostname clients use to reach the DDNS endpoint (e.g. sdns.myip.gr); fills the admin help snippets. Optional.
 	NamedConf      string `toml:"named_conf"`      // path to named.conf for the read-only Zones view (default /etc/named.conf)
 
@@ -156,6 +166,7 @@ func defaults() Config {
 		NamedConf:       "/etc/named.conf",
 		HistoryInterval: 300,
 		HistoryKeep:     50,
+		UpdateLog:       UpdateLogUpdates,
 	}
 }
 
@@ -227,6 +238,16 @@ func Load(path string) (*Config, error) {
 
 	c.TSIGName = canonKeyName(c.TSIGName)
 	c.ACMETSIGName = canonKeyName(c.ACMETSIGName)
+
+	c.UpdateLog = strings.ToLower(strings.TrimSpace(c.UpdateLog))
+	switch c.UpdateLog {
+	case UpdateLogAll, UpdateLogChanges, UpdateLogUpdates, UpdateLogNone:
+	case "":
+		c.UpdateLog = UpdateLogUpdates
+	default:
+		return nil, fmt.Errorf("update_log must be %q, %q, %q or %q (got %q)",
+			UpdateLogAll, UpdateLogChanges, UpdateLogUpdates, UpdateLogNone, c.UpdateLog)
+	}
 
 	switch c.TLSMode {
 	case TLSFiles:

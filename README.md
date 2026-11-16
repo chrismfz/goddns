@@ -573,6 +573,20 @@ leave both empty for journald. The package creates the files
 copytruncate). Both keys are hot-swappable — change/comment them and they
 apply on the next reload tick.
 
+`update_log` picks which DDNS update results get a line in `log_file`
+(never the token; hot-swappable):
+
+| level | logs |
+|---|---|
+| `all` | every request, including `nochg` (busy: clients poll every few minutes) |
+| `changes` | everything but `nochg`: `good`, `badauth`, `badip`, `nohost`… — how you spot someone trying tokens |
+| `updates` (default) | only `good`, the IP actually changed — the historical behaviour |
+| `none` | no per-request lines |
+
+A failed DNS write is always logged. Result lines look like
+`update result=badauth proto=simple peer=203.0.113.9 fqdn=- ip=-`; a `good`
+keeps its `updated <fqdn> -> <ip>` line.
+
 ## Config hot reload
 
 `/etc/goddns/goddns.conf` is polled cfm-style (mtime+SHA-256, every
