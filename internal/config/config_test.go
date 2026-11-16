@@ -465,3 +465,52 @@ console_ports = `+ports+`
 	bad("[70000]") // out of range
 	bad("[0]")     // out of range
 }
+
+func TestTLSNoneListenRules(t *testing.T) {
+	base := "tls_mode = \"none\"\n"
+	for _, c := range []struct {
+		extra string
+		ok    bool
+	}{
+		{`listen = "127.0.0.1:8245"`, true},
+		{`listen = "[::1]:8245"`, true},
+		{`listen = "localhost:8245"`, false}, // names are not trusted to be loopback
+		{`listen = ""`, false},
+		{`listen = "unix:/run/goddns-serve/goddns.sock"`, true},
+		{`listen = ":8245"`, false},           // every interface: tokens in clear text
+		{`listen = "84.54.49.3:8245"`, false}, // public address
+		{`listen = "unix:relative.sock"`, false},
+		{"listen = \"127.0.0.1:8245\"\nproxy_enabled = true", false}, // proxy/admin are TLS-only
+	} {
+		_, err := loadString(t, base+c.extra+"\n")
+		if (err == nil) != c.ok {
+			t.Errorf("%q: ok=%v, err=%v", c.extra, c.ok, err)
+		}
+	}
+	// a unix socket needs tls_mode = "none"
+	if _, err := loadString(t, "cert_file = \"/tmp/c\"\nkey_file = \"/tmp/k\"\nlisten = \"unix:/run/x.sock\"\n"); err == nil {
+		t.Fatal("unix listen accepted with TLS")
+	}
+	c, err := loadString(t, base+`listen = "unix:/run/goddns-serve/goddns.sock"`+"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := c.UnixListen(); !ok || p != "/run/goddns-serve/goddns.sock" {
+		t.Fatalf("UnixListen: %q %v", p, ok)
+	}
+}
+
+func loadString(t *testing.T, body string) (*Config, error) {
+	t.Helper()
+	return Load(write(t, body))
+}
+
+func TestIgnoredTLSSettings(t *testing.T) {
+	c, err := loadString(t, "tls_mode = \"none\"\nlisten = \"127.0.0.1:8245\"\ncert_file = \"/x\"\nkey_file = \"/y\"\nacme_domain = \"a.example\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.IgnoredTLSSettings(), ","); got != "cert_file/key_file,acme_domain" {
+		t.Fatalf("ignored: %q", got)
+	}
+}

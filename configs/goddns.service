@@ -23,6 +23,12 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadWritePaths=/var/lib/goddns
+# /run/goddns-serve: where a tls_mode = "none" unix-socket listener lives
+# (listen = "unix:/run/goddns-serve/goddns.sock"). Its own directory, not
+# /run/goddns: that one belongs to goddns-zoned.service, and systemd removes a
+# RuntimeDirectory when the unit owning it stops.
+RuntimeDirectory=goddns-serve
+RuntimeDirectoryMode=0755
 ReadWritePaths=-/var/log/goddns.log
 ReadWritePaths=-/var/log/goddns-access.log
 # Web-UI proxy-vhost editing writes goddns-managed proxy.d/<host>.conf

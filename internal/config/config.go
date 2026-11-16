@@ -22,6 +22,15 @@ const (
 	TLSFiles  = "files"  // cert_file/key_file from disk, hot-reloaded on renewal
 	TLSACME   = "acme"   // self-issued Let's Encrypt cert via DNS-01 over RFC2136
 	TLSHybrid = "hybrid" // file cert when it covers the SNI, else ACME on-demand (gated)
+	// TLSNone serves the DDNS endpoint as plain HTTP for a reverse proxy in
+	// front that terminates TLS (issue #60). The token is in the URL, so it
+	// is only allowed on a unix socket or a loopback address, and not with
+	// proxy_enabled (the built-in proxy and admin UI are TLS-only).
+	TLSNone = "none"
+
+	// UnixListenPrefix marks a unix-socket listen address:
+	// listen = "unix:/run/goddns-serve/goddns.sock".
+	UnixListenPrefix = "unix:"
 )
 
 // update_log levels: which DDNS update results get a log line. A failed
@@ -249,7 +258,20 @@ func Load(path string) (*Config, error) {
 			UpdateLogAll, UpdateLogChanges, UpdateLogUpdates, UpdateLogNone, c.UpdateLog)
 	}
 
+	if strings.TrimSpace(c.Listen) == "" {
+		return nil, fmt.Errorf("listen must not be empty (e.g. \":8245\")")
+	}
+	if strings.HasPrefix(c.Listen, UnixListenPrefix) && c.TLSMode != TLSNone {
+		return nil, fmt.Errorf("listen %q: a unix socket needs tls_mode = \"none\" (TLS terminated by the proxy in front)", c.Listen)
+	}
 	switch c.TLSMode {
+	case TLSNone:
+		if c.ProxyEnabled {
+			return nil, fmt.Errorf("tls_mode \"none\" can't be combined with proxy_enabled (the built-in proxy and admin UI are TLS-only)")
+		}
+		if err := plainListenOK(c.Listen); err != nil {
+			return nil, err
+		}
 	case TLSFiles:
 		if c.CertFile == "" || c.KeyFile == "" {
 			return nil, fmt.Errorf("tls_mode \"files\" requires cert_file and key_file")
@@ -267,7 +289,7 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("tls_mode \"hybrid\" requires cert_file and key_file (the static base; ACME is the fallback)")
 		}
 	default:
-		return nil, fmt.Errorf("tls_mode must be %q, %q or %q (got %q)", TLSFiles, TLSACME, TLSHybrid, c.TLSMode)
+		return nil, fmt.Errorf("tls_mode must be %q, %q, %q or %q (got %q)", TLSFiles, TLSACME, TLSHybrid, TLSNone, c.TLSMode)
 	}
 
 	for _, cidr := range c.TrustedProxies {
@@ -456,6 +478,53 @@ func (c *Config) IsTrusted(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// IgnoredTLSSettings names the TLS settings that are set but do nothing
+// because tls_mode is "none" (a startup warning, so switching modes doesn't
+// silently stop certificate issuance/renewal someone relied on).
+func (c *Config) IgnoredTLSSettings() []string {
+	if c.TLSMode != TLSNone {
+		return nil
+	}
+	var out []string
+	if c.CertFile != "" || c.KeyFile != "" {
+		out = append(out, "cert_file/key_file")
+	}
+	if c.ACMEDomain != "" {
+		out = append(out, "acme_domain")
+	}
+	return out
+}
+
+// UnixListen returns the socket path when listen is "unix:<path>".
+func (c *Config) UnixListen() (string, bool) {
+	if p, ok := strings.CutPrefix(c.Listen, UnixListenPrefix); ok {
+		return p, true
+	}
+	return "", false
+}
+
+// plainListenOK allows a plain-HTTP (tls_mode = "none") listener only where
+// the network can't reach it: an absolute unix-socket path, or a loopback
+// host. ":8245" or a public address would send tokens in clear text.
+func plainListenOK(listen string) error {
+	if p, ok := strings.CutPrefix(listen, UnixListenPrefix); ok {
+		if !strings.HasPrefix(p, "/") {
+			return fmt.Errorf("listen %q: the unix socket path must be absolute", listen)
+		}
+		return nil
+	}
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		return fmt.Errorf("listen %q: %v", listen, err)
+	}
+	// A literal loopback IP only: a name like "localhost" binds whatever it
+	// resolves to, and a broken hosts file can map it to a public address.
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return nil
+	}
+	return fmt.Errorf("listen %q: tls_mode \"none\" sends tokens in clear text, so it may only listen on a loopback address given as an IP (127.0.0.1:8245, [::1]:8245) or a unix socket (unix:/run/goddns-serve/goddns.sock)", listen)
 }
 
 // NeedsRestart reports whether switching from old to new requires a process

@@ -248,6 +248,10 @@ func buildTLS(cfg *config.Config) (*tlsSource, error) {
 			}
 		}
 		return &tlsSource{getCert: h.GetCertificate, setAllowed: h.SetAllowed}, nil
+	case config.TLSNone:
+		// plain HTTP behind a reverse proxy; proxy_enabled is refused with
+		// it, so nothing here ever asks for a certificate
+		return &tlsSource{}, nil
 	default: // config.TLSFiles (validated in config.Load)
 		f, err := tlsmgr.NewFiles(cfg.CertFile, cfg.KeyFile)
 		if err != nil {

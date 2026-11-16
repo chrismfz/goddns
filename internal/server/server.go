@@ -16,9 +16,11 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chrismfz/goddns/internal/config"
@@ -91,25 +93,75 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Run blocks serving HTTPS on the listen address from the startup config.
+// Run blocks serving the DDNS endpoint on the listen address from the
+// startup config: HTTPS, or plain HTTP with tls_mode = "none" (a TLS-
+// terminating reverse proxy in front, on loopback or a unix socket — config
+// validation allows nothing else).
 func (s *Server) Run() error {
 	cfg := s.Cfg()
+	ln, err := Listen(cfg)
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{
-		Addr:              cfg.Listen,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
-		TLSConfig: &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			GetCertificate: s.GetCert,
-		},
 	}
 	log.Printf("goddns listening on %s (tls=%s dns=%s key=%s)",
 		cfg.Listen, cfg.TLSMode, cfg.DNSServer, cfg.TSIGName)
-	// ListenAndServeTLS with empty paths -> uses GetCertificate.
-	return srv.ListenAndServeTLS("", "")
+	if cfg.TLSMode == config.TLSNone {
+		log.Printf("tls_mode = \"none\": serving plain HTTP on %s — TLS must be terminated by the reverse proxy in front; "+
+			"its X-Forwarded-For names the client", cfg.Listen)
+		if ignored := cfg.IgnoredTLSSettings(); len(ignored) > 0 {
+			log.Printf("WARNING: tls_mode = \"none\" ignores %s — no certificate is loaded, issued or renewed",
+				strings.Join(ignored, ", "))
+		}
+		return srv.Serve(ln)
+	}
+	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: s.GetCert}
+	// ServeTLS with empty paths -> uses GetCertificate.
+	return srv.ServeTLS(ln, "", "")
+}
+
+// Listen opens the DDNS listener: "unix:<path>" is a unix socket (a stale
+// socket file from a previous run is replaced; anything else at the path is
+// refused), mode 0666 — a local proxy must be able to connect, and plain
+// HTTP on loopback is just as reachable from the host; the token still
+// guards every update. Anything else is a TCP address.
+func Listen(cfg *config.Config) (net.Listener, error) {
+	path, ok := cfg.UnixListen()
+	if !ok {
+		return net.Listen("tcp", cfg.Listen)
+	}
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("listen %s: exists and is not a socket", path)
+		}
+		// Only a DEAD socket is stale: if something answers, another goddns
+		// is serving it, and unlinking it would leave that one unreachable.
+		if c, err := net.DialTimeout("unix", path, 500*time.Millisecond); err == nil {
+			c.Close()
+			return nil, fmt.Errorf("listen %s: in use (another goddns is serving it)", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("listen %s: remove stale socket: %w", path, err)
+		}
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		if errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.EACCES) {
+			return nil, fmt.Errorf("%w — the packaged unit (ProtectSystem=strict) can only create the socket under /run/goddns-serve/", err)
+		}
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("listen %s: chmod: %w", path, err)
+	}
+	return ln, nil
 }
 
 // clientIP returns the source IP to register. Priority:
@@ -137,7 +189,12 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 		host = r.RemoteAddr
 	}
 	peer := net.ParseIP(host)
-	if peer != nil && cfg.IsTrusted(peer) {
+	// With tls_mode = "none" the connection can only come from the local
+	// reverse proxy (loopback or a unix socket, which has no peer IP), so it
+	// is trusted to name the client. Spoofing it gains nothing a token
+	// holder doesn't already have: ?myip= sets the IP explicitly anyway.
+	proxied := cfg.TLSMode == config.TLSNone || (peer != nil && cfg.IsTrusted(peer))
+	if proxied {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			// Walk right-to-left; first hop that is NOT a trusted proxy is the client.
@@ -147,6 +204,12 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 					return cand, nil
 				}
 			}
+		}
+		// Behind our own reverse proxy the peer is the proxy, never the
+		// client: falling back to it would point every record at 127.0.0.1
+		// when the proxy doesn't send X-Forwarded-For.
+		if cfg.TLSMode == config.TLSNone {
+			return nil, fmt.Errorf("no client address: the reverse proxy must send X-Forwarded-For (or the client ?myip=)")
 		}
 	}
 	if peer == nil {
