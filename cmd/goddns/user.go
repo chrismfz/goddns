@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"strings"
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/service"
@@ -20,6 +21,7 @@ import (
 //	goddns user passwd <name>
 //	goddns user role <name> admin|user
 //	goddns user disable|enable <name>
+//	goddns user grant|revoke <name> <zone>
 //	goddns user del <name>
 func cmdUser(args []string) {
 	if len(args) < 1 {
@@ -60,7 +62,7 @@ func cmdUser(args []string) {
 			fmt.Println("no logins (add one: goddns user add <name> -role admin)")
 			return
 		}
-		fmt.Printf("%-24s %-6s %-9s %-12s %s\n", "USER", "ROLE", "STATE", "SOURCE", "CREATED")
+		fmt.Printf("%-24s %-6s %-9s %-12s %-10s %s\n", "USER", "ROLE", "STATE", "SOURCE", "CREATED", "ZONES")
 		for _, u := range users {
 			state, src := "enabled", "db"
 			if u.Disabled {
@@ -71,7 +73,11 @@ func cmdUser(args []string) {
 			} else if u.Shadowed {
 				src = "db(shadowed)"
 			}
-			fmt.Printf("%-24s %-6s %-9s %-12s %s\n", u.Name, u.Role, state, src, u.Created)
+			zones := strings.Join(u.Zones, ",")
+			if zones == "" {
+				zones = "-"
+			}
+			fmt.Printf("%-24s %-6s %-9s %-12s %-10s %s\n", u.Name, u.Role, state, src, u.Created, zones)
 		}
 	case "add":
 		need(1)
@@ -91,6 +97,15 @@ func cmdUser(args []string) {
 		need(1)
 		check(svc.UserSetDisabled(a, rest[0], sub == "disable"))
 		fmt.Printf("%sd %s\n", sub, rest[0])
+	case "grant", "revoke":
+		need(2)
+		if sub == "grant" {
+			check(svc.Grant(a, rest[0], rest[1]))
+			fmt.Printf("%s may now manage %s\n", rest[0], service.NormZone(rest[1]))
+		} else {
+			check(svc.Revoke(a, rest[0], rest[1]))
+			fmt.Printf("revoked %s from %s\n", service.NormZone(rest[1]), rest[0])
+		}
 	case "del":
 		need(1)
 		check(svc.UserDel(a, rest[0]))
@@ -154,11 +169,14 @@ func userUsage() {
   goddns user passwd <name>
   goddns user role <name> admin|user
   goddns user disable|enable <name>
+  goddns user grant <name> <zone>             # the zone must be one named.conf serves
+  goddns user revoke <name> <zone>
   goddns user del <name>
   (all take [-config path])
 
-An admin can do everything in the admin UI; a user can sign in and change
-their own password (zones are granted to users in a later release).
+An admin can do everything in the admin UI. A user manages only the zones
+granted to it (view, history, record edits, restore, its DDNS tokens) and
+its own password. A grant is one zone, not its subzones.
 goddns.conf [admin] users are always admins and are edited in that file.
 `)
 }

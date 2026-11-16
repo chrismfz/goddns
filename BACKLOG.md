@@ -118,10 +118,11 @@ approval workflow on top of the audit/history substrate:
 - **Users + roles** — DONE. Database logins (argon2id) next to the
   goddns.conf bootstrap admins; `admin` / `user` roles checked in the service
   layer; users page, account page, `goddns user …` CLI; last-admin guard.
-  The `user` role is fail-closed until zone grants land.
-- **Multi-tenant authz / RBAC** (next: per-zone grants for the `user` role):
-  who may read/edit which zones and which record
-  types. goauth (or any SSO/2FA) gates the door; this is the app-level model
+- **Per-zone grants** — DONE. `zone_grants` (user, zone); a `user` manages
+  exactly its granted zones (view, history, record edits, restore, their
+  DDNS tokens), never subzones; `goddns user grant|revoke`, users page.
+- Still open for RBAC: per-record-type limits, read-only grants, grants for
+  API tokens (with the machine API). goauth (or any SSO/2FA) gates the door; this is the app-level model
   behind it, with per-tenant audit + history.
 - **External API / connectors**: a machine API (bearer / mTLS, rate-limited,
   audited) and a **zonecloud.io** connector that syncs zones/records to/from

@@ -3,6 +3,8 @@ package service
 import (
 	"strings"
 
+	"github.com/miekg/dns"
+
 	"github.com/chrismfz/goddns/internal/store"
 )
 
@@ -10,33 +12,82 @@ import (
 const DefaultDDNSTTL = 60
 
 // DDNSList returns every DDNS record (token → hostname binding).
+// DDNSList returns every DDNS record (token → hostname binding); a user-role
+// actor gets only the records in its granted zones.
 func (s *Service) DDNSList(a Actor) ([]store.Record, error) {
-	if err := s.requireAdmin(a); err != nil {
-		return nil, err
+	switch a.Role {
+	case RoleAdmin:
+		return s.store.List()
+	case RoleUser:
+		g, err := s.grantSet(a)
+		if err != nil {
+			return nil, err
+		}
+		all, err := s.store.List()
+		if err != nil {
+			return nil, err
+		}
+		var out []store.Record
+		for _, r := range all {
+			if g[NormZone(r.Zone)] {
+				out = append(out, r)
+			}
+		}
+		return out, nil
 	}
-	return s.store.List()
+	return nil, ErrForbidden
+}
+
+// ddnsRecord loads a record the actor may touch. A user gets ErrForbidden
+// for a record outside its zones and for one that doesn't exist alike, so
+// it can't probe which hostnames other people hold.
+func (s *Service) ddnsRecord(a Actor, fqdn string) (store.Record, error) {
+	rec, err := s.store.Get(strings.TrimSpace(fqdn))
+	if err != nil {
+		if a.Role != RoleAdmin {
+			return store.Record{}, ErrForbidden
+		}
+		return store.Record{}, err
+	}
+	if err := s.authZone(a, rec.Zone); err != nil {
+		return store.Record{}, err
+	}
+	return rec, nil
 }
 
 // DDNSGet returns one DDNS record by hostname.
 func (s *Service) DDNSGet(a Actor, fqdn string) (store.Record, error) {
-	if err := s.requireAdmin(a); err != nil {
-		return store.Record{}, err
-	}
-	return s.store.Get(strings.TrimSpace(fqdn))
+	return s.ddnsRecord(a, fqdn)
 }
 
 // DDNSAdd creates a DDNS record and returns it with its bearer token — the
 // only time the token exists in clear (the store keeps its hash).
+//
+// The hostname must be inside the zone (an out-of-zone token could never
+// update anything). For a user-role actor the zone must be granted and the
+// hostname must belong to it, not to a more specific zone served here.
 func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, string, error) {
-	if err := s.requireAdmin(a); err != nil {
+	fqdn, zone = strings.TrimSpace(fqdn), strings.TrimSpace(zone)
+	if err := s.authZone(a, zone); err != nil {
 		return store.Record{}, "", err
 	}
-	fqdn, zone = strings.TrimSpace(fqdn), strings.TrimSpace(zone)
 	if ttl <= 0 {
 		ttl = DefaultDDNSTTL
 	}
 	if fqdn == "" || zone == "" {
 		return store.Record{}, "", missing("fqdn and zone are required")
+	}
+	if _, ok := dns.IsDomainName(fqdn); !ok || !dns.IsSubDomain(dns.CanonicalName(zone), dns.CanonicalName(fqdn)) {
+		return store.Record{}, "", invalid("%s is not a name inside zone %s", fqdn, zone)
+	}
+	if a.Role != RoleAdmin {
+		inv, err := s.inventory(s.cfg())
+		if err != nil {
+			return store.Record{}, "", err
+		}
+		if owner := ownerZone(inv, fqdn); owner != NormZone(zone) {
+			return store.Record{}, "", invalid("%s belongs to zone %q, not %s", fqdn, owner, NormZone(zone))
+		}
 	}
 	rec, tok, err := s.store.Add(fqdn, zone, uint32(ttl))
 	if err != nil {
@@ -48,7 +99,7 @@ func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, st
 
 // DDNSRotate replaces a record's token; the old one stops working at once.
 func (s *Service) DDNSRotate(a Actor, fqdn string) (store.Record, string, error) {
-	if err := s.requireAdmin(a); err != nil {
+	if _, err := s.ddnsRecord(a, fqdn); err != nil {
 		return store.Record{}, "", err
 	}
 	rec, tok, err := s.store.Rotate(strings.TrimSpace(fqdn))
@@ -61,7 +112,7 @@ func (s *Service) DDNSRotate(a Actor, fqdn string) (store.Record, string, error)
 
 // DDNSDel removes a record (its token stops working at once).
 func (s *Service) DDNSDel(a Actor, fqdn string) error {
-	if err := s.requireAdmin(a); err != nil {
+	if _, err := s.ddnsRecord(a, fqdn); err != nil {
 		return err
 	}
 	fqdn = strings.TrimSpace(fqdn)

@@ -10,9 +10,9 @@ import (
 	"github.com/chrismfz/goddns/internal/store"
 )
 
-// Roles. An admin may do everything; a user may log in and change their own
-// password, and nothing else until zone grants exist (fail-closed: a role that
-// grants nothing yet is safer than one that grants "read everything").
+// Roles. An admin may do everything. A user may change their own password
+// and manage only the zones granted to it (grants.go): view, history, record
+// edits, restore, and the DDNS tokens in those zones. Nothing server-wide.
 const (
 	RoleAdmin = "admin"
 	RoleUser  = "user"
@@ -118,6 +118,7 @@ type UserInfo struct {
 	Config   bool // from goddns.conf: shown, not editable here
 	Shadowed bool // a database user hidden by a goddns.conf user of the same name
 	Created  string
+	Zones    []string // granted zones (they apply while the role is "user")
 }
 
 // Users lists every login: goddns.conf admins first, then the database users.
@@ -137,9 +138,13 @@ func (s *Service) Users(a Actor) ([]UserInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	grants, err := s.store.GrantsAll()
+	if err != nil {
+		return nil, err
+	}
 	for _, u := range db {
 		out = append(out, UserInfo{Name: u.Name, Role: u.Role, Disabled: u.Disabled, Shadowed: conf[u.Name],
-			Created: u.CreatedAt.Format("2006-01-02")})
+			Created: u.CreatedAt.Format("2006-01-02"), Zones: grants[u.Name]})
 	}
 	return out, nil
 }

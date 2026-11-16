@@ -44,24 +44,38 @@ type RecordResult struct {
 // zones and snapshots before writing. CanEdit re-reads the live dynamic flag,
 // so routing can't disagree with the display.
 func (s *Service) EditRecord(a Actor, zone, action, line string, apply bool) (*RecordResult, error) {
-	if err := s.requireAdmin(a); err != nil {
-		return nil, err
-	}
 	zone = strings.TrimSpace(zone)
 	line = strings.TrimSpace(line)
+	if err := s.authZone(a, zone); err != nil {
+		return nil, err
+	}
 	if zone == "" || line == "" || (action != ActionAdd && action != ActionDel) {
 		return nil, missing("missing fields")
 	}
 	cfg := s.cfg()
+	// The record must belong to THIS zone and not a more specific one served
+	// here — the RFC2136 path always enforced that; the static path only
+	// checked "is a subdomain", which let an edit through a.com write into a
+	// separate sub.a.com zone's namespace (a grant on a.com is not one on sub).
+	rr, err := ParseRR(line, zone)
+	if err != nil {
+		return nil, err
+	}
+	if inv, err := s.inventory(cfg); err == nil {
+		if owner := ownerZone(inv, rr.Header().Name); owner != NormZone(zone) {
+			if owner == "" {
+				return nil, invalid("record %q is not inside any zone served here", rr.Header().Name)
+			}
+			return nil, invalid("record %q belongs to the more specific zone %q — edit that zone", rr.Header().Name, owner)
+		}
+	} else if a.Role != RoleAdmin {
+		return nil, err // can't prove the owner zone: fail closed for a granted user
+	}
 	fed := s.fileEditor(cfg)
 	if EditsInPlace(fed, zone) {
 		return s.editStatic(a, cfg, fed, zone, action, line, apply)
 	}
 
-	rr, err := ParseRR(line, zone)
-	if err != nil {
-		return nil, err
-	}
 	ops := []ddns.Op{{Action: opFor(action), RR: rr}}
 	ed := s.recordEditor(cfg)
 	if !apply {
@@ -134,10 +148,10 @@ type RestoreResult struct {
 // forward delta (what the restore would add/remove); apply=true applies it as
 // one signed UPDATE, itself snapshotted-before so a restore is undoable.
 func (s *Service) Restore(a Actor, zone string, id int64, apply bool) (*RestoreResult, error) {
-	if err := s.requireAdmin(a); err != nil {
+	zone = strings.TrimSpace(zone)
+	if err := s.authZone(a, zone); err != nil {
 		return nil, err
 	}
-	zone = strings.TrimSpace(zone)
 	if zone == "" || id <= 0 {
 		return nil, missing("missing fields")
 	}

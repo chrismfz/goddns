@@ -23,6 +23,7 @@ import (
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/filezone"
+	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/recordmut"
 	"github.com/chrismfz/goddns/internal/store"
 	"github.com/chrismfz/goddns/internal/tsig"
@@ -49,6 +50,11 @@ type Store interface {
 	UserSetRole(name, role string) error
 	UserSetDisabled(name string, disabled bool) error
 	UserDel(name string) error
+
+	GrantAdd(user, zone string) error
+	GrantDel(user, zone string) error
+	GrantsFor(user string) ([]string, error)
+	GrantsAll() (map[string][]string, error)
 }
 
 // Actor is who performs a call: the audit line names them and their Role
@@ -74,6 +80,9 @@ type Service struct {
 	// FileEd overrides the static-zone editor builder (tests inject stubs);
 	// nil ⇒ FileEditor.
 	FileEd func(*config.Config) *filezone.Editor
+	// Inv overrides how the BIND inventory is read (tests inject one); nil ⇒
+	// `named-checkconf -p` on cfg.NamedConf.
+	Inv func(*config.Config) (*named.Inventory, error)
 	// Logf is where audit lines go; nil ⇒ log.Printf.
 	Logf func(format string, a ...any)
 }

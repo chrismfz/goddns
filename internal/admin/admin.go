@@ -111,7 +111,12 @@ func (h *Handler) renderOpErr(w http.ResponseWriter, err error) {
 // userPaths are the only pages a non-admin login reaches. Everything else is
 // refused here AND by the service's role check (two layers: some admin pages
 // — logs, the hash helper, proxy stats — read files without the service).
-var userPaths = map[string]bool{"/": true, "/account": true}
+var userPaths = map[string]bool{
+	"/": true, "/account": true,
+	// zone pages: the service scopes every one of these to the user's grants
+	"/zones": true, "/zone": true, "/zone/record": true, "/zone/restore": true,
+	"/ddns/add": true, "/ddns/del": true, "/ddns/rotate": true, "/ddns/help": true,
+}
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ad := &h.cfg().Admin
@@ -153,19 +158,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	a := service.Actor{User: p.Name, Peer: peerStr, Role: p.Role}
 
-	// Layer 4: role. A non-admin reaches only its own home and account pages.
+	// Layer 4: role. A non-admin reaches only its home, account and the zone
+	// pages (which the service scopes to its grants); nothing server-wide.
 	if p.Role != service.RoleAdmin {
 		if !userPaths[r.URL.Path] {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
-		switch r.URL.Path {
-		case "/":
+		if r.URL.Path == "/" {
 			h.handleUserHome(w, r, a)
-		case "/account":
-			h.handleAccount(w, r, a)
+			return
 		}
-		return
 	}
 
 	switch r.URL.Path {
@@ -236,11 +239,15 @@ type snapRow struct {
 func (h *Handler) handleZoneHistory(w http.ResponseWriter, a service.Actor, name string) {
 	user := a.User
 	hist, err := h.svc.History(a, name)
+	if service.IsForbidden(err) {
+		h.renderOpErr(w, err)
+		return
+	}
 	if err != nil {
 		render(w, zoneHistTmpl, map[string]any{"Version": h.version, "User": user, "Name": name, "Error": err.Error()})
 		return
 	}
-	data := map[string]any{"Version": h.version, "User": user, "Active": "zones", "Name": name}
+	data := map[string]any{"Version": h.version, "User": user, "Active": "zones", "Name": name, "Restricted": a.Role != service.RoleAdmin}
 	rows := make([]snapRow, 0, len(hist.Snapshots))
 	for _, s := range hist.Snapshots {
 		rows = append(rows, snapRow{Serial: s.Serial, Taken: s.TakenAt.Format("2006-01-02 15:04"), ID: s.ID})
@@ -282,6 +289,10 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, a service.A
 
 	// Tier 2 (the live per-nameserver SOA probe) only on demand — N DNS queries.
 	v, err := h.svc.Zone(a, name, r.URL.Query().Get("check") == "1")
+	if service.IsForbidden(err) {
+		h.renderOpErr(w, err)
+		return
+	}
 	if err != nil {
 		render(w, zoneViewTmpl, map[string]any{
 			"Version": h.version, "User": user, "Name": name, "Error": err.Error(),
@@ -297,13 +308,15 @@ func (h *Handler) handleZone(w http.ResponseWriter, r *http.Request, a service.A
 		})
 	}
 	data := map[string]any{
-		"Version": h.version, "User": user, "Active": "zones", "Name": name,
+		"Version": h.version, "User": user, "Active": "zones", "Name": name, "Restricted": a.Role != service.RoleAdmin,
 		"InConf": v.Conf != nil, "Records": rows, "Count": len(v.Records), "Auth": v.Auth,
 	}
 	if z := v.Conf; z != nil {
 		data["Kind"] = z.Kind()
 		data["Dynamic"] = z.Dynamic
-		data["Keys"] = strings.Join(z.UpdateKeys, ", ")
+		if a.Role == service.RoleAdmin {
+			data["Keys"] = strings.Join(z.UpdateKeys, ", ")
+		}
 		if v.Editable {
 			data["Editable"] = true
 			data["CSRF"] = h.csrfFor(user)
@@ -417,7 +430,7 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, a service.
 	check := r.URL.Query().Get("check") == "1"
 	zl, err := h.svc.Zones(a)
 	if err != nil {
-		render(w, zonesTmpl, map[string]any{"Version": h.version, "User": user, "Error": err.Error()})
+		render(w, zonesTmpl, map[string]any{"Version": h.version, "User": user, "Error": err.Error(), "Restricted": a.Role != service.RoleAdmin})
 		return
 	}
 
@@ -427,10 +440,10 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, a service.
 		if z.View != "" {
 			hasViews = true
 		}
-		zr[i] = zoneRow{
-			View: z.View, Name: z.Name, Kind: z.Kind(), File: z.Path,
-			Status: named.FileStatus(z.Path, z.Dynamic),
-			Keys:   strings.Join(z.UpdateKeys, ", "), Dynamic: z.Dynamic,
+		zr[i] = zoneRow{View: z.View, Name: z.Name, Kind: z.Kind(), Dynamic: z.Dynamic}
+		if a.Role == service.RoleAdmin { // file paths and key names are server detail
+			zr[i].File, zr[i].Status = z.Path, named.FileStatus(z.Path, z.Dynamic)
+			zr[i].Keys = strings.Join(z.UpdateKeys, ", ")
 		}
 	}
 	// On demand: probe every zone's nameservers for serial agreement. Off by
@@ -455,7 +468,7 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, a service.
 	}
 
 	render(w, zonesTmpl, map[string]any{
-		"Version": h.version, "User": user, "Active": "zones", "Directory": zl.Directory,
+		"Version": h.version, "User": user, "Active": "zones", "Directory": zl.Directory, "Restricted": a.Role != service.RoleAdmin,
 		"Zones": zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
 		"Builtin": zl.Builtin, "Checked": check,
 	})
@@ -550,6 +563,29 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request, peer strin
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
+func stampTime(t time.Time) string {
+	if t.IsZero() || t.Unix() <= 0 {
+		return "never"
+	}
+	return t.Format("2006-01-02 15:04")
+}
+
+// recordViews renders DDNS records for the ddnstable template.
+func recordViews(recs []store.Record) []recordView {
+	var rv []recordView
+	for _, rec := range recs {
+		state := "enabled"
+		if rec.Disabled {
+			state = "disabled"
+		}
+		rv = append(rv, recordView{
+			FQDN: rec.FQDN, Zone: rec.Zone, TTL: rec.TTL, LastIP: rec.LastIP,
+			LastChange: stampTime(rec.LastUpdate), LastSeen: stampTime(rec.LastSeen), State: state,
+		})
+	}
+	return rv
+}
+
 type recordView struct {
 	FQDN, Zone, LastIP, LastChange, LastSeen, State string
 	TTL                                             uint32
@@ -606,23 +642,8 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request, a serv
 		log.Printf("admin: list: %v", err)
 		return
 	}
-	stamp := func(t time.Time) string {
-		if t.IsZero() || t.Unix() <= 0 {
-			return "never"
-		}
-		return t.Format("2006-01-02 15:04")
-	}
-	var rv []recordView
-	for _, rec := range recs {
-		state := "enabled"
-		if rec.Disabled {
-			state = "disabled"
-		}
-		rv = append(rv, recordView{
-			FQDN: rec.FQDN, Zone: rec.Zone, TTL: rec.TTL, LastIP: rec.LastIP,
-			LastChange: stamp(rec.LastUpdate), LastSeen: stamp(rec.LastSeen), State: state,
-		})
-	}
+	stamp := stampTime
+	rv := recordViews(recs)
 
 	// Which vhosts goddns owns (proxy.d/ fragments) — those get edit/del
 	// controls; base-config vhosts stay read-only. Best-effort: on any error
@@ -928,6 +949,10 @@ func (h *Handler) renderHelp(w http.ResponseWriter, rec store.Record, token stri
 
 func (h *Handler) handleHelp(w http.ResponseWriter, r *http.Request, a service.Actor) {
 	rec, err := h.svc.DDNSGet(a, r.URL.Query().Get("fqdn"))
+	if service.IsForbidden(err) {
+		h.renderOpErr(w, err)
+		return
+	}
 	if err != nil {
 		http.Error(w, "no such record", http.StatusNotFound)
 		return
@@ -951,6 +976,10 @@ func (h *Handler) handleRotate(w http.ResponseWriter, r *http.Request, a service
 		return
 	}
 	rec, tok, err := h.svc.DDNSRotate(a, fqdn)
+	if service.IsForbidden(err) {
+		h.renderOpErr(w, err)
+		return
+	}
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -976,7 +1005,10 @@ func (h *Handler) handleDel(w http.ResponseWriter, r *http.Request, a service.Ac
 		})
 		return
 	}
-	if err := h.svc.DDNSDel(a, fqdn); err != nil {
+	if err := h.svc.DDNSDel(a, fqdn); service.IsForbidden(err) {
+		h.renderOpErr(w, err)
+		return
+	} else if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

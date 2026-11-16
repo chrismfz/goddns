@@ -31,13 +31,16 @@ func (s *Service) Inventory(a Actor) (*named.Inventory, error) {
 	if err := s.requireAdmin(a); err != nil {
 		return nil, err
 	}
-	return inventory(s.cfg())
+	return s.inventory(s.cfg())
 }
 
 // inventory reads named.conf as cfg names it. Calls that use the config for
 // more than this take ONE snapshot and pass it down, so a hot-reload mid-call
 // can't mix two configs.
-func inventory(cfg *config.Config) (*named.Inventory, error) {
+func (s *Service) inventory(cfg *config.Config) (*named.Inventory, error) {
+	if s.Inv != nil {
+		return s.Inv(cfg)
+	}
 	nc := cfg.NamedConf
 	if nc == "" {
 		nc = "/etc/named.conf" // config.Load sets it; this covers a bare Config
@@ -57,15 +60,30 @@ func server(cfg *config.Config) string {
 	return "127.0.0.1:53"
 }
 
-// Zones lists the zones BIND serves plus the TSIG health findings.
+// Zones lists the zones BIND serves plus the TSIG health findings. A
+// user-role actor gets only its granted zones, and none of the server-wide
+// detail (directory, TSIG keys, findings).
 func (s *Service) Zones(a Actor) (*ZoneList, error) {
-	if err := s.requireAdmin(a); err != nil {
-		return nil, err
+	if a.Role != RoleAdmin && a.Role != RoleUser {
+		return nil, ErrForbidden
 	}
 	cfg := s.cfg()
-	inv, err := inventory(cfg)
+	inv, err := s.inventory(cfg)
 	if err != nil {
 		return nil, err
+	}
+	if a.Role == RoleUser {
+		g, err := s.grantSet(a)
+		if err != nil {
+			return nil, err
+		}
+		zl := &ZoneList{}
+		for _, z := range inv.UserZones() {
+			if g[NormZone(z.Name)] {
+				zl.Zones = append(zl.Zones, z)
+			}
+		}
+		return zl, nil
 	}
 	zl := &ZoneList{Directory: inv.Directory, Zones: inv.UserZones()}
 	zl.Builtin = len(inv.Zones) - len(zl.Zones)
@@ -91,8 +109,13 @@ type NSVerdict struct {
 // host with many zones can't be made to open a flood of sockets from one call.
 // The result is index-aligned with zones.
 func (s *Service) NSVerdicts(a Actor, zones []named.Zone) ([]NSVerdict, error) {
-	if err := s.requireAdmin(a); err != nil {
-		return nil, err
+	for _, z := range zones {
+		if err := s.authZone(a, z.Name); err != nil {
+			return nil, err
+		}
+	}
+	if a.Role != RoleAdmin && a.Role != RoleUser { // an empty list still needs a role
+		return nil, ErrForbidden
 	}
 	srv := server(s.cfg())
 	out := make([]NSVerdict, len(zones))
@@ -159,7 +182,7 @@ type ZoneView struct {
 // what the server answers, including anything written dynamically. Read-only.
 // liveNS adds the per-nameserver SOA probe.
 func (s *Service) Zone(a Actor, name string, liveNS bool) (*ZoneView, error) {
-	if err := s.requireAdmin(a); err != nil {
+	if err := s.authZone(a, name); err != nil {
 		return nil, err
 	}
 	cfg := s.cfg()
@@ -168,7 +191,7 @@ func (s *Service) Zone(a Actor, name string, liveNS bool) (*ZoneView, error) {
 	// named.conf is best-effort: it supplies the dynamic flag and the TSIG
 	// keys to authenticate the transfer. Without it we still try unauthenticated.
 	inv := &named.Inventory{}
-	if i, err := inventory(cfg); err == nil {
+	if i, err := s.inventory(cfg); err == nil {
 		inv = i
 	}
 	z := inv.ZoneByName(name)
@@ -199,7 +222,7 @@ func (s *Service) Zone(a Actor, name string, liveNS bool) (*ZoneView, error) {
 // canEditDynamic reports whether goddns may write the named zone over RFC2136
 // (dynamic + a held key). Best-effort: unreadable named.conf ⇒ false.
 func (s *Service) canEditDynamic(cfg *config.Config, name string) bool {
-	inv, err := inventory(cfg)
+	inv, err := s.inventory(cfg)
 	if err != nil {
 		return false
 	}
@@ -228,7 +251,7 @@ type ZoneHistory struct {
 // History returns the snapshot list (up to 200) and the diff of the most
 // recent change. Snapshots are captured by the serve poller.
 func (s *Service) History(a Actor, name string) (*ZoneHistory, error) {
-	if err := s.requireAdmin(a); err != nil {
+	if err := s.authZone(a, name); err != nil {
 		return nil, err
 	}
 	snaps, err := s.store.SnapshotList(name, 200)

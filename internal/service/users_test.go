@@ -61,14 +61,16 @@ func TestUserRoleIsFailClosed(t *testing.T) {
 	none := Actor{User: "x"} // no role at all
 	for _, a := range []Actor{u, none} {
 		checks := map[string]error{}
-		_, checks["Zones"] = s.Zones(a)
+		if a.Role == "" { // the user role gets these scoped (grants_test.go)
+			_, checks["Zones"] = s.Zones(a)
+			_, checks["NSVerdicts"] = s.NSVerdicts(a, nil)
+			_, checks["DDNSList"] = s.DDNSList(a)
+		}
 		_, checks["Zone"] = s.Zone(a, "example", false)
 		_, checks["History"] = s.History(a, "example")
 		_, checks["Inventory"] = s.Inventory(a)
-		_, checks["NSVerdicts"] = s.NSVerdicts(a, nil)
 		_, checks["EditRecord"] = s.EditRecord(a, "example", ActionAdd, "a 60 IN A 1.1.1.1", true)
 		_, checks["Restore"] = s.Restore(a, "example", 1, true)
-		_, checks["DDNSList"] = s.DDNSList(a)
 		_, checks["DDNSGet"] = s.DDNSGet(a, "x")
 		_, _, checks["DDNSAdd"] = s.DDNSAdd(a, "h.example", "example", 0)
 		_, _, checks["DDNSRotate"] = s.DDNSRotate(a, "h.example")

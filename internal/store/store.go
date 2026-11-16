@@ -92,6 +92,9 @@ func Open(path string) (*Store, error) {
 	if err := migrateUsers(db); err != nil {
 		return nil, err
 	}
+	if err := migrateGrants(db); err != nil {
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 

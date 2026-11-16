@@ -35,7 +35,7 @@ Usage:
   goddns token rotate -fqdn home.myip.gr [-config ...]  # new token, old stops
   goddns token del  -fqdn home.myip.gr [-config ...]
   goddns passwd -user chris        # bcrypt entry for proxy basic_auth / [admin] users
-  goddns user list|add|del|passwd|role|disable|enable ...  # admin UI logins (admin / user roles)
+  goddns user list|add|del|passwd|role|disable|enable|grant|revoke ...  # admin UI logins, roles, zone grants
   goddns rotate-key [name]         # rotate a TSIG key in tsig_keys_file + rndc reconfig
   goddns record add|del|delset ... # edit records (dynamic: RFC2136; static: in-place file edit if enabled)
   goddns zone enable <zone>        # check a static zone is safe to add to editable_zones
