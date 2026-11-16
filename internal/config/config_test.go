@@ -474,7 +474,8 @@ func TestTLSNoneListenRules(t *testing.T) {
 	}{
 		{`listen = "127.0.0.1:8245"`, true},
 		{`listen = "[::1]:8245"`, true},
-		{`listen = "localhost:8245"`, true},
+		{`listen = "localhost:8245"`, false}, // names are not trusted to be loopback
+		{`listen = ""`, false},
 		{`listen = "unix:/run/goddns-serve/goddns.sock"`, true},
 		{`listen = ":8245"`, false},           // every interface: tokens in clear text
 		{`listen = "84.54.49.3:8245"`, false}, // public address
@@ -502,4 +503,14 @@ func TestTLSNoneListenRules(t *testing.T) {
 func loadString(t *testing.T, body string) (*Config, error) {
 	t.Helper()
 	return Load(write(t, body))
+}
+
+func TestIgnoredTLSSettings(t *testing.T) {
+	c, err := loadString(t, "tls_mode = \"none\"\nlisten = \"127.0.0.1:8245\"\ncert_file = \"/x\"\nkey_file = \"/y\"\nacme_domain = \"a.example\"\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.IgnoredTLSSettings(), ","); got != "cert_file/key_file,acme_domain" {
+		t.Fatalf("ignored: %q", got)
+	}
 }

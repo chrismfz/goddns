@@ -258,6 +258,9 @@ func Load(path string) (*Config, error) {
 			UpdateLogAll, UpdateLogChanges, UpdateLogUpdates, UpdateLogNone, c.UpdateLog)
 	}
 
+	if strings.TrimSpace(c.Listen) == "" {
+		return nil, fmt.Errorf("listen must not be empty (e.g. \":8245\")")
+	}
 	if strings.HasPrefix(c.Listen, UnixListenPrefix) && c.TLSMode != TLSNone {
 		return nil, fmt.Errorf("listen %q: a unix socket needs tls_mode = \"none\" (TLS terminated by the proxy in front)", c.Listen)
 	}
@@ -477,6 +480,23 @@ func (c *Config) IsTrusted(ip net.IP) bool {
 	return false
 }
 
+// IgnoredTLSSettings names the TLS settings that are set but do nothing
+// because tls_mode is "none" (a startup warning, so switching modes doesn't
+// silently stop certificate issuance/renewal someone relied on).
+func (c *Config) IgnoredTLSSettings() []string {
+	if c.TLSMode != TLSNone {
+		return nil
+	}
+	var out []string
+	if c.CertFile != "" || c.KeyFile != "" {
+		out = append(out, "cert_file/key_file")
+	}
+	if c.ACMEDomain != "" {
+		out = append(out, "acme_domain")
+	}
+	return out
+}
+
 // UnixListen returns the socket path when listen is "unix:<path>".
 func (c *Config) UnixListen() (string, bool) {
 	if p, ok := strings.CutPrefix(c.Listen, UnixListenPrefix); ok {
@@ -499,13 +519,12 @@ func plainListenOK(listen string) error {
 	if err != nil {
 		return fmt.Errorf("listen %q: %v", listen, err)
 	}
-	if host == "localhost" {
-		return nil
-	}
+	// A literal loopback IP only: a name like "localhost" binds whatever it
+	// resolves to, and a broken hosts file can map it to a public address.
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return nil
 	}
-	return fmt.Errorf("listen %q: tls_mode \"none\" sends tokens in clear text, so it may only listen on a loopback address (127.0.0.1:8245, [::1]:8245) or a unix socket (unix:/run/goddns-serve/goddns.sock)", listen)
+	return fmt.Errorf("listen %q: tls_mode \"none\" sends tokens in clear text, so it may only listen on a loopback address given as an IP (127.0.0.1:8245, [::1]:8245) or a unix socket (unix:/run/goddns-serve/goddns.sock)", listen)
 }
 
 // NeedsRestart reports whether switching from old to new requires a process

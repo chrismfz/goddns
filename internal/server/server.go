@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/chrismfz/goddns/internal/config"
@@ -108,18 +109,19 @@ func (s *Server) Run() error {
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
-		TLSConfig: &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			GetCertificate: s.GetCert,
-		},
 	}
 	log.Printf("goddns listening on %s (tls=%s dns=%s key=%s)",
 		cfg.Listen, cfg.TLSMode, cfg.DNSServer, cfg.TSIGName)
 	if cfg.TLSMode == config.TLSNone {
 		log.Printf("tls_mode = \"none\": serving plain HTTP on %s — TLS must be terminated by the reverse proxy in front; "+
 			"its X-Forwarded-For names the client", cfg.Listen)
+		if ignored := cfg.IgnoredTLSSettings(); len(ignored) > 0 {
+			log.Printf("WARNING: tls_mode = \"none\" ignores %s — no certificate is loaded, issued or renewed",
+				strings.Join(ignored, ", "))
+		}
 		return srv.Serve(ln)
 	}
+	srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: s.GetCert}
 	// ServeTLS with empty paths -> uses GetCertificate.
 	return srv.ServeTLS(ln, "", "")
 }
@@ -138,12 +140,21 @@ func Listen(cfg *config.Config) (net.Listener, error) {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return nil, fmt.Errorf("listen %s: exists and is not a socket", path)
 		}
+		// Only a DEAD socket is stale: if something answers, another goddns
+		// is serving it, and unlinking it would leave that one unreachable.
+		if c, err := net.DialTimeout("unix", path, 500*time.Millisecond); err == nil {
+			c.Close()
+			return nil, fmt.Errorf("listen %s: in use (another goddns is serving it)", path)
+		}
 		if err := os.Remove(path); err != nil {
 			return nil, fmt.Errorf("listen %s: remove stale socket: %w", path, err)
 		}
 	}
 	ln, err := net.Listen("unix", path)
 	if err != nil {
+		if errors.Is(err, syscall.EROFS) || errors.Is(err, syscall.EACCES) {
+			return nil, fmt.Errorf("%w — the packaged unit (ProtectSystem=strict) can only create the socket under /run/goddns-serve/", err)
+		}
 		return nil, err
 	}
 	if err := os.Chmod(path, 0o666); err != nil {
@@ -193,6 +204,12 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 					return cand, nil
 				}
 			}
+		}
+		// Behind our own reverse proxy the peer is the proxy, never the
+		// client: falling back to it would point every record at 127.0.0.1
+		// when the proxy doesn't send X-Forwarded-For.
+		if cfg.TLSMode == config.TLSNone {
+			return nil, fmt.Errorf("no client address: the reverse proxy must send X-Forwarded-For (or the client ?myip=)")
 		}
 	}
 	if peer == nil {

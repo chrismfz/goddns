@@ -274,8 +274,9 @@ DDNS endpoint as **plain HTTP** to it:
     listen   = "unix:/run/goddns-serve/goddns.sock"   # or "127.0.0.1:8245"
 
 - **The token is in the URL**, so plain HTTP is only allowed where the network
-  can't reach it: a **unix socket** (absolute path) or a **loopback** address.
-  `":8245"` or a public address is refused at config load.
+  can't reach it: a **unix socket** (absolute path) or a **loopback IP**
+  (`127.0.0.1`, `[::1]` — not a name like `localhost`, which could resolve
+  elsewhere). `":8245"` or a public address is refused at config load.
 - The packaged unit creates `/run/goddns-serve` for the socket. The socket is
   `0666` so the proxy can connect — no wider than plain HTTP on loopback, and
   every update still needs its token.
@@ -283,8 +284,12 @@ DDNS endpoint as **plain HTTP** to it:
   entry not in `trusted_proxies`), so make the proxy set it. With
   `tls_mode = "none"` the connection peer is the proxy by definition and is
   trusted without listing it; a client can always name its IP with `?myip=`
-  anyway. Over a socket without `X-Forwarded-For` and without `?myip=` there
-  is no IP to register and the answer is `badip`.
+  anyway. Without `X-Forwarded-For` and without `?myip=` the answer is
+  `badip` — never the proxy's own address, so a proxy missing the header
+  can't point every record at 127.0.0.1.
+- A socket another goddns is still serving is refused ("in use"), not
+  replaced. `cert_file`/`acme_*` settings do nothing in this mode; goddns
+  warns at startup if they are set.
 - It can't be combined with `proxy_enabled`: the built-in proxy and the admin
   UI are TLS-only.
 
