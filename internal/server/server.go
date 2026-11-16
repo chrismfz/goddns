@@ -16,6 +16,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -91,11 +92,17 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// Run blocks serving HTTPS on the listen address from the startup config.
+// Run blocks serving the DDNS endpoint on the listen address from the
+// startup config: HTTPS, or plain HTTP with tls_mode = "none" (a TLS-
+// terminating reverse proxy in front, on loopback or a unix socket — config
+// validation allows nothing else).
 func (s *Server) Run() error {
 	cfg := s.Cfg()
+	ln, err := Listen(cfg)
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{
-		Addr:              cfg.Listen,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -108,8 +115,42 @@ func (s *Server) Run() error {
 	}
 	log.Printf("goddns listening on %s (tls=%s dns=%s key=%s)",
 		cfg.Listen, cfg.TLSMode, cfg.DNSServer, cfg.TSIGName)
-	// ListenAndServeTLS with empty paths -> uses GetCertificate.
-	return srv.ListenAndServeTLS("", "")
+	if cfg.TLSMode == config.TLSNone {
+		log.Printf("tls_mode = \"none\": serving plain HTTP on %s — TLS must be terminated by the reverse proxy in front; "+
+			"its X-Forwarded-For names the client", cfg.Listen)
+		return srv.Serve(ln)
+	}
+	// ServeTLS with empty paths -> uses GetCertificate.
+	return srv.ServeTLS(ln, "", "")
+}
+
+// Listen opens the DDNS listener: "unix:<path>" is a unix socket (a stale
+// socket file from a previous run is replaced; anything else at the path is
+// refused), mode 0666 — a local proxy must be able to connect, and plain
+// HTTP on loopback is just as reachable from the host; the token still
+// guards every update. Anything else is a TCP address.
+func Listen(cfg *config.Config) (net.Listener, error) {
+	path, ok := cfg.UnixListen()
+	if !ok {
+		return net.Listen("tcp", cfg.Listen)
+	}
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&os.ModeSocket == 0 {
+			return nil, fmt.Errorf("listen %s: exists and is not a socket", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, fmt.Errorf("listen %s: remove stale socket: %w", path, err)
+		}
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		ln.Close()
+		return nil, fmt.Errorf("listen %s: chmod: %w", path, err)
+	}
+	return ln, nil
 }
 
 // clientIP returns the source IP to register. Priority:
@@ -137,7 +178,12 @@ func (s *Server) clientIP(r *http.Request, override string) (net.IP, error) {
 		host = r.RemoteAddr
 	}
 	peer := net.ParseIP(host)
-	if peer != nil && cfg.IsTrusted(peer) {
+	// With tls_mode = "none" the connection can only come from the local
+	// reverse proxy (loopback or a unix socket, which has no peer IP), so it
+	// is trusted to name the client. Spoofing it gains nothing a token
+	// holder doesn't already have: ?myip= sets the IP explicitly anyway.
+	proxied := cfg.TLSMode == config.TLSNone || (peer != nil && cfg.IsTrusted(peer))
+	if proxied {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
 			// Walk right-to-left; first hop that is NOT a trusted proxy is the client.

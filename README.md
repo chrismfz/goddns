@@ -200,7 +200,8 @@ also move under `/var/named/dynamic/` (journal, see Troubleshooting).
 
 ## TLS
 
-Three modes, chosen with `tls_mode`:
+Three modes, chosen with `tls_mode` (plus `none`, for running behind your own
+TLS-terminating reverse proxy — see below):
 
 - **`files`** (default): point `cert_file`/`key_file` at an existing cert,
   e.g. the wildcard you already distribute via rrsync, or a certbot live
@@ -263,6 +264,36 @@ served for every SNI, matching or not. If you want the wildcard for the
 common case **and** automatic per-host issuance for names it doesn't cover,
 use `tls_mode = "hybrid"` (above); pure per-host issuance is what
 `tls_mode = "acme"` does.
+
+### Behind your own reverse proxy (`tls_mode = "none"`)
+
+If nginx/Caddy/HAProxy already terminates TLS for you, goddns can serve the
+DDNS endpoint as **plain HTTP** to it:
+
+    tls_mode = "none"
+    listen   = "unix:/run/goddns-serve/goddns.sock"   # or "127.0.0.1:8245"
+
+- **The token is in the URL**, so plain HTTP is only allowed where the network
+  can't reach it: a **unix socket** (absolute path) or a **loopback** address.
+  `":8245"` or a public address is refused at config load.
+- The packaged unit creates `/run/goddns-serve` for the socket. The socket is
+  `0666` so the proxy can connect — no wider than plain HTTP on loopback, and
+  every update still needs its token.
+- **The client's IP comes from the proxy's `X-Forwarded-For`** (the rightmost
+  entry not in `trusted_proxies`), so make the proxy set it. With
+  `tls_mode = "none"` the connection peer is the proxy by definition and is
+  trusted without listing it; a client can always name its IP with `?myip=`
+  anyway. Over a socket without `X-Forwarded-For` and without `?myip=` there
+  is no IP to register and the answer is `badip`.
+- It can't be combined with `proxy_enabled`: the built-in proxy and the admin
+  UI are TLS-only.
+
+nginx example:
+
+    location /update/   { proxy_pass http://unix:/run/goddns-serve/goddns.sock;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }
+    location /nic/update { proxy_pass http://unix:/run/goddns-serve/goddns.sock;
+                          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }
 
 ## Admin web UI (optional)
 
