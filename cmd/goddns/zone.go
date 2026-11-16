@@ -18,6 +18,7 @@ import (
 	"github.com/chrismfz/goddns/internal/filezone"
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
+	"github.com/chrismfz/goddns/internal/service"
 )
 
 // cmdZoneHistory handles `goddns zone <name> -history` (list snapshots) and
@@ -122,12 +123,7 @@ func cmdZoneEnable(args []string) {
 	fmt.Println("Then `goddns record add|del|delset` edits it in place (checkzone + backup + rndc reload).")
 }
 
-func fileEditor(cfg *config.Config) *filezone.Editor {
-	return &filezone.Editor{
-		NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
-		Editable: cfg.EditableZones, Keep: cfg.HistoryKeep,
-	}
-}
+func fileEditor(cfg *config.Config) *filezone.Editor { return service.FileEditor(cfg) }
 
 func loadCfgArg(args []string, usage string, n int) (*config.Config, []string) {
 	fs := flag.NewFlagSet("zone", flag.ExitOnError)

@@ -104,6 +104,13 @@ The big step that changes the threat model — goddns now holds broad write powe
 and becomes a high-value target, so it needs scoped keys, rate limits and an
 approval workflow on top of the audit/history substrate:
 
+- **Service layer (the one funnel)** — DONE (`internal/service`). Every
+  operator action (zone inventory/view/history, record add/del with
+  ownership routing, snapshot restore, DDNS token CRUD, proxy.d/ vhost CRUD)
+  lives there once, transport-agnostic, auditing as an `Actor`. The admin UI
+  is a thin HTTP front-end over it; the CLI shares its editor builders. The
+  RBAC check and the machine API below go through it, so no surface can skip
+  the rules.
 - **Panel backends** (see "Write backends beyond RFC2136" below): cPanel
   whmapi1/UAPI, DirectAdmin, Virtualmin — so panel-managed zones get CRUD
   through the panel's own API (honouring the invariant), letting goddns run as a
