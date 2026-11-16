@@ -140,7 +140,7 @@ func TestAPIAuthAndScopes(t *testing.T) {
 	// the audit names the token
 	found := false
 	for _, l := range *f.audit {
-		if strings.Contains(l, "user=alice via=api:ci peer=203.0.113.10 ddns-add") {
+		if strings.Contains(l, "user=alice auth=api:ci peer=203.0.113.10 ddns-add") {
 			found = true
 		}
 	}

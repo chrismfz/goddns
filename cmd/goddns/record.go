@@ -111,6 +111,7 @@ func cmdRecord(args []string) {
 	if err != nil {
 		fatal("apply: %v", err)
 	}
+	cliAudit(cfg, "record-%s zone=%s ops=%q key=%s snapshot=%d via=cli", sub, res.Zone, opsText(ops), res.Key, res.Snapshot)
 	fmt.Printf("applied to %s (key %s)", res.Zone, res.Key)
 	if res.Snapshot != 0 {
 		fmt.Printf(" — snapshot #%d taken; `goddns record restore %s` to roll back", res.Snapshot, res.Zone)
@@ -177,6 +178,7 @@ func cmdRecordFile(cfg *config.Config, zone string, ops []ddns.Op, yes bool) {
 	if err != nil {
 		fatal("apply: %v", err)
 	}
+	cliAudit(cfg, "record-edit zone=%s ops=%q serial=%d backup=%s via=cli", zone, opsText(ops), res.Serial, res.Backup)
 	fmt.Printf("edited %s (serial %d) — backup %s\n", res.File, res.Serial, res.Backup)
 }
 
@@ -251,6 +253,7 @@ func cmdRecordRestore(cfg *config.Config, rest []string, yes bool) {
 	if err != nil {
 		fatal("restore: %v", err)
 	}
+	cliAudit(cfg, "record-restore zone=%s snapshot=%d key=%s pre-snapshot=%d via=cli", res.Zone, id, res.Key, res.Snapshot)
 	fmt.Printf("restored %s (key %s)", res.Zone, res.Key)
 	if res.Snapshot != 0 {
 		fmt.Printf(" — pre-restore snapshot #%d taken; this restore is itself undoable", res.Snapshot)
@@ -284,4 +287,31 @@ func recordUsage() {
   goddns record restore <zone> [snapshot-id]    roll back to a snapshot (no id = list them)
     -y    apply without the confirmation prompt
 `)
+}
+
+// cliAudit writes one admin-audit line for a console edit, like the UI's
+// (to stderr and the daemon's log_file), as cli:<unix user>.
+func cliAudit(cfg *config.Config, format string, a ...any) {
+	svc := service.New(func() *config.Config { return cfg }, nil)
+	logf, done := cliAuditLog(cfg)
+	defer done()
+	svc.Logf = logf
+	svc.Audit(cliActor(), format, a...)
+}
+
+// opsText renders record ops for an audit line ("+rr" / "-rr", "-*name TYPE").
+func opsText(ops []ddns.Op) string {
+	var parts []string
+	for _, op := range ops {
+		switch op.Action {
+		case ddns.AddRR:
+			parts = append(parts, "+"+op.RR.String())
+		case ddns.DelRRset:
+			h := op.RR.Header()
+			parts = append(parts, "-*"+h.Name+" "+dns.TypeToString[h.Rrtype])
+		default:
+			parts = append(parts, "-"+op.RR.String())
+		}
+	}
+	return strings.Join(parts, "; ")
 }

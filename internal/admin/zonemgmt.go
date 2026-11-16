@@ -93,10 +93,11 @@ const zonePages = `
 <pre style="margin:.4rem 0">{{.P.Content}}</pre>
 <div>added to the managed include:</div><pre style="margin:.4rem 0">{{.P.Stanza}}</pre>
 {{if .Assign}}<div>assigned to <b>{{.Assign}}</b> once created.</div>{{end}}
-{{if .P.Parent}}<div class="warn" style="margin-top:.6rem">This zone is inside <b>{{.P.Parent}}</b>, served here too. BIND answers from the most specific zone, so these records of {{.P.Parent}} stop being answered:</div>
+{{if and .P.Parent (not .P.ShadowChecked)}}<div class="warn" style="margin-top:.6rem">This zone is inside <b>{{.P.Parent}}</b>, served here too, which couldn't be read to check what it would shadow or whether it delegates {{.P.Zone}} — check by hand.</div>
+{{else if .P.Parent}}<div class="warn" style="margin-top:.6rem">This zone is inside <b>{{.P.Parent}}</b>, served here too. BIND answers from the most specific zone, so these records of {{.P.Parent}} stop being answered:</div>
 {{if .P.Shadowed}}<pre style="margin:.4rem 0">{{range .P.Shadowed}}{{.}}
-{{end}}</pre>{{else}}<div class="muted">(none found)</div>{{end}}
-{{if not .P.Delegated}}<div class="warn">{{.P.Parent}} has no NS records for {{.P.Zone}}: resolvers on the internet won't find it until you add the delegation there.</div>{{end}}{{end}}
+{{end}}</pre>{{else}}<div class="muted">(none)</div>{{end}}
+{{if not .P.Delegated}}<div class="warn">{{.P.Parent}} has no NS records for {{.P.Zone}}: resolvers outside this server won't find it until you add the delegation there.</div>{{end}}{{end}}
 {{else}}
 <div>removed from the managed include:</div><pre style="margin:.4rem 0">{{.P.Stanza}}</pre>
 <div>its file <code>{{.P.File}}</code> is moved aside to <code>….deleted-&lt;time&gt;</code>, not deleted; every grant on the zone is removed.</div>

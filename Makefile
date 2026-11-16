@@ -85,8 +85,9 @@ update: ## Update all dependencies
 vet: ## Run go vet on all packages
 	go vet ./...
 
-test: ## Run unit tests
+test: ## Run unit tests (+ the packaging script check)
 	go test ./...
+	sh scripts/postinst_test.sh
 
 # -------------------------------
 # Build

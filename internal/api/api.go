@@ -259,7 +259,7 @@ func writeOpErr(w http.ResponseWriter, c ctxActor, err error) {
 	case service.IsInvalid(err):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	default:
-		log.Printf("api: user=%s via=%s: %v", c.a.User, c.a.Via, err)
+		log.Printf("api: user=%s auth=%s: %v", c.a.User, c.a.Via, err)
 		msg := "operation failed (details in the server log)"
 		if c.a.Role == service.RoleAdmin {
 			msg = err.Error()
@@ -361,7 +361,7 @@ func (h *Handler) zoneCreate(w http.ResponseWriter, r *http.Request, c ctxActor)
 		code = http.StatusOK
 	}
 	writeJSON(w, code, map[string]any{"zone": p.Zone, "applied": !in.DryRun, "file": p.File, "stanza": p.Stanza,
-		"content": p.Content, "parent": p.Parent, "shadowed": p.Shadowed, "delegated": p.Delegated, "assigned_to": p.AssignedTo,
+		"content": p.Content, "parent": p.Parent, "shadow_checked": p.ShadowChecked, "shadowed": p.Shadowed, "delegated": p.Delegated, "assigned_to": p.AssignedTo,
 		"warning": p.Warning})
 }
 

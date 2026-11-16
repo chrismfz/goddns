@@ -186,3 +186,61 @@ func TestCreateRefusesViews(t *testing.T) {
 		t.Fatalf("views: %v", err)
 	}
 }
+
+func TestInitCreatesEmptyIncludeOnce(t *testing.T) {
+	r := newRig(t)
+	created, err := r.m.Init()
+	if err != nil || !created {
+		t.Fatalf("init: %v %v", created, err)
+	}
+	if z, err := ManagedZones(r.m.Include); err != nil || len(z) != 0 {
+		t.Fatalf("a fresh include must parse as empty: %v %v", z, err)
+	}
+	os.WriteFile(r.m.Include, []byte("zone \"keep.example\" { type master; file \"x\"; };\n"), 0o640)
+	if created, _ := r.m.Init(); created {
+		t.Fatal("init overwrote an existing include")
+	}
+	if z, _ := ManagedZones(r.m.Include); len(z) != 1 {
+		t.Fatal("existing include changed")
+	}
+}
+
+func TestCreateUsesDefaultHostmaster(t *testing.T) {
+	r := newRig(t)
+	r.m.Hostmaster = "admin@example.com"
+	p, err := r.m.PlanCreate(CreateRequest{Zone: "h.example.org", NS: []string{"ns1.example.com"}})
+	if err != nil || !strings.Contains(p.Content, " admin.example.com. ") {
+		t.Fatalf("hostmaster: %v\n%s", err, p.Content)
+	}
+}
+
+func TestExplainCheckConf(t *testing.T) {
+	r := newRig(t) // named.conf includes r.m.Include, which doesn't exist yet
+	bind := errors.New("named-checkconf -p: named.conf:2: parsing failed: file not found")
+	if err := ExplainCheckConf(bind, r.m.NamedConf, r.m.Include); !strings.Contains(err.Error(), "goddns zone init") {
+		t.Fatalf("our missing include: %v", err)
+	}
+	other := filepath.Join(t.TempDir(), "other.conf") // not referenced from named.conf
+	if err := ExplainCheckConf(bind, r.m.NamedConf, other); err != bind {
+		t.Fatalf("another missing file must not be blamed on goddns: %v", err)
+	}
+	r.m.Init()
+	if err := ExplainCheckConf(bind, r.m.NamedConf, r.m.Include); err != bind {
+		t.Fatalf("include exists: %v", err)
+	}
+	syntax := errors.New("named-checkconf -p: syntax error")
+	if ExplainCheckConf(syntax, r.m.NamedConf, r.m.Include) != syntax || ExplainCheckConf(nil, "", "") != nil {
+		t.Fatal("unrelated errors / nil must pass through")
+	}
+}
+
+func TestInitRefusesMissingDirectory(t *testing.T) {
+	r := newRig(t)
+	r.m.Include = filepath.Join(t.TempDir(), "no-such-dir", "goddns-zones.conf")
+	if _, err := r.m.Init(); !IsRefused(err) {
+		t.Fatalf("missing parent dir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(r.m.Include)); !os.IsNotExist(err) {
+		t.Fatal("Init created the directory")
+	}
+}

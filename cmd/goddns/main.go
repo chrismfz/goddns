@@ -42,6 +42,7 @@ Usage:
   goddns record add|del|delset ... # edit records (dynamic: RFC2136; static: in-place file edit if enabled)
   goddns zone enable <zone>        # check a static zone is safe to add to editable_zones
   goddns zoned                     # privileged root helper for web static-zone edits (systemd: goddns-zoned)
+  goddns zone init                 # create the (empty) managed include; then include it from named.conf
   goddns zone create <zone> [-ns a,b] [-assign user] | delete <zone>  # zones goddns manages (managed_include)
   goddns zone edit|import|export <zone> [file]  # raw whole-file edit / import / export of an enabled static zone
   goddns vhost list|set|del ...    # manage reverse-proxy vhosts (proxy.d/ fragments)

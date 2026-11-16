@@ -49,7 +49,7 @@ func (s *Service) inventory(cfg *config.Config) (*named.Inventory, error) {
 	}
 	data, err := named.CheckConf(nc)
 	if err != nil {
-		return nil, err
+		return nil, zonemgr.ExplainCheckConf(err, nc, cfg.ManagedInclude)
 	}
 	return named.Parse(data), nil
 }

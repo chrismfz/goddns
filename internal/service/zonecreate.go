@@ -22,11 +22,12 @@ type ZoneChange struct {
 	// Create: the zone served here that contains the new one, the parent's
 	// records the new zone will shadow (BIND answers from the most specific
 	// zone), and whether the parent delegates it (NS at the new name).
-	Parent     string
-	Shadowed   []string
-	Delegated  bool
-	AssignedTo string
-	Warning    string // the zone was created, but something after it failed (e.g. the assignment)
+	Parent        string
+	ShadowChecked bool // the parent could be read; Shadowed/Delegated are only meaningful when true
+	Shadowed      []string
+	Delegated     bool
+	AssignedTo    string
+	Warning       string // the zone was created, but something after it failed (e.g. the assignment)
 }
 
 // ZoneManager is the production zone creator/deleter for cfg (tests swap
@@ -103,7 +104,7 @@ func (s *Service) ZoneCreate(a Actor, zone string, ns []string, assignTo string,
 	out := &ZoneChange{Zone: p.Zone, File: p.File, Stanza: p.Stanza, Content: p.Content, Parent: p.Parent}
 	if !apply {
 		if p.Parent != "" { // the preview's job; the apply already saw it
-			out.Shadowed, out.Delegated = s.shadowedBy(cfg, p.Parent, p.Zone)
+			out.Shadowed, out.Delegated, out.ShadowChecked = s.shadowedBy(cfg, p.Parent, p.Zone)
 		}
 		return out, nil
 	}
@@ -152,19 +153,18 @@ func (s *Service) ZoneDelete(a Actor, zone string, apply bool) (*ZoneChange, err
 
 // shadowedBy lists the parent's records at or below child (they stop being
 // answered once child exists), capped at 50, and whether the parent already
-// delegates child (NS records at child's name). Best-effort: an unreadable
-// parent reports nothing.
-func (s *Service) shadowedBy(cfg *config.Config, parent, child string) ([]string, bool) {
+// delegates child (NS records at child's name). checked is false when the
+// parent couldn't be read — then nothing can be said either way.
+func (s *Service) shadowedBy(cfg *config.Config, parent, child string) (shadowed []string, delegated, checked bool) {
 	inv, err := s.inventory(cfg)
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	records, _, err := named.TransferAuto(parent, server(cfg), inv.AXFRKeys(inv.ZoneByName(parent), cfg.TSIGName))
 	if err != nil {
-		return nil, false
+		return nil, false, false
 	}
 	var out []string
-	delegated := false
 	c := dns.Fqdn(child)
 	for _, rr := range records {
 		h := rr.Header()
@@ -179,7 +179,7 @@ func (s *Service) shadowedBy(cfg *config.Config, parent, child string) ([]string
 			out = append(out, rr.String())
 		}
 	}
-	return out, delegated
+	return out, delegated, true
 }
 
 // asInvalid turns a zonemgr refusal (a bad name, an existing zone, the

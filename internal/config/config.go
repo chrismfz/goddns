@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -108,6 +109,7 @@ type Config struct {
 	ManagedInclude string   `toml:"managed_include"`  // default /etc/named/goddns-zones.conf
 	ManagedZoneDir string   `toml:"managed_zone_dir"` // default /var/named (files are <zone>.hosts)
 	ZoneNS         []string `toml:"zone_ns"`          // default apex NS for a new zone (overridable per zone)
+	ZoneHostmaster string   `toml:"zone_hostmaster"`  // SOA contact for a new zone, e.g. "admin.example.com" (default hostmaster.<zone>)
 
 	// Reverse proxy mode: a second TLS listener that routes by SNI/Host to
 	// internal upstreams (iDRAC, switches, anything without proper TLS).
@@ -258,6 +260,14 @@ func Load(path string) (*Config, error) {
 
 	c.TSIGName = canonKeyName(c.TSIGName)
 	c.ACMETSIGName = canonKeyName(c.ACMETSIGName)
+
+	if h := strings.TrimSpace(c.ZoneHostmaster); h != "" {
+		h = strings.ToLower(strings.TrimSuffix(strings.ReplaceAll(h, "@", "."), "."))
+		if !hostnameRe.MatchString(h) {
+			return nil, fmt.Errorf("zone_hostmaster %q: give a mailbox like admin.example.com or admin@example.com", c.ZoneHostmaster)
+		}
+		c.ZoneHostmaster = h
+	}
 
 	c.UpdateLog = strings.ToLower(strings.TrimSpace(c.UpdateLog))
 	switch c.UpdateLog {
@@ -507,6 +517,10 @@ func (c *Config) IgnoredTLSSettings() []string {
 	}
 	return out
 }
+
+// hostnameRe: letters, digits, '-' and '_' labels, at least two (mirrors the
+// zone writer's check, so a bad zone_hostmaster fails at load, not at create).
+var hostnameRe = regexp.MustCompile(`^[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)+$`)
 
 // UnixListen returns the socket path when listen is "unix:<path>".
 func (c *Config) UnixListen() (string, bool) {

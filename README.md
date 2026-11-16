@@ -420,7 +420,7 @@ plain `admin IN A <goddns-ip>`. Keep it on your LAN/VPN where you can.
 
 A JSON API on the DDNS listener (`:8245`, or behind your proxy with
 `tls_mode = "none"`), over the same service layer as the admin UI: the same
-role and zone-grant rules, the same `admin-audit` lines (with `via=api:<token>`).
+role and zone-grant rules, the same `admin-audit` lines (with `auth=api:<token>`).
 
 **Tokens** belong to a login and act as it — never with more than its role
 and zones — narrowed by **scopes**:
@@ -487,9 +487,14 @@ page, the console, or the API:
     goddns zone delete example.org
 
 **goddns never edits named.conf.** Its zones live in **one managed include**,
-a plain named.conf fragment you include once:
+a plain named.conf fragment you include once. **Create the file first** —
+BIND refuses an include of a missing file, and then named-checkconf, a reload
+or a restart of named all fail:
 
+    goddns zone init                            # creates /etc/named/goddns-zones.conf, empty
+    # then, in named.conf:
     include "/etc/named/goddns-zones.conf";     # managed_include
+    named-checkconf && rndc reconfig
 
 and their files in `managed_zone_dir` (default `/var/named`) as
 `<zone>.hosts` — ordinary static master zones you can open with vi/nano;
@@ -516,6 +521,12 @@ sees it, because what exists is always read back from BIND
 - With `zoned_socket` set, the web UI and API write through the root helper
   (the daemon can't write named's files or run `rndc`); the console acts
   directly as root.
+  The packages restart `goddns-zoned` together with `goddns` on upgrade: it
+  runs the same binary and re-reads goddns.conf on every request, so an old
+  helper next to a new daemon would reject new config keys (and with them
+  every web/API static edit).
+- `zone_hostmaster` sets the SOA contact of new zones (default
+  `hostmaster.<zone>`).
 
 DDNS needs a **dynamic** zone (RFC 2136 updates): goddns refuses a DDNS
 token in a static one, since it could never update anything.
