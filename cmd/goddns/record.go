@@ -80,9 +80,10 @@ func cmdRecord(args []string) {
 		os.Exit(2)
 	}
 
-	// Route by ownership: a static zone the operator enabled for file editing
-	// goes through the file-as-truth path; everything else is RFC2136 (dynamic).
-	if inEditable(cfg, zone) {
+	// Route by ownership, with the same rule as the UI/API (service.EditsInPlace):
+	// an enabled static master goes through the file-as-truth path; everything
+	// else, including a dynamic zone mistakenly in editable_zones, is RFC2136.
+	if service.EditsInPlace(service.FileEditor(cfg), zone) {
 		cmdRecordFile(cfg, zone, ops, *yes)
 		return
 	}

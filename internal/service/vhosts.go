@@ -1,7 +1,6 @@
 package service
 
 import (
-	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -40,9 +39,14 @@ func (s *Service) VhostManaged() map[string]bool {
 	return managed
 }
 
+// normHost lowercases and strips whitespace and a trailing dot, so every vhost
+// entry point matches however the caller spelled the host (vhostmut
+// normalizes the same way internally).
+func normHost(h string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".") }
+
 // VhostGet returns the goddns-managed vhost for host.
 func (s *Service) VhostGet(host string) (vhostmut.Entry, error) {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	host = normHost(host)
 	entries, err := s.VhostList()
 	if err != nil {
 		return vhostmut.Entry{}, err
@@ -52,7 +56,7 @@ func (s *Service) VhostGet(host string) (vhostmut.Entry, error) {
 			return e, nil
 		}
 	}
-	return vhostmut.Entry{}, fmt.Errorf("no goddns-managed vhost %q to edit", host)
+	return vhostmut.Entry{}, invalid("no goddns-managed vhost %q to edit", host)
 }
 
 // VhostSet creates or replaces a managed vhost. apply=false previews the
@@ -61,12 +65,13 @@ func (s *Service) VhostSet(a Actor, host string, rule config.ProxyRule, apply bo
 	if !s.VhostEditing() {
 		return nil, errVhostOff
 	}
+	host = normHost(host)
 	// Reject a console port that collides with the proxy listener up front, so
 	// a caller can't silently write a fragment that then breaks every reload.
 	if _, plPort, e := net.SplitHostPort(s.cfg().ProxyListen); e == nil && plPort != "" {
 		for _, p := range rule.ConsolePorts {
 			if strconv.Itoa(p) == plPort {
-				return nil, fmt.Errorf("console_ports %d collides with proxy_listen (%s)", p, plPort)
+				return nil, invalid("console_ports %d collides with proxy_listen (%s)", p, plPort)
 			}
 		}
 	}
@@ -78,7 +83,7 @@ func (s *Service) VhostSet(a Actor, host string, rule config.ProxyRule, apply bo
 	if _, err := ed.Set(host, rule); err != nil {
 		return nil, err
 	}
-	s.audit(a, "vhost-%s host=%s upstream=%s", res.Action, res.Host, rule.Upstream)
+	s.Audit(a, "vhost-%s host=%s upstream=%s", res.Action, res.Host, rule.Upstream)
 	s.reload()
 	return res, nil
 }
@@ -89,15 +94,16 @@ func (s *Service) VhostRemove(a Actor, host string, apply bool) (*vhostmut.Resul
 	if !s.VhostEditing() {
 		return nil, errVhostOff
 	}
+	host = normHost(host)
 	ed := s.vhostEditor()
-	res, err := ed.PreviewRemove(strings.TrimSpace(host))
+	res, err := ed.PreviewRemove(host)
 	if err != nil || !apply {
 		return res, err
 	}
-	if _, err := ed.Remove(strings.TrimSpace(host)); err != nil {
+	if _, err := ed.Remove(host); err != nil {
 		return nil, err
 	}
-	s.audit(a, "vhost-remove host=%s", res.Host)
+	s.Audit(a, "vhost-remove host=%s", res.Host)
 	s.reload()
 	return res, nil
 }

@@ -94,18 +94,18 @@ func clientIP(r *http.Request) net.IP {
 	return net.ParseIP(host)
 }
 
-// audit logs a session event (login) in the same admin-audit format the
-// service uses for mutations.
+// audit logs a session event (login) through the service's audit funnel, so
+// the admin-audit format is defined in one place.
 func (h *Handler) audit(user, peer, format string, a ...any) {
-	log.Printf("admin-audit user=%s peer=%s "+format, append([]any{user, peer}, a...)...)
+	h.svc.Audit(actor(user, peer), format, a...)
 }
 
 func actor(user, peer string) service.Actor { return service.Actor{User: user, Peer: peer} }
 
-// renderOpErr renders a service error: a caller mistake is a plain 400 (what
-// the handlers always answered for missing fields), anything else the result page.
+// renderOpErr renders a service error: a missing required field is a plain
+// 400 (what the handlers always answered), anything else the result page.
 func (h *Handler) renderOpErr(w http.ResponseWriter, err error) {
-	if service.IsInvalid(err) {
+	if service.IsMissing(err) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -359,7 +359,7 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request, user, pe
 	}
 	zone := strings.TrimSpace(r.FormValue("zone"))
 	var id int64
-	if _, err := fmt.Sscan(strings.TrimSpace(r.FormValue("id")), &id); err != nil || zone == "" || id <= 0 {
+	if _, err := fmt.Sscan(strings.TrimSpace(r.FormValue("id")), &id); err != nil {
 		http.Error(w, "missing fields", http.StatusBadRequest)
 		return
 	}

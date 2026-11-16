@@ -25,13 +25,13 @@ func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, st
 		ttl = DefaultDDNSTTL
 	}
 	if fqdn == "" || zone == "" {
-		return store.Record{}, "", invalid("fqdn and zone are required")
+		return store.Record{}, "", missing("fqdn and zone are required")
 	}
 	rec, tok, err := s.store.Add(fqdn, zone, uint32(ttl))
 	if err != nil {
 		return store.Record{}, "", err
 	}
-	s.audit(a, "ddns-add fqdn=%s zone=%s ttl=%d", rec.FQDN, rec.Zone, rec.TTL)
+	s.Audit(a, "ddns-add fqdn=%s zone=%s ttl=%d", rec.FQDN, rec.Zone, rec.TTL)
 	return rec, tok, nil
 }
 
@@ -41,7 +41,7 @@ func (s *Service) DDNSRotate(a Actor, fqdn string) (store.Record, string, error)
 	if err != nil {
 		return store.Record{}, "", err
 	}
-	s.audit(a, "ddns-rotate fqdn=%s", rec.FQDN)
+	s.Audit(a, "ddns-rotate fqdn=%s", rec.FQDN)
 	return rec, tok, nil
 }
 
@@ -51,7 +51,7 @@ func (s *Service) DDNSDel(a Actor, fqdn string) error {
 	if err := s.store.Del(fqdn); err != nil {
 		return err
 	}
-	s.audit(a, "ddns-del fqdn=%s", store.FQDN(fqdn))
+	s.Audit(a, "ddns-del fqdn=%s", store.FQDN(fqdn))
 	return nil
 }
 

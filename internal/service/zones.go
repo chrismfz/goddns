@@ -7,6 +7,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/history"
 	"github.com/chrismfz/goddns/internal/named"
 )
@@ -26,18 +27,35 @@ type ZoneList struct {
 
 // Inventory reads named.conf through `named-checkconf -p` (every include
 // inlined by BIND's own parser).
-func (s *Service) Inventory() (*named.Inventory, error) {
-	data, err := named.CheckConf(namedConf(s.cfg()))
+func (s *Service) Inventory() (*named.Inventory, error) { return inventory(s.cfg()) }
+
+// inventory reads named.conf as cfg names it. Calls that use the config for
+// more than this take ONE snapshot and pass it down, so a hot-reload mid-call
+// can't mix two configs.
+func inventory(cfg *config.Config) (*named.Inventory, error) {
+	nc := cfg.NamedConf
+	if nc == "" {
+		nc = "/etc/named.conf" // config.Load sets it; this covers a bare Config
+	}
+	data, err := named.CheckConf(nc)
 	if err != nil {
 		return nil, err
 	}
 	return named.Parse(data), nil
 }
 
+// server is where AXFR / SOA probes go (config.Load defaults it).
+func server(cfg *config.Config) string {
+	if cfg.DNSServer != "" {
+		return cfg.DNSServer
+	}
+	return "127.0.0.1:53"
+}
+
 // Zones lists the zones BIND serves plus the TSIG health findings.
 func (s *Service) Zones() (*ZoneList, error) {
 	cfg := s.cfg()
-	inv, err := s.Inventory()
+	inv, err := inventory(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +83,7 @@ type NSVerdict struct {
 // host with many zones can't be made to open a flood of sockets from one call.
 // The result is index-aligned with zones.
 func (s *Service) NSVerdicts(zones []named.Zone) []NSVerdict {
-	server := dnsServer(s.cfg())
+	srv := server(s.cfg())
 	out := make([]NSVerdict, len(zones))
 	sem := make(chan struct{}, nsCheckConcurrency)
 	var wg sync.WaitGroup
@@ -75,7 +93,7 @@ func (s *Service) NSVerdicts(zones []named.Zone) []NSVerdict {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out[i] = nsVerdict(zones[i], server)
+			out[i] = nsVerdict(zones[i], srv)
 		}(i)
 	}
 	wg.Wait()
@@ -131,17 +149,17 @@ type ZoneView struct {
 // liveNS adds the per-nameserver SOA probe.
 func (s *Service) Zone(name string, liveNS bool) (*ZoneView, error) {
 	cfg := s.cfg()
-	server := dnsServer(cfg)
+	srv := server(cfg)
 
 	// named.conf is best-effort: it supplies the dynamic flag and the TSIG
 	// keys to authenticate the transfer. Without it we still try unauthenticated.
 	inv := &named.Inventory{}
-	if i, err := s.Inventory(); err == nil {
+	if i, err := inventory(cfg); err == nil {
 		inv = i
 	}
 	z := inv.ZoneByName(name)
 
-	records, auth, err := named.TransferAuto(name, server, inv.AXFRKeys(z, cfg.TSIGName))
+	records, auth, err := named.TransferAuto(name, srv, inv.AXFRKeys(z, cfg.TSIGName))
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +174,7 @@ func (s *Service) Zone(name string, liveNS bool) (*ZoneView, error) {
 	v.Delegation = named.CheckDelegation(name, records)
 	if liveNS {
 		v.Checked = true
-		v.NS = named.CheckNameservers(name, records, server)
+		v.NS = named.CheckNameservers(name, records, srv)
 		agree, seen := named.SerialsAgree(v.NS)
 		v.Agree = agree && len(seen) == 1
 		v.NoAuth = len(seen) == 0
@@ -166,12 +184,14 @@ func (s *Service) Zone(name string, liveNS bool) (*ZoneView, error) {
 
 // CanEditDynamic reports whether goddns may write the named zone over RFC2136
 // (dynamic + a held key). Best-effort: unreadable named.conf ⇒ false.
-func (s *Service) CanEditDynamic(name string) bool {
-	inv, err := s.Inventory()
+func (s *Service) CanEditDynamic(name string) bool { return s.canEditDynamic(s.cfg(), name) }
+
+func (s *Service) canEditDynamic(cfg *config.Config, name string) bool {
+	inv, err := inventory(cfg)
 	if err != nil {
 		return false
 	}
-	return s.recordEditor(s.cfg()).CanEdit(inv.ZoneByName(name))
+	return s.recordEditor(cfg).CanEdit(inv.ZoneByName(name))
 }
 
 // SnapshotInfo is one stored snapshot, without its content.
@@ -200,7 +220,7 @@ func (s *Service) History(name string) (*ZoneHistory, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &ZoneHistory{Name: name, Restorable: s.CanEditDynamic(name)}
+	h := &ZoneHistory{Name: name, Restorable: s.canEditDynamic(s.cfg(), name)}
 	for _, sn := range snaps {
 		h.Snapshots = append(h.Snapshots, SnapshotInfo{ID: sn.ID, Serial: sn.Serial, TakenAt: sn.TakenAt})
 	}

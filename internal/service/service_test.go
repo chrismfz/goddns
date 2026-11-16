@@ -166,3 +166,59 @@ func TestVhostSet(t *testing.T) {
 		t.Fatalf("remove: reloads=%d audit=%v", reloads, *lines)
 	}
 }
+
+// A relative owner qualifies against the zone on every path (it used to become
+// a root-level name on the RFC2136 path), and a parse failure is a caller
+// mistake, not a missing field.
+func TestParseRRQualifiesAgainstZone(t *testing.T) {
+	for line, want := range map[string]string{
+		"www 60 IN A 203.0.113.9":          "www.example.com.",
+		"@ 60 IN TXT \"v=spf1 -all\"":      "example.com.",
+		"abs.other.net. 60 IN A 192.0.2.1": "abs.other.net.",
+	} {
+		rr, err := ParseRR(line, "example.com")
+		if err != nil || rr.Header().Name != want {
+			t.Fatalf("%q: got %v %v, want owner %s", line, rr, err, want)
+		}
+	}
+	_, err := ParseRR("www 60 IN A not-an-ip", "example.com")
+	if !IsInvalid(err) || IsMissing(err) {
+		t.Fatalf("bad RR must be InvalidError (not Missing), got %v", err)
+	}
+}
+
+func TestErrorClassification(t *testing.T) {
+	s, st, _, conf := newSvc(t, `proxy_listen = ":8443"`)
+	if _, err := s.EditRecord(who, "", ActionAdd, "x", true); !IsMissing(err) {
+		t.Fatalf("empty zone must be Missing, got %v", err)
+	}
+	id, _ := st.SnapshotPut("other.example", 1, "x", 10)
+	if _, err := s.Restore(who, "example", id, false); !IsInvalid(err) || IsMissing(err) {
+		t.Fatalf("foreign snapshot must be InvalidError (not Missing), got %v", err)
+	}
+	s.ConfPath = conf
+	if _, err := s.VhostSet(who, "a.example", config.ProxyRule{Upstream: "http://x", ConsolePorts: []int{8443}}, false); !IsInvalid(err) {
+		t.Fatalf("collision must be InvalidError, got %v", err)
+	}
+	if _, err := s.VhostGet("nope.example"); !IsInvalid(err) {
+		t.Fatalf("unknown vhost must be InvalidError, got %v", err)
+	}
+}
+
+// Every vhost entry point normalizes the host the same way.
+func TestVhostHostNormalized(t *testing.T) {
+	s, _, lines, conf := newSvc(t, "")
+	s.ConfPath = conf
+	if _, err := s.VhostSet(who, " NAS.Example. ", config.ProxyRule{Upstream: "http://10.0.0.5:80"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if e, err := s.VhostGet("nas.example"); err != nil || e.Host != "nas.example" {
+		t.Fatalf("get: %+v %v", e, err)
+	}
+	if _, err := s.VhostRemove(who, "Nas.EXAMPLE.", true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains((*lines)[0], "host=nas.example ") || !strings.Contains((*lines)[1], "host=nas.example") {
+		t.Fatalf("audit hosts not normalized: %v", *lines)
+	}
+}

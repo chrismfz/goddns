@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/miekg/dns"
-
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filezone"
@@ -49,17 +47,17 @@ func (s *Service) EditRecord(a Actor, zone, action, line string, apply bool) (*R
 	zone = strings.TrimSpace(zone)
 	line = strings.TrimSpace(line)
 	if zone == "" || line == "" || (action != ActionAdd && action != ActionDel) {
-		return nil, invalid("missing fields")
+		return nil, missing("missing fields")
 	}
 	cfg := s.cfg()
 	fed := s.fileEditor(cfg)
-	if fed.CanEdit(fed.Lookup(zone)) {
+	if EditsInPlace(fed, zone) {
 		return s.editStatic(a, cfg, fed, zone, action, line, apply)
 	}
 
-	rr, err := dns.NewRR(line)
-	if err != nil || rr == nil {
-		return nil, fmt.Errorf("parse record %q: %v", line, err)
+	rr, err := ParseRR(line, zone)
+	if err != nil {
+		return nil, err
 	}
 	ops := []ddns.Op{{Action: opFor(action), RR: rr}}
 	ed := s.recordEditor(cfg)
@@ -74,7 +72,7 @@ func (s *Service) EditRecord(a Actor, zone, action, line string, apply bool) (*R
 	if err != nil {
 		return nil, err
 	}
-	s.audit(a, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
+	s.Audit(a, "record-%s zone=%s rr=%q key=%s snapshot=%d", action, zone, line, res.Key, res.Snapshot)
 	return &RecordResult{Zone: zone, Added: res.Added, Removed: res.Removed, Key: res.Key, Snapshot: res.Snapshot}, nil
 }
 
@@ -98,9 +96,9 @@ func (s *Service) editStatic(a Actor, cfg *config.Config, fed *filezone.Editor, 
 		}
 		out.Added, out.Removed, out.Serial, out.Backup = resp.Added, resp.Removed, resp.Serial, resp.Backup
 	} else {
-		rr, err := filezone.ParseRR(line, zone)
+		rr, err := ParseRR(line, zone)
 		if err != nil {
-			return nil, fmt.Errorf("parse %q: %v", line, err)
+			return nil, err
 		}
 		ops := []ddns.Op{{Action: opFor(action), RR: rr}}
 		var res *filezone.Result
@@ -115,7 +113,7 @@ func (s *Service) editStatic(a Actor, cfg *config.Config, fed *filezone.Editor, 
 		out.Added, out.Removed, out.Serial, out.Backup = res.Added, res.Removed, res.Serial, res.Backup
 	}
 	if apply {
-		s.audit(a, "record-%s zone=%s rr=%q serial=%d backup=%s via=%s", action, zone, line, out.Serial, out.Backup, out.Via)
+		s.Audit(a, "record-%s zone=%s rr=%q serial=%d backup=%s via=%s", action, zone, line, out.Serial, out.Backup, out.Via)
 	}
 	return out, nil
 }
@@ -135,14 +133,14 @@ type RestoreResult struct {
 func (s *Service) Restore(a Actor, zone string, id int64, apply bool) (*RestoreResult, error) {
 	zone = strings.TrimSpace(zone)
 	if zone == "" || id <= 0 {
-		return nil, invalid("missing fields")
+		return nil, missing("missing fields")
 	}
 	snap, ok, err := s.store.SnapshotByID(id)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot #%d: %v", id, err)
 	}
 	if !ok || !strings.EqualFold(strings.TrimSuffix(snap.Zone, "."), strings.TrimSuffix(zone, ".")) {
-		return nil, fmt.Errorf("no snapshot #%d for zone %q", id, zone)
+		return nil, invalid("no snapshot #%d for zone %q", id, zone)
 	}
 	ed := s.recordEditor(s.cfg())
 	ops, res, err := ed.RestorePlan(zone, snap.Content)
@@ -150,7 +148,7 @@ func (s *Service) Restore(a Actor, zone string, id int64, apply bool) (*RestoreR
 		return nil, err
 	}
 	if len(ops) == 0 {
-		return nil, fmt.Errorf("%s already matches snapshot #%d — nothing to restore", zone, id)
+		return nil, invalid("%s already matches snapshot #%d — nothing to restore", zone, id)
 	}
 	out := &RestoreResult{Zone: zone, Snapshot: snap, Added: res.Added, Removed: res.Removed, Key: res.Key}
 	if !apply {
@@ -161,6 +159,6 @@ func (s *Service) Restore(a Actor, zone string, id int64, apply bool) (*RestoreR
 		return nil, err
 	}
 	out.Added, out.Removed, out.Key, out.PreSnapshot = res.Added, res.Removed, res.Key, res.Snapshot
-	s.audit(a, "record-restore zone=%s snapshot=%d key=%s pre-snapshot=%d", zone, id, res.Key, res.Snapshot)
+	s.Audit(a, "record-restore zone=%s snapshot=%d key=%s pre-snapshot=%d", zone, id, res.Key, res.Snapshot)
 	return out, nil
 }
