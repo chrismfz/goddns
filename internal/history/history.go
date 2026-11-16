@@ -98,6 +98,23 @@ func (p *Poller) fail(key, msg string) {
 	p.logf("%s (logged once; again only if it changes)", msg)
 }
 
+// prune forgets failures of zones that left named.conf, so the map can't
+// grow forever and a zone re-added later starts with a clean slate.
+func (p *Poller) prune(inv *named.Inventory) {
+	if len(p.failing) == 0 {
+		return
+	}
+	live := map[string]bool{"BIND config": true}
+	for _, z := range inv.UserZones() {
+		live[z.Name] = true
+	}
+	for k := range p.failing {
+		if !live[k] {
+			delete(p.failing, k)
+		}
+	}
+}
+
 // ok clears key's failure, logging the recovery if there was one.
 func (p *Poller) ok(key string) {
 	if _, was := p.failing[key]; was {
@@ -156,6 +173,7 @@ func (p *Poller) sweep(cfg *config.Config) {
 	}
 	p.ok("BIND config")
 	inv := named.Parse(data)
+	p.prune(inv)
 	for _, z := range inv.UserZones() {
 		switch z.Kind() {
 		case "static file", "dynamic": // master zones with a record set to snapshot
@@ -180,7 +198,8 @@ func (p *Poller) capture(z named.Zone, inv *named.Inventory, server, tsigName st
 		return
 	}
 	if has && latest.Serial == serial {
-		return // unchanged since the last snapshot
+		p.ok(z.Name) // reachable and up to date: a past failure has cleared
+		return       // unchanged since the last snapshot
 	}
 	records, _, err := named.TransferAuto(z.Name, server, inv.AXFRKeys(&z, tsigName))
 	if err != nil {

@@ -47,7 +47,7 @@ type RecordResult struct {
 // so routing can't disagree with the display.
 func (s *Service) EditRecord(a Actor, zone, action, line string, apply bool) (*RecordResult, error) {
 	zone = strings.TrimSpace(zone)
-	line = strings.TrimSpace(line)
+	line = NormalizeRRLine(line, zone) // also what the zoned helper receives
 	if zone == "" || line == "" || (action != ActionAdd && action != ActionDel) {
 		return nil, missing("missing fields")
 	}

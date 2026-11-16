@@ -2,7 +2,7 @@ package server
 
 import (
 	"bytes"
-	"log"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -14,12 +14,10 @@ import (
 // never appears, and a client-chosen value can't forge fields.
 func TestUpdateLogLevels(t *testing.T) {
 	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
-
 	run := func(level string) string {
 		buf.Reset()
 		s, st, _ := newTestServer(t, baseConf+"update_log = \""+level+"\"\n")
+		s.Logf = func(f string, a ...any) { fmt.Fprintf(&buf, f+"\n", a...) }
 		_, tok, err := st.Add("home.myip.gr", "myip.gr", 60)
 		if err != nil {
 			t.Fatal(err)
@@ -69,3 +67,33 @@ func TestUpdateLogRejectsUnknownLevel(t *testing.T) {
 }
 
 func loadForTest(p string) (any, error) { return config.Load(p) }
+
+// A flood of unauthenticated requests writes at most maxResultLinesPerSec
+// result lines a second plus one summary, and a client behind a trusted
+// proxy is named in the line (not the proxy).
+func TestUpdateLogRateLimitAndProxiedPeer(t *testing.T) {
+	var buf bytes.Buffer
+	s, _, _ := newTestServer(t, baseConf+"update_log = \"changes\"\ntrusted_proxies = [\"127.0.0.1/32\"]\n")
+	s.Logf = func(f string, a ...any) { fmt.Fprintf(&buf, f+"\n", a...) }
+	h := s.Handler()
+	get(t, h, "/update/guess", map[string]string{"X-Forwarded-For": "203.0.113.77"}, "127.0.0.1:1")
+	if !strings.Contains(buf.String(), "peer=203.0.113.77 via=127.0.0.1") {
+		t.Fatalf("proxied client not named: %s", buf.String())
+	}
+	buf.Reset()
+	sec := int64(1000)
+	s.now = func() int64 { return sec }
+	for i := 0; i < 200; i++ {
+		if s.allowResult() {
+			s.logf("line")
+		}
+	}
+	if n := strings.Count(buf.String(), "line\n"); n != maxResultLinesPerSec {
+		t.Fatalf("burst wrote %d lines, want %d", n, maxResultLinesPerSec)
+	}
+	sec++ // the next second starts a new window and summarises
+	s.allowResult()
+	if !strings.Contains(buf.String(), "180 result lines suppressed") {
+		t.Fatalf("no summary: %s", buf.String())
+	}
+}

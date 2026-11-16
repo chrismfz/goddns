@@ -255,3 +255,32 @@ func TestDDNSAddRelativeName(t *testing.T) {
 		t.Fatalf("an absolute name outside the zone stays refused: %v", err)
 	}
 }
+
+func TestNormalizeRRLine(t *testing.T) {
+	for in, want := range map[string]string{
+		"test.ddns.example.com 60 IN A 1.2.3.4": "test.ddns.example.com. 60 IN A 1.2.3.4", // the live-test trap
+		"test 60 IN A 1.2.3.4":                  "test 60 IN A 1.2.3.4",                   // relative stays relative
+		"@ 60 IN TXT \"x\"":                     "@ 60 IN TXT \"x\"",
+		"a.other.net. 60 IN A 1.2.3.4":          "a.other.net. 60 IN A 1.2.3.4",
+		"DDNS.example.com\t60 IN MX 10 mail":    "DDNS.example.com.\t60 IN MX 10 mail",
+		"xddns.example.com 60 IN A 1.2.3.4":     "xddns.example.com 60 IN A 1.2.3.4", // label boundary
+	} {
+		if got := NormalizeRRLine(in, "ddns.example.com"); got != want {
+			t.Errorf("NormalizeRRLine(%q) = %q, want %q", in, got, want)
+		}
+	}
+	rr, err := ParseRR(NormalizeRRLine("test.ddns.example.com 60 IN A 1.2.3.4", "ddns.example.com"), "ddns.example.com")
+	if err != nil || rr.Header().Name != "test.ddns.example.com." {
+		t.Fatalf("parsed owner: %v %v", rr, err)
+	}
+}
+
+func TestDDNSAddRefusesAmbiguousName(t *testing.T) {
+	s, _, _, _ := newSvc(t, "")
+	if _, _, err := s.DDNSAdd(who, "home.example.net", "ddns.example.com", 0); !IsInvalid(err) || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("a dotted name from another zone must be refused, not become name.zone: %v", err)
+	}
+	if rec, _, err := s.DDNSAdd(who, "home.ddns.example.com", "ddns.example.com", 0); err != nil || rec.FQDN != "home.ddns.example.com." {
+		t.Fatalf("full in-zone name without the dot: %+v %v", rec, err)
+	}
+}

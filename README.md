@@ -584,8 +584,18 @@ apply on the next reload tick.
 | `none` | no per-request lines |
 
 A failed DNS write is always logged. Result lines look like
-`update result=badauth proto=simple peer=203.0.113.9 fqdn=- ip=-`; a `good`
-keeps its `updated <fqdn> -> <ip>` line.
+`update result=badauth proto=simple peer=203.0.113.9 fqdn=- ip=-` (behind a
+trusted proxy `peer` is the forwarded client, with `via=<proxy>`); a `good`
+keeps its `updated <fqdn> -> <ip>` line. At most 20 result lines a second are
+written — a token-guessing flood can't fill the disk — and the rest are
+summarised as `update: N result lines suppressed`.
+
+Names: a DDNS hostname may be given relative to its zone (`home`, `@` for the
+apex) or in full, with or without the trailing dot. A dotted name that is
+neither inside the zone nor absolute (`home.example.net` for zone `myip.gr`)
+is refused as ambiguous. In record lines (`goddns record add`, the zone page)
+an owner typed in full without the dot is taken as absolute too, instead of
+becoming `name.zone.zone`.
 
 ## Config hot reload
 

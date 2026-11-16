@@ -45,6 +45,28 @@ func QualifyName(name, zone string) string {
 	return dns.Fqdn(name + "." + zone)
 }
 
+// NormalizeRRLine applies QualifyName's "already ends in the zone" rule to
+// the owner (first field) of a zone-file record line: a full name typed
+// without the trailing dot gets one, instead of zone-file semantics turning
+// test.ddns.example into test.ddns.example.ddns.example. Everything else in
+// the line keeps zone-file meaning (relative names, "@", absolute names).
+func NormalizeRRLine(line, zone string) string {
+	line = strings.TrimSpace(line)
+	i := strings.IndexAny(line, " \t")
+	if i <= 0 {
+		return line
+	}
+	owner := line[:i]
+	if owner == "@" || strings.HasSuffix(owner, ".") {
+		return line
+	}
+	l, z := strings.ToLower(owner), NormZone(zone)
+	if l == z || strings.HasSuffix(l, "."+z) {
+		return owner + "." + line[i:]
+	}
+	return line
+}
+
 // grantSet returns the zones granted to a user-role actor.
 func (s *Service) grantSet(a Actor) (map[string]bool, error) {
 	zs, err := s.store.GrantsFor(a.User)

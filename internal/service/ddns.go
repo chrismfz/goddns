@@ -76,7 +76,16 @@ func (s *Service) DDNSAdd(a Actor, fqdn, zone string, ttl int) (store.Record, st
 	if fqdn == "" || zone == "" {
 		return store.Record{}, "", missing("fqdn and zone are required")
 	}
-	fqdn = QualifyName(fqdn, zone) // "test" in zone ddns.example → test.ddns.example.
+	// "test" in zone ddns.example → test.ddns.example. A dotted name that
+	// is neither absolute (trailing dot) nor inside the zone is ambiguous —
+	// most likely a full name from another zone typed by mistake — so it is
+	// refused rather than silently turned into name.zone.
+	q := QualifyName(fqdn, zone)
+	if !strings.HasSuffix(fqdn, ".") && strings.Contains(fqdn, ".") &&
+		!strings.EqualFold(strings.TrimSuffix(q, "."), fqdn) {
+		return store.Record{}, "", invalid("%q is ambiguous: use a name in the zone (e.g. %s), or a trailing dot for an absolute name", fqdn, strings.TrimSuffix(q, "."))
+	}
+	fqdn = q
 	if err := s.authZone(a, zone); err != nil {
 		return store.Record{}, "", err
 	}

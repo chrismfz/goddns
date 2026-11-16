@@ -55,7 +55,7 @@ func cmdRecord(args []string) {
 		// `www`) qualifies to `www.<zone>.` — without an origin a short name
 		// becomes the root-level `www.`, which silently matches nothing on a
 		// file zone (and the wrong name on a dynamic one).
-		rr, err := parseRRInZone(rest[1], zone)
+		rr, err := parseRRInZone(service.NormalizeRRLine(rest[1], zone), zone)
 		if err != nil || rr == nil {
 			fatal("parse record %q: %v", rest[1], err)
 		}
