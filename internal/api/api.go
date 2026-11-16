@@ -12,6 +12,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -71,18 +72,25 @@ type ctxActor struct {
 // endpoint is one route: the scope it needs and the function serving it.
 type endpoint func(w http.ResponseWriter, r *http.Request, c ctxActor)
 
+// heavy marks an endpoint that does a zone transfer (AXFR) or a zone write
+// behind one cheap request; it also spends from a much smaller budget.
+const heavy = true
+
+// Expensive endpoints: 1 per second per token, burst 3.
+const heavyPerSec = 1
+
 // Mux returns the routes, mounted under /api/v1/.
 func (h *Handler) Mux() http.Handler {
 	mux := http.NewServeMux()
-	route := func(pattern, scope string, fn endpoint) {
-		mux.HandleFunc(pattern, h.auth(scope, fn))
+	route := func(pattern, scope string, fn endpoint, heavy ...bool) {
+		mux.HandleFunc(pattern, h.auth(scope, len(heavy) > 0 && heavy[0], fn))
 	}
 	route("GET /api/v1/me", "", h.me)
 	route("GET /api/v1/zones", service.ScopeZonesRead, h.zones)
-	route("GET /api/v1/zones/{zone}", service.ScopeZonesRead, h.zone)
+	route("GET /api/v1/zones/{zone}", service.ScopeZonesRead, h.zone, heavy)
 	route("GET /api/v1/zones/{zone}/history", service.ScopeZonesRead, h.history)
-	route("POST /api/v1/zones/{zone}/records", service.ScopeRecordsWrite, h.record)
-	route("POST /api/v1/zones/{zone}/restore", service.ScopeRecordsWrite, h.restore)
+	route("POST /api/v1/zones/{zone}/records", service.ScopeRecordsWrite, h.record, heavy)
+	route("POST /api/v1/zones/{zone}/restore", service.ScopeRecordsWrite, h.restore, heavy)
 	route("GET /api/v1/ddns", service.ScopeDDNSRead, h.ddnsList)
 	route("POST /api/v1/ddns", service.ScopeDDNSWrite, h.ddnsAdd)
 	route("POST /api/v1/ddns/{fqdn}/rotate", service.ScopeDDNSWrite, h.ddnsRotate)
@@ -101,10 +109,17 @@ func (h *Handler) Mux() http.Handler {
 
 // auth authenticates the bearer token, applies the failure lockout and the
 // per-token rate limit, and checks the endpoint's scope ("" = any token).
-func (h *Handler) auth(scope string, fn endpoint) http.HandlerFunc {
+func (h *Handler) auth(scope string, expensive bool, fn endpoint) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		ip := h.clientIP(r)
+		if ip == nil {
+			// e.g. a unix-socket proxy that sends no X-Forwarded-For: such
+			// requests can't be attributed (CIDR checks, lockout, audit), and
+			// pooling them under one key would let one bad client lock out all
+			writeErr(w, http.StatusBadRequest, "no client address: the reverse proxy must send X-Forwarded-For")
+			return
+		}
 		src := sourceKey(ip)
 		if h.lockedOut(src) {
 			w.Header().Set("Retry-After", strconv.Itoa(int(failLockout.Seconds())))
@@ -125,7 +140,8 @@ func (h *Handler) auth(scope string, fn endpoint) http.HandlerFunc {
 			writeErr(w, http.StatusUnauthorized, "invalid token")
 			return
 		}
-		if !h.allow(a.Via + "|" + a.User) {
+		key := a.Via + "|" + a.User
+		if !h.allow(key, reqPerSec) || (expensive && !h.allow("heavy|"+key, heavyPerSec)) {
 			w.Header().Set("Retry-After", "1")
 			writeErr(w, http.StatusTooManyRequests, "rate limit")
 			return
@@ -192,20 +208,22 @@ func (h *Handler) failed(src string) {
 	}
 }
 
-// allow takes one request from key's bucket. Keys are tokens, so the map is
-// bounded by the number of tokens that exist.
-func (h *Handler) allow(key string) bool {
+// allow takes one request from key's bucket (perSec refill, burst
+// 2*perSec, at least 3). Keys are tokens, so the map is bounded by the
+// number of tokens that exist.
+func (h *Handler) allow(key string, perSec float64) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
+	burst := max(2*perSec, 3)
 	b := h.buckets[key]
 	if b == nil {
-		b = &bucket{tokens: 2 * reqPerSec, last: now}
+		b = &bucket{tokens: burst, last: now}
 		h.buckets[key] = b
 	}
-	b.tokens += now.Sub(b.last).Seconds() * reqPerSec
-	if b.tokens > 2*reqPerSec {
-		b.tokens = 2 * reqPerSec
+	b.tokens += now.Sub(b.last).Seconds() * perSec
+	if b.tokens > burst {
+		b.tokens = burst
 	}
 	b.last = now
 	if b.tokens < 1 {
@@ -228,15 +246,23 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-// writeOpErr maps a service error to a status.
-func writeOpErr(w http.ResponseWriter, err error) {
+// writeOpErr maps a service error to a status. A caller mistake says what
+// was wrong (400); any other failure is a 500, with the detail (paths,
+// command output, BIND's answer) in the server log and, for an admin token,
+// in the response — a user-role token gets a generic message.
+func writeOpErr(w http.ResponseWriter, c ctxActor, err error) {
 	switch {
 	case service.IsForbidden(err):
 		writeErr(w, http.StatusForbidden, "forbidden")
 	case service.IsInvalid(err):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	default:
-		writeErr(w, http.StatusBadGateway, err.Error())
+		log.Printf("api: user=%s via=%s: %v", c.a.User, c.a.Via, err)
+		msg := "operation failed (details in the server log)"
+		if c.a.Role == service.RoleAdmin {
+			msg = err.Error()
+		}
+		writeErr(w, http.StatusInternalServerError, msg)
 	}
 }
 
@@ -275,7 +301,7 @@ type zoneJSON struct {
 func (h *Handler) zones(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	zl, err := h.svc.Zones(c.a)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	out := make([]zoneJSON, 0, len(zl.Zones))
@@ -296,7 +322,7 @@ func (h *Handler) zone(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	name := service.NormZone(r.PathValue("zone"))
 	v, err := h.svc.Zone(c.a, name, false)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	var rrs []rrJSON
@@ -315,7 +341,7 @@ func (h *Handler) zone(w http.ResponseWriter, r *http.Request, c ctxActor) {
 func (h *Handler) history(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	hist, err := h.svc.History(c.a, service.NormZone(r.PathValue("zone")))
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	type snap struct {
@@ -324,8 +350,8 @@ func (h *Handler) history(w http.ResponseWriter, r *http.Request, c ctxActor) {
 		TakenAt time.Time `json:"taken_at"`
 	}
 	snaps := make([]snap, 0, len(hist.Snapshots))
-	for _, s := range hist.Snapshots {
-		snaps = append(snaps, snap{s.ID, s.Serial, s.TakenAt})
+	for _, sn := range hist.Snapshots {
+		snaps = append(snaps, snap{sn.ID, sn.Serial, sn.TakenAt})
 	}
 	out := map[string]any{"zone": hist.Name, "restorable": hist.Restorable, "snapshots": snaps}
 	if hist.HasDiff {
@@ -347,7 +373,7 @@ func (h *Handler) record(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	}
 	res, err := h.svc.EditRecord(c.a, r.PathValue("zone"), in.Action, in.RR, !in.DryRun)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"zone": res.Zone, "applied": !in.DryRun,
@@ -365,7 +391,7 @@ func (h *Handler) restore(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	}
 	res, err := h.svc.Restore(c.a, r.PathValue("zone"), in.ID, !in.DryRun)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"zone": res.Zone, "applied": !in.DryRun, "snapshot": res.Snapshot.ID,
@@ -386,7 +412,7 @@ type ddnsJSON struct {
 func (h *Handler) ddnsList(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	recs, err := h.svc.DDNSList(c.a)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	out := make([]ddnsJSON, 0, len(recs))
@@ -409,7 +435,7 @@ func (h *Handler) ddnsAdd(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	}
 	rec, tok, err := h.svc.DDNSAdd(c.a, in.FQDN, in.Zone, in.TTL)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, ddnsJSON{FQDN: rec.FQDN, Zone: rec.Zone, TTL: rec.TTL, Token: tok})
@@ -418,7 +444,7 @@ func (h *Handler) ddnsAdd(w http.ResponseWriter, r *http.Request, c ctxActor) {
 func (h *Handler) ddnsRotate(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	rec, tok, err := h.svc.DDNSRotate(c.a, r.PathValue("fqdn"))
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, ddnsJSON{FQDN: rec.FQDN, Zone: rec.Zone, TTL: rec.TTL, Token: tok})
@@ -426,7 +452,7 @@ func (h *Handler) ddnsRotate(w http.ResponseWriter, r *http.Request, c ctxActor)
 
 func (h *Handler) ddnsDel(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	if err := h.svc.DDNSDel(c.a, r.PathValue("fqdn")); err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -453,7 +479,7 @@ func (v vhostJSON) rule() config.ProxyRule {
 func (h *Handler) vhosts(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	es, err := h.svc.VhostList(c.a)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	out := make([]vhostJSON, 0, len(es))
@@ -475,7 +501,7 @@ func (h *Handler) vhostSet(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	dry := r.URL.Query().Get("dry_run") == "1"
 	res, err := h.svc.VhostSet(c.a, r.PathValue("host"), in.rule(), !dry)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"host": res.Host, "action": res.Action, "applied": !dry, "fragment": res.Fragment})
@@ -485,7 +511,7 @@ func (h *Handler) vhostDel(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	dry := r.URL.Query().Get("dry_run") == "1"
 	res, err := h.svc.VhostRemove(c.a, r.PathValue("host"), !dry)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"host": res.Host, "action": res.Action, "applied": !dry})
@@ -494,7 +520,7 @@ func (h *Handler) vhostDel(w http.ResponseWriter, r *http.Request, c ctxActor) {
 func (h *Handler) users(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	us, err := h.svc.Users(c.a)
 	if err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	type userJSON struct {
@@ -517,7 +543,7 @@ func (h *Handler) users(w http.ResponseWriter, r *http.Request, c ctxActor) {
 
 func (h *Handler) grant(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	if err := h.svc.Grant(c.a, r.PathValue("user"), r.PathValue("zone")); err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -525,7 +551,7 @@ func (h *Handler) grant(w http.ResponseWriter, r *http.Request, c ctxActor) {
 
 func (h *Handler) revoke(w http.ResponseWriter, r *http.Request, c ctxActor) {
 	if err := h.svc.Revoke(c.a, r.PathValue("user"), r.PathValue("zone")); err != nil {
-		writeOpErr(w, err)
+		writeOpErr(w, c, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

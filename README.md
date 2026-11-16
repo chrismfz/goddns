@@ -444,7 +444,9 @@ its hash is stored; it can carry source CIDRs and an expiry; it stops at
 once when it is revoked, expires, or its login is disabled, deleted or loses
 the zone. An API token can't mint further tokens. Failed authentications lock
 a source (an IPv4 address or an IPv6 /64) out for 5 minutes after 10, and
-each token is limited to 10 requests/s (burst 20).
+each token is limited to 10 requests/s (burst 20) — and to 1/s (burst 3) on
+the endpoints that transfer or write a zone (`GET /zones/{zone}`, records,
+restore). A login holds at most 25 tokens.
 
 | method & path | body | scope |
 |---|---|---|
@@ -466,7 +468,8 @@ each token is limited to 10 requests/s (burst 20).
 
 `dry_run` returns the diff without changing anything. Errors are
 `{"error":"…"}` with 400 (bad request), 401 (token), 403 (scope, role or
-zone), 429 (lockout / rate) or 502 (the operation itself failed).
+zone), 429 (lockout / rate) or 500 (the operation itself failed — the detail
+is in the server log, and in the response for an admin token).
 
     curl -H "Authorization: Bearer $TOKEN" https://sdns.example.com:8245/api/v1/zones
     curl -H "Authorization: Bearer $TOKEN" -d '{"action":"add","rr":"www 300 IN A 192.0.2.1","dry_run":true}' \

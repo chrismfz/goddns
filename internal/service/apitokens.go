@@ -44,6 +44,11 @@ var ErrUnauthorized = errors.New("unauthorized")
 
 var tokenNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
+// MaxAPITokensPerUser bounds how many tokens one login can hold: each is a
+// long-lived credential to account for, and a compromised session must not
+// be able to mint thousands.
+const MaxAPITokensPerUser = 25
+
 // APITokenInfo is a token as listed (never the hash).
 type APITokenInfo struct {
 	ID        int64
@@ -142,6 +147,11 @@ func (s *Service) APITokenCreate(a Actor, owner, name string, scopes, allowNets 
 		}
 		nets = append(nets, ipn.String())
 	}
+	if have, err := s.store.APITokenList(p.Name); err != nil {
+		return APITokenInfo{}, "", err
+	} else if len(have) >= MaxAPITokensPerUser {
+		return APITokenInfo{}, "", invalid("%s already has %d API tokens (the maximum) — revoke one first", p.Name, len(have))
+	}
 	if expiresDays < 0 {
 		return APITokenInfo{}, "", invalid("expiry must be 0 (never) or a number of days")
 	}
@@ -236,7 +246,11 @@ func (s *Service) AuthenticateAPI(tok string, peer net.IP) (Actor, []string, err
 	if !ok {
 		return Actor{}, nil, ErrUnauthorized
 	}
-	_ = s.store.APITokenTouch(t.ID, now) // best-effort "last used"
+	// best-effort "last used", written at most once a minute: even a no-op
+	// UPDATE takes SQLite's write lock, which every DDNS update contends for
+	if now.Sub(t.LastUsed) > time.Minute {
+		_ = s.store.APITokenTouch(t.ID, now)
+	}
 	peerStr := "?"
 	if peer != nil {
 		peerStr = peer.String()

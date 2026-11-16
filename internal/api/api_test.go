@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/chrismfz/goddns/internal/config"
+	"github.com/chrismfz/goddns/internal/filezone"
 	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/service"
 	"github.com/chrismfz/goddns/internal/store"
@@ -239,5 +240,121 @@ func TestAPIAdminAndMinting(t *testing.T) {
 	}
 	if code, _ := f.do(t, "GET", "/api/v1/me", tok, ""); code != 401 {
 		t.Fatalf("revoked token: %d", code)
+	}
+}
+
+// staticZone wires example.com as an editable static zone file.
+func (f *fixture) staticZone(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	zp := filepath.Join(dir, "example.com.db")
+	os.WriteFile(zp, []byte("$ORIGIN example.com.\n$TTL 60\n@ IN SOA ns.example.com. h.example.com. 1 3 4 5 6\n@ IN NS ns.example.com.\n"), 0o640)
+	inv := &named.Inventory{Zones: []named.Zone{
+		{Name: "example.com", Type: "master", Path: zp},
+		{Name: "other.net", Type: "master", Path: "/x/other.net.db"},
+	}}
+	f.svc.Inv = func(*config.Config) (*named.Inventory, error) { return inv, nil }
+	f.svc.FileEd = func(*config.Config) *filezone.Editor {
+		return &filezone.Editor{Editable: []string{"example.com"}, LockDir: filepath.Join(dir, "l"), BackupDir: filepath.Join(dir, "b"),
+			Inv: func() (*named.Inventory, error) { return inv, nil }, CheckZone: func(string, []byte) error { return nil },
+			Reload: func(string) error { return nil }, Verify: func(string, uint32) error { return nil }}
+	}
+	return zp
+}
+
+func TestAPIRecordWriteDryRunThenApply(t *testing.T) {
+	f := newFixture(t)
+	zp := f.staticZone(t)
+	tok := f.userWithToken(t, "gina", []string{service.ScopeRecordsWrite}, nil)
+	body := `{"action":"add","rr":"www.example.com 60 IN A 192.0.2.80","dry_run":true}`
+	code, out := f.do(t, "POST", "/api/v1/zones/example.com/records", tok, body)
+	if code != 200 || out["applied"] != false || !strings.Contains(fmt.Sprint(out["added"]), "www.example.com.") {
+		t.Fatalf("dry run: %d %v", code, out)
+	}
+	if b, _ := os.ReadFile(zp); strings.Contains(string(b), "192.0.2.80") {
+		t.Fatal("dry run wrote the zone")
+	}
+	code, out = f.do(t, "POST", "/api/v1/zones/example.com/records", tok, strings.Replace(body, "true", "false", 1))
+	if code != 200 || out["applied"] != true {
+		t.Fatalf("apply: %d %v", code, out)
+	}
+	if b, _ := os.ReadFile(zp); !strings.Contains(string(b), "192.0.2.80") {
+		t.Fatal("apply did not write the zone")
+	}
+}
+
+func TestAPIVhosts(t *testing.T) {
+	f := newFixture(t)
+	dir := t.TempDir()
+	conf := filepath.Join(dir, "goddns.conf")
+	os.WriteFile(conf, []byte(""), 0o600)
+	f.svc.ConfPath = conf
+	f.svc.UserAdd(admin, "hank", "hankpass12", service.RoleAdmin)
+	_, tok, _ := f.svc.APITokenCreate(admin, "hank", "px", []string{service.ScopeProxyRead, service.ScopeProxyWrite}, nil, 0)
+	code, out := f.do(t, "PUT", "/api/v1/vhosts/nas.example.com?dry_run=1", tok, `{"upstream":"http://10.0.0.5:80","allow":["10.0.0.0/8"]}`)
+	if code != 200 || out["applied"] != false || !strings.Contains(fmt.Sprint(out["fragment"]), "10.0.0.5") {
+		t.Fatalf("vhost dry run: %d %v", code, out)
+	}
+	if code, _ := f.do(t, "PUT", "/api/v1/vhosts/nas.example.com", tok, `{"upstream":"http://10.0.0.5:80"}`); code != 200 {
+		t.Fatalf("vhost set: %d", code)
+	}
+	code, out = f.do(t, "GET", "/api/v1/vhosts", tok, "")
+	if code != 200 || !strings.Contains(fmt.Sprint(out["vhosts"]), "nas.example.com") {
+		t.Fatalf("vhosts: %d %v", code, out)
+	}
+	if code, _ := f.do(t, "DELETE", "/api/v1/vhosts/nas.example.com", tok, ""); code != 200 {
+		t.Fatalf("vhost del: %d", code)
+	}
+}
+
+func TestAPIHeavyBudgetAndUnattributable(t *testing.T) {
+	f := newFixture(t)
+	tok := f.userWithToken(t, "ivy", []string{service.ScopeZonesRead}, nil)
+	limited := false
+	for i := 0; i < 10; i++ { // AXFR-backed: burst 3, then 1/s
+		if code, _ := f.do(t, "GET", "/api/v1/zones/example.com", tok, ""); code == 429 {
+			limited = i >= 3
+			break
+		}
+	}
+	if !limited {
+		t.Fatal("AXFR-backed endpoint not on the tighter budget")
+	}
+	if code, _ := f.do(t, "GET", "/api/v1/zones", tok, ""); code != 200 { // cheap endpoints keep their own budget
+		t.Fatalf("cheap endpoint after heavy limit: %d", code)
+	}
+	f.peer = "" // no resolvable client address
+	if code, _ := f.do(t, "GET", "/api/v1/me", tok, ""); code != 400 {
+		t.Fatalf("unattributable request: %d", code)
+	}
+}
+
+func TestAPITokenCapAndUserErrorText(t *testing.T) {
+	f := newFixture(t)
+	f.svc.UserAdd(admin, "jo", "jopass1234", service.RoleUser)
+	for i := 0; i < service.MaxAPITokensPerUser; i++ {
+		if _, _, err := f.svc.APITokenCreate(admin, "jo", fmt.Sprintf("t%d", i), []string{service.ScopeZonesRead}, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, _, err := f.svc.APITokenCreate(admin, "jo", "one-more", []string{service.ScopeZonesRead}, nil, 0); !service.IsInvalid(err) {
+		t.Fatalf("token cap: %v", err)
+	}
+	// an internal failure: generic text for a user token, 500 not 502
+	f.svc.Grant(admin, "jo", "example.com")
+	ts, _ := f.svc.APITokens(admin, "jo")
+	if err := f.svc.APITokenRevoke(admin, ts[0].ID); err != nil { // make room
+		t.Fatal(err)
+	}
+	_, tok, err := f.svc.APITokenCreate(admin, "jo", "z2", []string{service.ScopeZonesRead}, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.svc.Inv = func(*config.Config) (*named.Inventory, error) {
+		return nil, fmt.Errorf("named-checkconf -p: /etc/named.conf:12: secret detail")
+	}
+	code, out := f.do(t, "GET", "/api/v1/zones", tok, "")
+	if code != 500 || strings.Contains(fmt.Sprint(out["error"]), "secret detail") {
+		t.Fatalf("user-facing internal error: %d %v", code, out)
 	}
 }

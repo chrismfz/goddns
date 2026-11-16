@@ -98,7 +98,7 @@ func (h *Handler) handleAPIToken(w http.ResponseWriter, r *http.Request, a servi
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	data := h.accountData(a)
+	var data map[string]any
 	switch r.FormValue("op") {
 	case "add":
 		days, _ := strconv.Atoi(strings.TrimSpace(r.FormValue("expires")))
@@ -108,20 +108,22 @@ func (h *Handler) handleAPIToken(w http.ResponseWriter, r *http.Request, a servi
 		}
 		t, tok, err := h.svc.APITokenCreate(a, a.User, r.FormValue("name"), r.Form["scope"], nets, days)
 		if err != nil {
+			data = h.accountData(a)
 			if service.IsForbidden(err) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 			data["TokenError"] = err.Error()
-			renderStatus(w, http.StatusBadRequest, accountTmpl, h.refresh(a, data))
+			renderStatus(w, http.StatusBadRequest, accountTmpl, data)
 			return
 		}
-		data = h.refresh(a, data)
+		data = h.accountData(a) // now including the new token
 		data["NewToken"], data["NewTokenName"] = tok, t.Name
 		render(w, accountTmpl, data)
 	case "revoke":
 		id, _ := strconv.ParseInt(r.FormValue("id"), 10, 64)
 		if err := h.svc.APITokenRevoke(a, id); err != nil {
+			data = h.accountData(a)
 			if service.IsForbidden(err) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
@@ -134,13 +136,6 @@ func (h *Handler) handleAPIToken(w http.ResponseWriter, r *http.Request, a servi
 	default:
 		http.Error(w, "bad request", http.StatusBadRequest)
 	}
-}
-
-// refresh reloads the token list into data (after a create).
-func (h *Handler) refresh(a service.Actor, data map[string]any) map[string]any {
-	toks, _ := h.svc.APITokens(a, a.User)
-	data["Tokens"] = toks
-	return data
 }
 
 func (h *Handler) handleAccount(w http.ResponseWriter, r *http.Request, a service.Actor) {
