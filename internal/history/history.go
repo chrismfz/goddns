@@ -16,6 +16,7 @@ import (
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/store"
+	"github.com/chrismfz/goddns/internal/zonemgr"
 )
 
 // Diff returns the records added and removed going from old to new. A zone is a
@@ -167,6 +168,7 @@ func (p *Poller) sweep(cfg *config.Config) {
 		keep = 50
 	}
 	data, err := named.CheckConf(nc)
+	err = zonemgr.ExplainCheckConf(err, nc, cfg.ManagedInclude)
 	if err != nil {
 		p.fail("BIND config", fmt.Sprintf("history: cannot read BIND config: %v — zone snapshots paused (history_interval = 0 turns history off)", err))
 		return

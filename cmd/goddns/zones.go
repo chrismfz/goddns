@@ -10,6 +10,7 @@ import (
 
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/named"
+	"github.com/chrismfz/goddns/internal/zonemgr"
 )
 
 // cmdZones is the read-only BIND introspection: zones, dynamic flags, TSIG
@@ -45,6 +46,9 @@ func cmdZones(args []string) {
 		data, err = os.ReadFile(*dump)
 	} else {
 		data, err = named.CheckConf(nc)
+		if cfg, cerr := config.Load(*cfgPath); cerr == nil {
+			err = zonemgr.ExplainCheckConf(err, nc, cfg.ManagedInclude)
+		}
 	}
 	if err != nil {
 		fatal("%v", err)

@@ -1,8 +1,6 @@
 package service
 
 import (
-	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -51,21 +49,9 @@ func (s *Service) inventory(cfg *config.Config) (*named.Inventory, error) {
 	}
 	data, err := named.CheckConf(nc)
 	if err != nil {
-		return nil, includeHint(cfg, err)
+		return nil, zonemgr.ExplainCheckConf(err, nc, cfg.ManagedInclude)
 	}
 	return named.Parse(data), nil
-}
-
-// includeHint explains the one config error goddns itself invites: named.conf
-// includes the managed include before the file exists, which BIND refuses
-// (and which then breaks every reload).
-func includeHint(cfg *config.Config, err error) error {
-	if cfg.ManagedInclude != "" && strings.Contains(err.Error(), "file not found") {
-		if _, statErr := os.Stat(cfg.ManagedInclude); os.IsNotExist(statErr) {
-			return fmt.Errorf("%w — named.conf includes %s, which doesn't exist yet: BIND can't load its config (a reload or restart of named would fail). Run `goddns zone init` (as root) to create it empty", err, cfg.ManagedInclude)
-		}
-	}
-	return err
 }
 
 // server is where AXFR / SOA probes go (config.Load defaults it).

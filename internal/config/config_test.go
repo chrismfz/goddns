@@ -514,3 +514,14 @@ func TestIgnoredTLSSettings(t *testing.T) {
 		t.Fatalf("ignored: %q", got)
 	}
 }
+
+func TestZoneHostmasterValidated(t *testing.T) {
+	base := "cert_file = \"/tmp/c\"\nkey_file = \"/tmp/k\"\n"
+	c, err := loadString(t, base+"zone_hostmaster = \"Admin@MyIP.gr\"\n")
+	if err != nil || c.ZoneHostmaster != "admin.myip.gr" {
+		t.Fatalf("normalized: %q %v", c.ZoneHostmaster, err)
+	}
+	if _, err := loadString(t, base+"zone_hostmaster = \"admin myip.gr\"\n"); err == nil {
+		t.Fatal("bad hostmaster accepted at load")
+	}
+}

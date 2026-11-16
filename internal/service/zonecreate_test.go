@@ -1,7 +1,6 @@
 package service
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,17 +97,5 @@ func TestDDNSRefusesStaticZone(t *testing.T) {
 	s, _, _ := zoneRig(t)
 	if _, _, err := s.DDNSAdd(who, "home", "example.com", 0); !IsInvalid(err) || !strings.Contains(err.Error(), "static zone") {
 		t.Fatalf("DDNS in a static zone: %v", err)
-	}
-}
-
-func TestIncludeHint(t *testing.T) {
-	cfg := &config.Config{ManagedInclude: filepath.Join(t.TempDir(), "missing.conf")}
-	err := includeHint(cfg, errors.New("named-checkconf -p: /etc/named.conf:82: parsing failed: file not found"))
-	if !strings.Contains(err.Error(), "goddns zone init") {
-		t.Fatalf("hint: %v", err)
-	}
-	other := errors.New("named-checkconf -p: syntax error")
-	if includeHint(cfg, other) != other {
-		t.Fatal("unrelated errors must pass through")
 	}
 }

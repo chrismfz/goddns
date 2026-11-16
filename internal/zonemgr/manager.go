@@ -552,10 +552,33 @@ func (m *Manager) Init() (bool, error) {
 	} else if !os.IsNotExist(err) {
 		return false, err
 	}
-	if err := os.MkdirAll(filepath.Dir(m.Include), 0o750); err != nil {
-		return false, err
+	// Never create the directory: one made here would be root-only, named
+	// couldn't read the include in it, and the next reload would fail —
+	// the very outage this command exists to prevent.
+	if fi, err := os.Stat(filepath.Dir(m.Include)); err != nil || !fi.IsDir() {
+		return false, refused("%s doesn't exist — set managed_include to a file in a directory named can read (e.g. /etc/named/ on EL, /etc/bind/ on Debian)", filepath.Dir(m.Include))
 	}
 	return true, atomicWrite(m.Include, includeHeader)
+}
+
+// ExplainCheckConf adds the one hint goddns owes for a named-checkconf
+// failure it invited: named.conf includes the managed include, which doesn't
+// exist yet (BIND refuses that, and every reload fails). Any other error is
+// returned unchanged. Every caller of named-checkconf in goddns uses it.
+func ExplainCheckConf(err error, namedConf, include string) error {
+	if err == nil || include == "" || !strings.Contains(err.Error(), "file not found") {
+		return err
+	}
+	if _, statErr := os.Stat(include); !os.IsNotExist(statErr) {
+		return err
+	}
+	if namedConf == "" {
+		namedConf = "/etc/named.conf"
+	}
+	if ok, _ := IncludeReferenced(namedConf, include); !ok {
+		return err // some other missing file: not ours to explain
+	}
+	return fmt.Errorf("%w — named.conf includes %s, which doesn't exist yet: BIND can't load its config (a reload or restart of named would fail). Run `goddns zone init` (as root) to create it empty", err, include)
 }
 
 // ForConfig builds the production Manager from goddns's config.
