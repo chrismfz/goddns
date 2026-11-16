@@ -21,6 +21,7 @@ import (
 	"github.com/chrismfz/goddns/internal/config"
 	"github.com/chrismfz/goddns/internal/ddns"
 	"github.com/chrismfz/goddns/internal/filezone"
+	"github.com/chrismfz/goddns/internal/zonemgr"
 )
 
 const maxRequest = 64 << 10 // cap an untrusted request body
@@ -28,10 +29,11 @@ const maxRequest = 64 << 10 // cap an untrusted request body
 // Request is one structured record edit. The helper re-derives the op and
 // re-validates the zone against its OWN config — Zone is a hint, not a grant.
 type Request struct {
-	Zone   string `json:"zone"`
-	Action string `json:"action"` // "add" | "del"
-	RR     string `json:"rr"`     // zone-file line
-	Apply  bool   `json:"apply"`  // false = preview (diff only), true = write
+	Zone   string   `json:"zone"`
+	Action string   `json:"action"`       // "add" | "del" | "zone-create" | "zone-delete"
+	RR     string   `json:"rr"`           // zone-file line (add/del)
+	NS     []string `json:"ns,omitempty"` // apex nameservers (zone-create)
+	Apply  bool     `json:"apply"`        // false = preview (diff only), true = write
 }
 
 // Response is the preview/apply result (mirrors the filezone.Result fields the
@@ -43,6 +45,14 @@ type Response struct {
 	Removed []string `json:"removed,omitempty"`
 	Serial  uint32   `json:"serial,omitempty"`
 	Backup  string   `json:"backup,omitempty"`
+
+	// zone-create / zone-delete
+	File    string `json:"file,omitempty"`
+	Stanza  string `json:"stanza,omitempty"`
+	Content string `json:"content,omitempty"`
+	Parent  string `json:"parent,omitempty"`
+	MovedTo string `json:"moved_to,omitempty"`
+	Refused bool   `json:"refused,omitempty"` // the error is a refusal of the request, not a failure
 }
 
 // Server is the helper. Cfg loads the CURRENT config each request (so
@@ -51,6 +61,7 @@ type Server struct {
 	Cfg     func() (*config.Config, error)
 	PeerGID int                                   // >0: require the connecting peer be uid 0 or this gid (SO_PEERCRED)
 	editor  func(*config.Config) *filezone.Editor // tests override; nil = from cfg
+	zoneMgr func(*config.Config) *zonemgr.Manager // tests override; nil = zonemgr.ForConfig
 }
 
 // Serve handles one request per connection on ln until ctx is cancelled, with a
@@ -119,8 +130,11 @@ func peerOK(conn net.Conn, allowGID int) bool {
 // panel, surgical safety, checkzone) is enforced by filezone against the
 // helper's own config — the client's claims are never trusted.
 func (s *Server) process(req Request) Response {
+	if req.Action == "zone-create" || req.Action == "zone-delete" {
+		return s.processZone(req)
+	}
 	if req.Action != "add" && req.Action != "del" {
-		return Response{Error: fmt.Sprintf("unsupported action %q (helper accepts add/del only)", req.Action)}
+		return Response{Error: fmt.Sprintf("unsupported action %q (helper accepts add/del/zone-create/zone-delete)", req.Action)}
 	}
 	cfg, err := s.Cfg()
 	if err != nil {
@@ -160,8 +174,40 @@ func (s *Server) editorFor(cfg *config.Config) *filezone.Editor {
 	}
 	return &filezone.Editor{
 		NamedConf: cfg.NamedConf, DNSServer: cfg.DNSServer,
-		Editable: cfg.EditableZones, Keep: cfg.HistoryKeep,
+		Editable: zonemgr.EditableZones(cfg.EditableZones, cfg.ManagedInclude), Keep: cfg.HistoryKeep,
 	}
+}
+
+// processZone creates or deletes a managed zone. The helper re-derives
+// everything from ITS config (include, zone dir, named.conf): the request
+// names only the zone and its nameservers, and zonemgr re-validates both.
+func (s *Server) processZone(req Request) Response {
+	cfg, err := s.Cfg()
+	if err != nil {
+		return Response{Error: "config: " + err.Error()}
+	}
+	m := zonemgr.ForConfig(cfg)
+	if s.zoneMgr != nil {
+		m = s.zoneMgr(cfg)
+	}
+	var p *zonemgr.Plan
+	switch {
+	case req.Action == "zone-create" && req.Apply:
+		p, err = m.Create(zonemgr.CreateRequest{Zone: req.Zone, NS: req.NS})
+	case req.Action == "zone-create":
+		p, err = m.PlanCreate(zonemgr.CreateRequest{Zone: req.Zone, NS: req.NS})
+	case req.Apply:
+		p, err = m.Delete(req.Zone)
+	default:
+		p, err = m.PlanDelete(req.Zone)
+	}
+	if err != nil {
+		return Response{Error: err.Error(), Refused: zonemgr.IsRefused(err)}
+	}
+	if req.Apply {
+		log.Printf("zoned-audit: %s zone=%s file=%s moved_to=%s", req.Action, p.Zone, p.File, p.MovedTo)
+	}
+	return Response{OK: true, File: p.File, Stanza: p.Stanza, Content: p.Content, Parent: p.Parent, MovedTo: p.MovedTo}
 }
 
 func writeResp(conn net.Conn, r Response) {

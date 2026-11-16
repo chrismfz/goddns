@@ -2,13 +2,15 @@
 Description=goddns privileged zone-edit helper (file-as-truth static zones)
 Documentation=https://github.com/chrismfz/goddns
 After=named.service
-# Optional companion to goddns.service — only needed if you edit static zones
-# from the ADMIN WEB UI. CLI editing (run as root) never needs this.
+# Optional companion to goddns.service — only needed if you edit static zones,
+# or create/delete managed zones, from the ADMIN WEB UI or the API. The CLI
+# (run as root) never needs this.
 
 [Service]
 Type=simple
-# Runs as ROOT on purpose: it writes the zone files BIND serves and runs
-# `rndc reload`, so the unprivileged goddns daemon never has to. The daemon
+# Runs as ROOT on purpose: it writes the zone files BIND serves and the
+# managed include, and runs `rndc reload` / `rndc reconfig`, so the
+# unprivileged goddns daemon never has to. The daemon
 # talks to it over /run/goddns/zoned.sock (root:goddns 0660) and sends only
 # structured record ops, which this helper re-validates against its OWN config.
 ExecStart=/usr/bin/goddns zoned -config /etc/goddns/goddns.conf

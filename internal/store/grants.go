@@ -42,6 +42,12 @@ func (s *Store) GrantDel(user, zone string) error {
 	return nil
 }
 
+// GrantsDelZone drops every grant on zone (the zone was deleted).
+func (s *Store) GrantsDelZone(zone string) error {
+	_, err := s.db.Exec(`DELETE FROM zone_grants WHERE zone = ?`, normGrantZone(zone))
+	return err
+}
+
 // GrantsFor returns the zones granted to user, sorted.
 func (s *Store) GrantsFor(user string) ([]string, error) {
 	rows, err := s.db.Query(`SELECT zone FROM zone_grants WHERE user = ? ORDER BY zone`, user)

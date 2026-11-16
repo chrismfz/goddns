@@ -204,6 +204,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleProxyDel(w, r, a)
 	case "/users":
 		h.handleUsers(w, r, a)
+	case "/zones/create":
+		h.handleZoneCreate(w, r, a)
+	case "/zones/delete":
+		h.handleZoneDelete(w, r, a)
 	case "/account":
 		h.handleAccount(w, r, a)
 	case "/account/apitoken":
@@ -217,6 +221,7 @@ type zoneRow struct {
 	View, Name, Kind, File, Status, Keys string
 	NS, NSClass                          string // on-demand live NS-serial verdict
 	Dynamic                              bool
+	Managed                              bool // in the managed include: goddns may delete it
 }
 type keyRow struct{ Name, Algorithm string }
 type findRow struct{ Mark, Class, Zone, Message string }
@@ -447,7 +452,7 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, a service.
 		if z.View != "" {
 			hasViews = true
 		}
-		zr[i] = zoneRow{View: z.View, Name: z.Name, Kind: z.Kind(), Dynamic: z.Dynamic}
+		zr[i] = zoneRow{View: z.View, Name: z.Name, Kind: z.Kind(), Dynamic: z.Dynamic, Managed: zl.Managed[z.Name]}
 		if a.Role == service.RoleAdmin { // file paths and key names are server detail
 			zr[i].File, zr[i].Status = z.Path, named.FileStatus(z.Path, z.Dynamic)
 			zr[i].Keys = strings.Join(z.UpdateKeys, ", ")
@@ -476,7 +481,9 @@ func (h *Handler) handleZones(w http.ResponseWriter, r *http.Request, a service.
 
 	render(w, zonesTmpl, map[string]any{
 		"Version": h.version, "User": user, "Active": "zones", "Directory": zl.Directory, "Restricted": a.Role != service.RoleAdmin,
-		"Zones": zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
+		"CSRF": h.csrfFor(user), "ZoneNS": strings.Join(h.cfg().ZoneNS, ", "), "Assignable": h.assignable(a),
+		"ManagedInclude": h.cfg().ManagedInclude,
+		"Zones":          zr, "Keys": kr, "Findings": fr, "HasViews": hasViews,
 		"Builtin": zl.Builtin, "Checked": check,
 	})
 }

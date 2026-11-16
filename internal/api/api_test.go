@@ -17,9 +17,11 @@ import (
 	"github.com/chrismfz/goddns/internal/named"
 	"github.com/chrismfz/goddns/internal/service"
 	"github.com/chrismfz/goddns/internal/store"
+	"github.com/chrismfz/goddns/internal/zonemgr"
 )
 
 type fixture struct {
+	cfg   *config.Config
 	svc   *service.Service
 	st    *store.Store
 	h     http.Handler
@@ -44,14 +46,14 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { st.Close() })
 	svc := service.New(func() *config.Config { return cfg }, st)
-	inv := &named.Inventory{Zones: []named.Zone{
-		{Name: "example.com", Type: "master", Path: "/x/example.com.db"},
-		{Name: "other.net", Type: "master", Path: "/x/other.net.db"},
+	inv := &named.Inventory{Zones: []named.Zone{ // dynamic: DDNS lives in them
+		{Name: "example.com", Type: "master", Path: "/x/example.com.db", Dynamic: true},
+		{Name: "other.net", Type: "master", Path: "/x/other.net.db", Dynamic: true},
 	}}
 	svc.Inv = func(*config.Config) (*named.Inventory, error) { return inv, nil }
 	var lines []string
 	svc.Logf = func(f string, a ...any) { lines = append(lines, fmt.Sprintf(f, a...)) }
-	f := &fixture{svc: svc, st: st, audit: &lines, peer: "203.0.113.10"}
+	f := &fixture{cfg: cfg, svc: svc, st: st, audit: &lines, peer: "203.0.113.10"}
 	f.h = New(svc, func(r *http.Request) net.IP { return net.ParseIP(f.peer) }).Mux()
 	return f
 }
@@ -356,5 +358,41 @@ func TestAPITokenCapAndUserErrorText(t *testing.T) {
 	code, out := f.do(t, "GET", "/api/v1/zones", tok, "")
 	if code != 500 || strings.Contains(fmt.Sprint(out["error"]), "secret detail") {
 		t.Fatalf("user-facing internal error: %d %v", code, out)
+	}
+}
+
+func TestAPIZoneCreateDelete(t *testing.T) {
+	f := newFixture(t)
+	dir := t.TempDir()
+	nc, inc := filepath.Join(dir, "named.conf"), filepath.Join(dir, "goddns-zones.conf")
+	os.WriteFile(nc, []byte("include \""+inc+"\";\n"), 0o644)
+	f.cfg.ManagedInclude = inc
+	inv := &named.Inventory{Zones: []named.Zone{{Name: "example.com", Type: "master"}}}
+	f.svc.ZoneMgr = func(*config.Config) *zonemgr.Manager {
+		return &zonemgr.Manager{NamedConf: nc, Include: inc, ZoneDir: filepath.Join(dir, "z"), LockDir: filepath.Join(dir, "l"),
+			Inv: func() (*named.Inventory, error) { return inv, nil }, CheckZone: func(string, []byte) error { return nil },
+			CheckConf: func() error { return nil }, Reconfig: func() error { return nil }, Verify: func(string) error { return nil }}
+	}
+	f.svc.UserAdd(admin, "max", "maxpass123", service.RoleAdmin)
+	_, tok, _ := f.svc.APITokenCreate(admin, "max", "zones", []string{service.ScopeZonesAdmin}, nil, 0)
+	code, out := f.do(t, "POST", "/api/v1/zones", tok, `{"zone":"new.example.org","ns":["ns1.example.com"],"dry_run":true}`)
+	if code != 200 || out["applied"] != false || !strings.Contains(fmt.Sprint(out["content"]), "SOA") {
+		t.Fatalf("dry run: %d %v", code, out)
+	}
+	if code, out := f.do(t, "POST", "/api/v1/zones", tok, `{"zone":"new.example.org","ns":["ns1.example.com"]}`); code != 201 {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	// a second token: the zone endpoints spend from the 1/s (burst 3) budget
+	_, tok, _ = f.svc.APITokenCreate(admin, "max", "zones2", []string{service.ScopeZonesAdmin}, nil, 0)
+	if code, out := f.do(t, "DELETE", "/api/v1/zones/example.com", tok, ""); code != 400 || !strings.Contains(fmt.Sprint(out["error"]), "defined elsewhere") {
+		t.Fatalf("delete an operator zone: %d %v", code, out)
+	}
+	if code, _ := f.do(t, "DELETE", "/api/v1/zones/new.example.org", tok, ""); code != 200 {
+		t.Fatalf("delete: %d", code)
+	}
+	// a user-role token can't hold zones:admin
+	f.svc.UserAdd(admin, "ned", "nedpass123", service.RoleUser)
+	if _, _, err := f.svc.APITokenCreate(admin, "ned", "z", []string{service.ScopeZonesAdmin}, nil, 0); !service.IsInvalid(err) {
+		t.Fatalf("zones:admin for a user: %v", err)
 	}
 }

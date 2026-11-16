@@ -88,6 +88,8 @@ func (h *Handler) Mux() http.Handler {
 	route("GET /api/v1/me", "", h.me)
 	route("GET /api/v1/zones", service.ScopeZonesRead, h.zones)
 	route("GET /api/v1/zones/{zone}", service.ScopeZonesRead, h.zone, heavy)
+	route("POST /api/v1/zones", service.ScopeZonesAdmin, h.zoneCreate, heavy)
+	route("DELETE /api/v1/zones/{zone}", service.ScopeZonesAdmin, h.zoneDelete, heavy)
 	route("GET /api/v1/zones/{zone}/history", service.ScopeZonesRead, h.history)
 	route("POST /api/v1/zones/{zone}/records", service.ScopeRecordsWrite, h.record, heavy)
 	route("POST /api/v1/zones/{zone}/restore", service.ScopeRecordsWrite, h.restore, heavy)
@@ -336,6 +338,42 @@ func (h *Handler) zone(w http.ResponseWriter, r *http.Request, c ctxActor) {
 		out["kind"], out["dynamic"] = v.Conf.Kind(), v.Conf.Dynamic
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// zoneCreate: {"zone":"example.org","ns":["ns1.example.com"],"assign_to":"alice","dry_run":true}
+func (h *Handler) zoneCreate(w http.ResponseWriter, r *http.Request, c ctxActor) {
+	var in struct {
+		Zone     string   `json:"zone"`
+		NS       []string `json:"ns"`
+		AssignTo string   `json:"assign_to"`
+		DryRun   bool     `json:"dry_run"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	p, err := h.svc.ZoneCreate(c.a, in.Zone, in.NS, in.AssignTo, !in.DryRun)
+	if err != nil {
+		writeOpErr(w, c, err)
+		return
+	}
+	code := http.StatusCreated
+	if in.DryRun {
+		code = http.StatusOK
+	}
+	writeJSON(w, code, map[string]any{"zone": p.Zone, "applied": !in.DryRun, "file": p.File, "stanza": p.Stanza,
+		"content": p.Content, "parent": p.Parent, "shadowed": p.Shadowed, "delegated": p.Delegated, "assigned_to": p.AssignedTo,
+		"warning": p.Warning})
+}
+
+// zoneDelete: DELETE /api/v1/zones/{zone}[?dry_run=1] — managed zones only.
+func (h *Handler) zoneDelete(w http.ResponseWriter, r *http.Request, c ctxActor) {
+	dry := r.URL.Query().Get("dry_run") == "1"
+	p, err := h.svc.ZoneDelete(c.a, r.PathValue("zone"), !dry)
+	if err != nil {
+		writeOpErr(w, c, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"zone": p.Zone, "applied": !dry, "file": p.File, "stanza": p.Stanza, "moved_to": p.MovedTo})
 }
 
 func (h *Handler) history(w http.ResponseWriter, r *http.Request, c ctxActor) {
